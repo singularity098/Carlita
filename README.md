@@ -10,6 +10,9 @@ touchscreen.
   flow from each plugin into the next, and parallel blocks split the signal
   into lanes (one can stay dry) and mix them back together.
 * Add, remove, reorder, split and bypass plugins while audio keeps running.
+* Tracks are tabs in the top bar, which Carlita draws itself in place of the
+  window manager's title bar. In fullscreen, swipe down from the **top** edge
+  to bring it in.
 * Swipe in from the **left** edge for the chain and from the **right** edge
   for options (audio, presets, MIDI learn, WiFi, Bluetooth, display, system).
 * Plugin editors fill the screen, and small fixed-size editors are scaled up.

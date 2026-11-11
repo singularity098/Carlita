@@ -25,6 +25,8 @@ slint = { version = "1.14", default-features = false, features = [
     "renderer-femtovg",
     "renderer-software",
     "accessibility",
+    # Moving and resizing the frameless window with the window manager.
+    "unstable-winit-030",
 ] }
 
 [build-dependencies]

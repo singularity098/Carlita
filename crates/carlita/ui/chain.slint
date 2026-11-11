@@ -1,7 +1,8 @@
-// Left sidebar: the tracks and the chain of the selected track.
+// Left sidebar: the chain of the selected track (tracks are picked in the
+// top bar).
 import { Theme } from "theme.slint";
 import { BigButton, BigSlider, Chip, StereoMeter } from "widgets.slint";
-import { SlotItem, TrackItem } from "types.slint";
+import { SlotItem } from "types.slint";
 
 component ChainRow inherits Rectangle {
     in property <SlotItem> item;
@@ -275,7 +276,7 @@ export component ChainPanel inherits Rectangle {
     in property <string> latency;
     in property <string> preset-name;
     in property <string> undo-text;
-    in property <[TrackItem]> tracks;
+    in property <string> track-name;
     in property <string> track-input;
     in property <bool> track-muted;
     in property <float> track-volume;
@@ -297,8 +298,6 @@ export component ChainPanel inherits Rectangle {
     callback add-plugin;
     callback undo;
     callback close;
-    callback select-track(int);
-    callback add-track;
     callback rename-track;
     callback delete-track;
     callback cycle-input;
@@ -320,15 +319,31 @@ export component ChainPanel inherits Rectangle {
         // Header: title, meters and load. Swiping it left closes the panel.
         header := Rectangle {
             height: 96px;
+            TouchArea {
+                // Swipe-back target under the title (so the title stays tappable),
+                // leaving the meters' area free.
+                width: parent.width - 80px;
+                x: 0;
+                moved => {
+                    if self.mouse-x - self.pressed-x < -60px {
+                        root.close();
+                    }
+                }
+            }
             HorizontalLayout {
                 spacing: 10px;
                 VerticalLayout {
                     alignment: center;
-                    Text {
-                        text: "Chain";
+                    // The track's name; tap to rename it.
+                    title := Text {
+                        text: root.track-name + "  ✎";
                         font-size: Theme.font-title;
                         font-weight: 700;
-                        color: Theme.text;
+                        color: title-touch.pressed ? Theme.accent : Theme.text;
+                        overflow: elide;
+                        title-touch := TouchArea {
+                            clicked => { root.rename-track(); }
+                        }
                     }
                     Text {
                         text: root.preset-name == "" ? "Unsaved preset" : root.preset-name;
@@ -353,37 +368,9 @@ export component ChainPanel inherits Rectangle {
                     label: "OUT";
                 }
             }
-            TouchArea {
-                // Leave the meters' area free; this is a swipe-back target.
-                width: parent.width - 80px;
-                x: 0;
-                moved => {
-                    if self.mouse-x - self.pressed-x < -60px {
-                        root.close();
-                    }
-                }
-            }
         }
 
-        // Track tabs.
-        Flickable {
-            height: 44px;
-            content-width: tabs.preferred-width;
-            tabs := HorizontalLayout {
-                spacing: 6px;
-                for t in root.tracks: Chip {
-                    text: t.muted ? t.name + "  (muted)" : t.name;
-                    selected: t.selected;
-                    clicked => { root.select-track(t.id); }
-                }
-                Chip {
-                    text: "+ Track";
-                    clicked => { root.add-track(); }
-                }
-            }
-        }
-
-        // The selected track: input, mute, volume, level, rename, delete.
+        // The selected track: input, mute, volume, level, delete.
         HorizontalLayout {
             height: Theme.touch;
             spacing: 6px;
@@ -418,19 +405,6 @@ export component ChainPanel inherits Rectangle {
                 left: root.track-left;
                 right: root.track-right;
                 label: "";
-            }
-            Rectangle {
-                width: 40px;
-                Text {
-                    text: "✎";
-                    font-size: 20px;
-                    color: rename-touch.pressed ? Theme.accent : Theme.text-dim;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-                rename-touch := TouchArea {
-                    clicked => { root.rename-track(); }
-                }
             }
             Rectangle {
                 width: 40px;

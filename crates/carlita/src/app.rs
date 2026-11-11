@@ -114,6 +114,9 @@ pub struct App {
     drop_row: Option<usize>,
     /// Where the next plugin picked in the browser goes.
     add_target: Option<Location>,
+    /// The plugin last shown for each track, shown again when the track is
+    /// picked in the track bar.
+    track_selection: HashMap<TrackId, SlotId>,
     runtime: HashMap<SlotId, SlotRuntime>,
     mappings: Vec<MidiMapping>,
     selected: Option<SlotId>,
@@ -246,6 +249,7 @@ impl App {
             rows: Vec::new(),
             drop_row: None,
             add_target: None,
+            track_selection: HashMap::new(),
             runtime: HashMap::new(),
             mappings: Vec::new(),
             selected: None,
@@ -400,9 +404,45 @@ impl App {
         });
         on!(ui, on_undo_remove, |a| a.undo_remove());
         on!(ui, on_open_browser, |a| a.open_browser(None));
-        on!(ui, on_select_track, |a, id: i32| {
-            a.view_track = TrackId(id as u64);
-            a.refresh_slots();
+        on!(ui, on_select_track, |a, id: i32| a
+            .select_track(TrackId(id as u64)));
+        on!(ui, on_start_drag, |a| {
+            a.with_winit(|w| {
+                let _ = w.drag_window();
+            })
+        });
+        on!(ui, on_start_resize, |a, dir: SharedString| {
+            use slint::winit_030::winit::window::ResizeDirection as D;
+            let d = match dir.as_str() {
+                "n" => D::North,
+                "s" => D::South,
+                "e" => D::East,
+                "w" => D::West,
+                "ne" => D::NorthEast,
+                "nw" => D::NorthWest,
+                "se" => D::SouthEast,
+                _ => D::SouthWest,
+            };
+            a.with_winit(|w| {
+                let _ = w.drag_resize_window(d);
+            })
+        });
+        on!(ui, on_minimize_window, |a| a
+            .ui()
+            .window()
+            .set_minimized(true));
+        on!(ui, on_toggle_maximize, |a| {
+            let ui = a.ui();
+            let m = !ui.window().is_maximized();
+            if m {
+                a.remember_window_size();
+            }
+            ui.window().set_maximized(m);
+            ui.set_window_maximized(m);
+        });
+        // Closing saves the window size and settings in `shutdown`.
+        ui.on_close_window(|| {
+            let _ = slint::quit_event_loop();
         });
         on!(ui, on_add_track, |a| {
             a.view_track = a.rig.add_track(None);
@@ -757,6 +797,12 @@ impl App {
             self.undo = None;
             self.ui().set_undo_text(ss(""));
         }
+        // The window manager can maximize or restore the window too.
+        let ui = self.ui();
+        let maximized = ui.window().is_maximized();
+        if ui.get_window_maximized() != maximized {
+            ui.set_window_maximized(maximized);
+        }
         if self.toast_at.is_some_and(|t| t.elapsed() > TOAST_TIMEOUT) {
             self.toast_at = None;
             self.ui().set_toast(ss(""));
@@ -773,6 +819,27 @@ impl App {
                 });
             }
         }
+    }
+
+    fn with_winit(&self, f: impl FnOnce(&slint::winit_030::winit::window::Window)) {
+        use slint::winit_030::WinitWindowAccessor;
+        self.ui().window().with_winit_window(f);
+    }
+
+    /// Shows a track: its chain in the panel and the plugin last shown for
+    /// it in the main area.
+    fn select_track(&mut self, id: TrackId) {
+        if self.rig.track(id).is_none() {
+            return;
+        }
+        self.view_track = id;
+        let slot = self
+            .track_selection
+            .get(&id)
+            .copied()
+            .filter(|s| self.rig.track_of(*s) == Some(id));
+        self.select(slot);
+        self.refresh_slots();
     }
 
     fn toast(&mut self, text: impl Into<String>, error: bool) {
@@ -1087,6 +1154,21 @@ impl App {
             .map_or([0.0; 2], |(_, l)| *l);
         ui.set_track_left(level[0]);
         ui.set_track_right(level[1]);
+        // Level bars on the track tabs; only redraw tabs whose level moved.
+        for i in 0..self.tracks_model.row_count() {
+            let Some(mut item) = self.tracks_model.row_data(i) else {
+                continue;
+            };
+            let l = m
+                .tracks
+                .iter()
+                .find(|(t, _)| t.0 as i32 == item.id)
+                .map_or(0.0, |(_, l)| l[0].max(l[1]));
+            if (item.level - l).abs() > 0.02 {
+                item.level = l;
+                self.tracks_model.set_row_data(i, item);
+            }
+        }
         let mut changed = false;
         for (slot, lat) in &m.latencies {
             if let Some(r) = self.runtime.get_mut(slot) {
@@ -1217,6 +1299,7 @@ impl App {
                 name: ss(&t.name),
                 selected: t.id == self.view_track,
                 muted: t.muted,
+                level: self.track_level(t.id),
             })
             .collect();
         if tracks.len() == self.tracks_model.row_count() {
@@ -1230,12 +1313,21 @@ impl App {
         }
         let ui = self.ui();
         if let Some(t) = self.rig.track(self.view_track) {
+            ui.set_track_name(ss(&t.name));
             ui.set_track_input(ss(t.input.label()));
             ui.set_track_muted(t.muted);
             ui.set_track_volume(t.volume);
             ui.set_track_volume_text(ss(volume_text(t.volume)));
         }
         ui.set_preset_name(ss(self.settings.current_preset.clone().unwrap_or_default()));
+    }
+
+    fn track_level(&self, id: TrackId) -> f32 {
+        self.meters
+            .tracks
+            .iter()
+            .find(|(t, _)| *t == id)
+            .map_or(0.0, |(_, l)| l[0].max(l[1]))
     }
 
     fn open_browser(&mut self, target: Option<Location>) {
@@ -1436,8 +1528,9 @@ impl App {
                 }
             }
         }
-        if let Some(t) = slot.and_then(|id| self.rig.track_of(id)) {
+        if let Some((id, t)) = slot.and_then(|id| Some((id, self.rig.track_of(id)?))) {
             self.view_track = t;
+            self.track_selection.insert(t, id);
         }
         if self.selected != slot {
             self.hide_editor();
@@ -2151,7 +2244,10 @@ impl App {
 
     fn remember_window_size(&mut self) {
         let ui = self.ui();
-        if self.settings.display.fullscreen || ui.window().is_fullscreen() {
+        if self.settings.display.fullscreen
+            || ui.window().is_fullscreen()
+            || ui.window().is_maximized()
+        {
             return;
         }
         let size = ui.window().size().to_logical(ui.window().scale_factor());

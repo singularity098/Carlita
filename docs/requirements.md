@@ -31,13 +31,22 @@ The engine runs several tracks at once, each a chain that may contain parallel b
 - Show input and output level meters and a CPU / DSP load readout, as well as PDC per plugin
 - Allow the user to MIDI learn to enable or bypass certain plugins
 
+## Top bar: tracks and window controls
+
+The tracks are picked from a bar along the top of the screen, which also holds the window controls Carlita draws itself.
+
+- Browser-style tabs, one per track, with a level bar and a mute badge, and a "+" tab to add a track
+- Tapping a tab shows that track's chain and the plugin last shown for it; tapping the selected tab opens the chain sidebar
+- Windowed: the bar is docked at the top and replaces the window manager's title bar (drag to move, double-tap to maximize, fullscreen / minimize / maximize / close buttons, resize from the window border)
+- Fullscreen: the bar is hidden and slides down with a swipe from the top edge (or the tab that shows while the mouse hovers there); it closes with a swipe up, a tap outside, or after picking a track
+
 ## Left sidebar: the chain
 
 Swiping in from the left edge opens the chain, where plugins are added, removed, reordered and selected.
 
 - Opens with a swipe from a host-owned strip on the left screen edge (works even over a plugin editor)
 - Also opens from a visible tab or button, for windowed mode and mouse use, but these are only visible when the mouse is hovering to the side so that VST can be displayed in 100% fullscreen normally
-- Tabs for the tracks, with add, rename and delete; the selected track's input, mute and volume
+- The selected track's name (tap to rename), input, mute, volume and delete
 - Lists the chain in order, parallel lanes indented; tap a plugin to show its editor in the main area
 - Drag a plugin to reorder it, including into and out of parallel lanes; split a plugin into a parallel block and add or remove lanes
 - Swipe a plugin sideways or long-press it to remove it, with a short undo

@@ -84,7 +84,8 @@
 | Crash/hang isolation | Done with bridges. The crash is detected from Carla's error callbacks. |
 | Level meters, DSP load, per-plugin PDC | Done. The meters read the input and output buses, and each track's bus. Total latency uses the longest path. |
 | MIDI learn for bypass | Done: toggle or momentary, CC, note or program change, saved per preset |
-| Left sidebar: edge swipe, hover tab, track tabs, list, drag reorder (into and out of lanes), swipe/long-press remove with undo, browser with search/format/category/favorites, bypass, close gestures, 48 px+ targets | Done |
+| Top bar: track tabs with levels, app-drawn window controls (no WM decorations), docked when windowed, swipe-down from the top edge in fullscreen | Done. Moving and resizing go through winit's `drag_window` / `drag_resize_window`, so the window manager still snaps the window. |
+| Left sidebar: edge swipe, hover tab, list, drag reorder (into and out of lanes), swipe/long-press remove with undo, browser with search/format/category/favorites, bypass, close gestures, 48 px+ targets | Done |
 | Right sidebar: audio, presets, WiFi (NetworkManager), Bluetooth (BlueZ), display, system, on-screen keyboard toggle | Done. WiFi and Bluetooth are untested on real hardware. |
 | On-screen text keyboard (WiFi passwords, names) | Done |
 | Virtual piano → plugins | Done. Notes go to the selected plugin if it takes MIDI, otherwise to the first plugin that does. Single touch only. |

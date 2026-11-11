@@ -1,0 +1,240 @@
+// Top bar: the track tabs, and the window controls Carlita draws itself
+// (the window has no decorations from the window manager). Docked at the
+// top in windowed mode; in fullscreen it slides in from the top edge.
+import { Theme } from "theme.slint";
+import { TrackItem } from "types.slint";
+
+component TrackTab inherits Rectangle {
+    in property <TrackItem> item;
+    callback clicked;
+
+    height: 40px;
+    min-width: max(96px, row.preferred-width);
+    horizontal-stretch: 0;
+    border-radius: 10px;
+    background: root.item.selected ? Theme.bg : touch.pressed ? Theme.surface-3 : Theme.surface-2;
+    border-width: 1px;
+    border-color: root.item.selected ? Theme.border : Theme.border.transparentize(40%);
+    opacity: root.item.muted && !root.item.selected ? 0.6 : 1;
+
+    // Selected tab: accent line on top, and the bottom corners hidden so the
+    // tab runs into the area below.
+    if root.item.selected: Rectangle {
+        y: parent.height - 10px;
+        height: 11px;
+        background: Theme.bg;
+    }
+    if root.item.selected: Rectangle {
+        x: 8px;
+        width: parent.width - 16px;
+        y: 0;
+        height: 3px;
+        border-radius: 1.5px;
+        background: Theme.accent;
+    }
+
+    row := HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 10px;
+        alignment: center;
+        Text {
+            text: root.item.name;
+            font-size: Theme.font;
+            font-weight: 600;
+            color: root.item.selected ? Theme.text : Theme.text-dim;
+            vertical-alignment: center;
+            overflow: elide;
+            max-width: 180px;
+        }
+        if root.item.muted: Text {
+            text: "M";
+            font-size: 12px;
+            font-weight: 700;
+            color: Theme.warn;
+            vertical-alignment: center;
+        }
+        if !root.item.muted: Rectangle {
+            width: 28px;
+            height: 5px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 2.5px;
+            background: Theme.surface-3;
+            clip: true;
+            Rectangle {
+                x: 0;
+                width: parent.width * min(1, root.item.level);
+                background: root.item.level >= 0.99 ? Theme.danger : root.item.level > 0.7 ? Theme.warn : Theme.ok;
+            }
+        }
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// A window control, its icon drawn as a path in a 14 × 14 box.
+component WindowButton inherits Rectangle {
+    // SVG path commands for the icon.
+    in property <string> icon;
+    in property <bool> danger;
+    callback clicked;
+    width: 52px;
+    background: touch.pressed ? (root.danger ? Theme.danger : Theme.surface-3.brighter(20%))
+        : touch.has-hover ? (root.danger ? Theme.danger : Theme.surface-3)
+        : transparent;
+    Path {
+        width: 16px;
+        height: 16px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        viewbox-width: 14;
+        viewbox-height: 14;
+        commands: root.icon;
+        fill: transparent;
+        stroke: root.danger && (touch.has-hover || touch.pressed) ? #000 : Theme.text-dim;
+        stroke-width: 1.6px;
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+export component TrackBar inherits Rectangle {
+    in property <[TrackItem]> tracks;
+    in property <bool> fullscreen;
+    in property <bool> maximized;
+    callback tab-clicked(int, bool);
+    callback add-track;
+    // Windowed: start moving the window, or maximize on a double tap.
+    callback start-drag;
+    callback toggle-maximize;
+    callback minimize;
+    callback close-window;
+    callback toggle-fullscreen;
+    // Fullscreen: swipe the bar back up.
+    callback dismiss;
+
+    background: Theme.surface;
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.border;
+    }
+
+    // The empty part of the bar moves the window (windowed) or is swiped up
+    // to hide the bar (fullscreen).
+    TouchArea {
+        mouse-cursor: root.fullscreen ? default : move;
+        pointer-event(e) => {
+            if !root.fullscreen && e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                root.start-drag();
+            }
+        }
+        moved => {
+            if root.fullscreen && self.mouse-y - self.pressed-y < -24px {
+                root.dismiss();
+            }
+        }
+        double-clicked => {
+            if !root.fullscreen {
+                root.toggle-maximize();
+            }
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        spacing: 6px;
+
+        // Logo.
+        Rectangle {
+            width: 28px;
+            Rectangle {
+                width: 24px;
+                height: 24px;
+                y: (parent.height - self.height) / 2;
+                border-radius: 6px;
+                background: Theme.accent;
+                Text {
+                    text: "C";
+                    font-size: 15px;
+                    font-weight: 800;
+                    color: #000;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // Tabs, scrolling sideways when there are many tracks.
+        Flickable {
+            horizontal-stretch: 1;
+            content-width: tabs.preferred-width;
+            interactive: self.content-width > self.width;
+            tabs := HorizontalLayout {
+                padding-left: 6px;
+                padding-top: root.height - 40px;
+                spacing: 6px;
+                alignment: start;
+                for t in root.tracks: TrackTab {
+                    item: t;
+                    clicked => { root.tab-clicked(t.id, t.selected); }
+                }
+                Rectangle {
+                    width: 48px;
+                    height: 40px;
+                    border-radius: 10px;
+                    background: add-touch.pressed ? Theme.surface-3 : transparent;
+                    Text {
+                        text: "+";
+                        font-size: 24px;
+                        color: Theme.text-dim;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    add-touch := TouchArea {
+                        clicked => { root.add-track(); }
+                    }
+                }
+                // Leaves room to grab the bar after the last tab.
+                Rectangle {
+                    width: 40px;
+                }
+            }
+        }
+
+        if !root.fullscreen: HorizontalLayout {
+            WindowButton {
+                icon: "M 2.5 5.5 L 2.5 2.5 L 5.5 2.5 M 8.5 2.5 L 11.5 2.5 L 11.5 5.5 M 11.5 8.5 L 11.5 11.5 L 8.5 11.5 M 5.5 11.5 L 2.5 11.5 L 2.5 8.5";
+                clicked => { root.toggle-fullscreen(); }
+            }
+            WindowButton {
+                icon: "M 3 7.5 L 11 7.5";
+                clicked => { root.minimize(); }
+            }
+            WindowButton {
+                icon: root.maximized ? "M 3 5 L 9 5 L 9 11 L 3 11 Z M 5 5 L 5 3 L 11 3 L 11 9 L 9 9" : "M 3 3 L 11 3 L 11 11 L 3 11 Z";
+                clicked => { root.toggle-maximize(); }
+            }
+            WindowButton {
+                icon: "M 3.5 3.5 L 10.5 10.5 M 10.5 3.5 L 3.5 10.5";
+                danger: true;
+                clicked => { root.close-window(); }
+            }
+        }
+        if root.fullscreen: HorizontalLayout {
+            WindowButton {
+                // Leave fullscreen: corners pointing inwards.
+                icon: "M 5.5 2.5 L 5.5 5.5 L 2.5 5.5 M 11.5 5.5 L 8.5 5.5 L 8.5 2.5 M 8.5 11.5 L 8.5 8.5 L 11.5 8.5 M 2.5 8.5 L 5.5 8.5 L 5.5 11.5";
+                clicked => { root.toggle-fullscreen(); }
+            }
+            WindowButton {
+                icon: "M 3 9 L 7 5 L 11 9";
+                clicked => { root.dismiss(); }
+            }
+        }
+    }
+}

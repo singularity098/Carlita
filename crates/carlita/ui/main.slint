@@ -1,8 +1,9 @@
 // Carlita main window.
 //
-// Layout: a host-owned strip on each screen edge (always ours, so edge
-// swipes work even while a plugin editor fills the screen), the plugin
-// editor in between, and two sidebars that slide over everything.
+// Layout: the track bar on top (docked in a window; in fullscreen it slides
+// down from the top edge), a host-owned strip on each screen edge (always
+// ours, so edge swipes work even while a plugin editor fills the screen),
+// the plugin editor in between, and two sidebars that slide over it.
 import { Theme } from "theme.slint";
 import { BigButton, BigSlider, Toggle, SectionTitle } from "widgets.slint";
 import { SlotItem, TrackItem, PluginItem, ParamItem, WifiItem, BtItem, MappingItem } from "types.slint";
@@ -10,6 +11,7 @@ import { ChainPanel } from "chain.slint";
 import { PluginBrowser } from "browser.slint";
 import { OptionsPanel, Options } from "options.slint";
 import { TextPrompt, Piano, TextUtil } from "keyboards.slint";
+import { TrackBar } from "trackbar.slint";
 
 export { Theme, Options, TextUtil, SlotItem, TrackItem, PluginItem, ParamItem, WifiItem, BtItem, MappingItem }
 
@@ -69,8 +71,77 @@ component EdgeStrip inherits Rectangle {
     }
 }
 
+// The strip along the top edge in fullscreen: swipe down (or tap the tab
+// that shows while the mouse hovers it) to bring in the track bar.
+component TopStrip inherits Rectangle {
+    in property <length> bar-height;
+    callback drag(float);
+    callback release(bool);
+    callback tap;
+
+    property <float> amount: 0;
+
+    tab := Rectangle {
+        visible: strip.has-hover || tab-touch.has-hover;
+        width: 120px;
+        height: 36px;
+        x: (root.width - self.width) / 2;
+        y: 0;
+        border-radius: 10px;
+        background: tab-touch.pressed ? Theme.accent : Theme.surface-3;
+        opacity: 0.92;
+        Text {
+            text: "Tracks";
+            font-size: Theme.font-small;
+            font-weight: 600;
+            color: tab-touch.pressed ? #000 : Theme.text;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        tab-touch := TouchArea {
+            clicked => { root.tap(); }
+        }
+    }
+
+    strip := TouchArea {
+        height: root.height;
+        y: 0;
+        moved => {
+            root.amount = max(0, min(1, (self.mouse-y - self.pressed-y) / root.bar-height));
+            root.drag(root.amount);
+        }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
+                if abs(self.mouse-y - self.pressed-y) < 4px && e.kind == PointerEventKind.up && e.button == PointerEventButton.left {
+                    root.tap();
+                } else {
+                    root.release(root.amount > 0.33);
+                }
+                root.amount = 0;
+            }
+        }
+    }
+}
+
+// An invisible handle on the window border that resizes the window.
+component ResizeHandle inherits TouchArea {
+    in property <string> direction;
+    callback start(string);
+    mouse-cursor: root.direction == "n" || root.direction == "s" ? ns-resize
+        : root.direction == "e" || root.direction == "w" ? ew-resize
+        : root.direction == "nw" || root.direction == "se" ? nwse-resize
+        : nesw-resize;
+    pointer-event(e) => {
+        if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+            root.start(root.direction);
+        }
+    }
+}
+
 export component MainWindow inherits Window {
     title: "Carlita";
+    // Carlita draws its own title bar (the track bar).
+    no-frame: true;
     background: Theme.bg;
     min-width: 800px;
     min-height: 480px;
@@ -87,6 +158,14 @@ export component MainWindow inherits Window {
     property <bool> left-dragging;
     property <bool> right-dragging;
     property <length> left-width: min(460px, root.width * 0.9);
+
+    // Track bar: docked in a window; in fullscreen 0 = hidden, 1 = shown.
+    in property <bool> window-maximized;
+    in-out property <float> top-pos: 0;
+    property <bool> top-dragging;
+    property <length> bar-height: 52px;
+    property <bool> docked: !Options.fullscreen;
+    property <length> top-inset: root.docked ? root.bar-height : 0;
     property <length> right-width: min(720px, root.width * 0.92);
 
     // Chain.
@@ -103,6 +182,7 @@ export component MainWindow inherits Window {
 
     // Tracks.
     in property <[TrackItem]> tracks;
+    in property <string> track-name;
     in property <string> track-input;
     in property <bool> track-muted;
     in property <float> track-volume: 1;
@@ -160,6 +240,11 @@ export component MainWindow inherits Window {
     callback remove-lane(int);
     callback add-to-lane(int);
     callback select-track(int);
+    callback start-drag;
+    callback start-resize(string);
+    callback minimize-window;
+    callback toggle-maximize;
+    callback close-window;
     callback add-track;
     callback rename-track;
     callback delete-track;
@@ -185,9 +270,11 @@ export component MainWindow inherits Window {
     callback options-page(int);
     callback sidebar-changed(bool, bool);
 
-    function open-left() { root.left-pos = 1; root.right-pos = 0; root.sidebar-changed(true, false); }
+    function open-left() { root.left-pos = 1; root.right-pos = 0; root.top-pos = 0; root.sidebar-changed(true, false); }
+    function open-top() { root.top-pos = 1; root.left-pos = 0; root.right-pos = 0; root.sidebar-changed(false, false); }
+    function close-top() { root.top-pos = 0; }
     function close-left() { root.left-pos = 0; root.sidebar-changed(false, root.right-pos > 0); }
-    function open-right() { root.right-pos = 1; root.left-pos = 0; root.sidebar-changed(false, true); }
+    function open-right() { root.right-pos = 1; root.left-pos = 0; root.top-pos = 0; root.sidebar-changed(false, true); }
     function close-right() { root.right-pos = 0; root.sidebar-changed(root.left-pos > 0, false); }
 
     forward-focus: keys;
@@ -199,6 +286,7 @@ export component MainWindow inherits Window {
             }
             if e.text == Key.Escape {
                 if root.browser-open { root.browser-open = false; return accept; }
+                if root.top-pos > 0 { root.close-top(); return accept; }
                 if root.left-pos > 0 { root.close-left(); return accept; }
                 if root.right-pos > 0 { root.close-right(); return accept; }
             }
@@ -209,9 +297,9 @@ export component MainWindow inherits Window {
     // ------------------------------------------------------------ main area
     editor-area := Rectangle {
         x: root.strip-width;
-        y: 0;
+        y: root.top-inset;
         width: root.width - 2 * root.strip-width;
-        height: root.height - root.keyboard-height;
+        height: root.height - root.top-inset - root.keyboard-height;
         clip: true;
         changed width => { root.area-resized(); }
         changed height => { root.area-resized(); }
@@ -348,8 +436,9 @@ export component MainWindow inherits Window {
     // -------------------------------------------------------- edge strips
     EdgeStrip {
         x: 0;
+        y: root.top-inset;
         width: root.strip-width;
-        height: root.height;
+        height: root.height - root.top-inset;
         icon: "☰";
         panel-width: root.left-width;
         drag(a) => {
@@ -364,8 +453,9 @@ export component MainWindow inherits Window {
     }
     EdgeStrip {
         x: root.width - root.strip-width;
+        y: root.top-inset;
         width: root.strip-width;
-        height: root.height;
+        height: root.height - root.top-inset;
         right-side: true;
         icon: "⚙";
         panel-width: root.right-width;
@@ -380,9 +470,51 @@ export component MainWindow inherits Window {
         tap => { root.open-right(); }
     }
 
+    if !root.docked: TopStrip {
+        x: root.strip-width;
+        y: 0;
+        width: root.width - 2 * root.strip-width;
+        height: root.strip-width;
+        bar-height: root.bar-height;
+        drag(a) => {
+            root.top-dragging = true;
+            root.top-pos = a;
+        }
+        release(open) => {
+            root.top-dragging = false;
+            if open { root.open-top(); } else { root.close-top(); }
+        }
+        tap => { root.open-top(); }
+    }
+
+    // Docked track bar (windowed).
+    if root.docked: TrackBar {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.bar-height;
+        tracks: root.tracks;
+        fullscreen: false;
+        maximized: root.window-maximized;
+        tab-clicked(id, selected) => {
+            if selected { root.open-left(); } else { root.select-track(id); }
+        }
+        add-track => {
+            root.add-track();
+            root.open-left();
+        }
+        start-drag => { root.start-drag(); }
+        toggle-maximize => { root.toggle-maximize(); }
+        minimize => { root.minimize-window(); }
+        close-window => { root.close-window(); }
+        toggle-fullscreen => { root.toggle-fullscreen(); }
+    }
+
     // ------------------------------------------------------------ sidebars
     // Scrim: tap outside, or swipe, to close.
     if root.left-pos > 0 || root.right-pos > 0: Rectangle {
+        y: root.top-inset;
+        height: root.height - root.top-inset;
         background: #000;
         opacity: 0.55 * max(root.left-pos, root.right-pos);
         TouchArea {
@@ -402,8 +534,9 @@ export component MainWindow inherits Window {
     }
 
     ChainPanel {
+        y: root.top-inset;
         width: root.left-width;
-        height: root.height;
+        height: root.height - root.top-inset;
         x: (root.left-pos - 1) * root.left-width;
         visible: root.left-pos > 0;
         animate x { duration: root.left-dragging ? 0ms : Theme.slide; easing: ease-out; }
@@ -417,7 +550,7 @@ export component MainWindow inherits Window {
         preset-name: root.preset-name;
         undo-text: root.undo-text;
         drop-y: root.drop-y;
-        tracks: root.tracks;
+        track-name: root.track-name;
         track-input: root.track-input;
         track-muted: root.track-muted;
         track-volume: root.track-volume;
@@ -436,8 +569,6 @@ export component MainWindow inherits Window {
         add-lane(row) => { root.add-lane(row); }
         remove-lane(row) => { root.remove-lane(row); }
         add-to-lane(row) => { root.add-to-lane(row); }
-        select-track(id) => { root.select-track(id); }
-        add-track => { root.add-track(); }
         rename-track => { root.rename-track(); }
         delete-track => { root.delete-track(); }
         cycle-input => { root.cycle-input(); }
@@ -449,13 +580,47 @@ export component MainWindow inherits Window {
     }
 
     OptionsPanel {
+        y: root.top-inset;
         width: root.right-width;
-        height: root.height;
+        height: root.height - root.top-inset;
         x: root.width - root.right-pos * root.right-width;
         visible: root.right-pos > 0;
         animate x { duration: root.right-dragging ? 0ms : Theme.slide; easing: ease-out; }
         close => { root.close-right(); }
         page-opened(i) => { root.options-page(i); }
+    }
+
+    // Fullscreen: the track bar slides down over everything, with a scrim
+    // below it that closes it on a tap.
+    if !root.docked && root.top-pos > 0: Rectangle {
+        background: #000;
+        opacity: 0.45 * root.top-pos;
+        TouchArea {
+            clicked => { root.close-top(); }
+        }
+    }
+    if !root.docked: TrackBar {
+        x: 0;
+        y: (root.top-pos - 1) * root.bar-height;
+        width: root.width;
+        height: root.bar-height;
+        visible: root.top-pos > 0;
+        animate y { duration: root.top-dragging ? 0ms : Theme.slide; easing: ease-out; }
+        tracks: root.tracks;
+        fullscreen: true;
+        tab-clicked(id, selected) => {
+            root.close-top();
+            if selected { root.open-left(); } else { root.select-track(id); }
+        }
+        add-track => {
+            root.add-track();
+            root.open-left();
+        }
+        toggle-fullscreen => {
+            root.close-top();
+            root.toggle-fullscreen();
+        }
+        dismiss => { root.close-top(); }
     }
 
     // ------------------------------------------------------------- overlays
@@ -557,5 +722,19 @@ export component MainWindow inherits Window {
         TouchArea {
             clicked => { root.toast = ""; }
         }
+    }
+
+    // Window border handles (windowed and not maximized).
+    if root.docked && !root.window-maximized: Rectangle {
+        property <length> b: 5px;
+        property <length> c: 14px;
+        ResizeHandle { direction: "n"; x: parent.c; y: 0; width: root.width - 2 * parent.c; height: parent.b; start(d) => { root.start-resize(d); } }
+        ResizeHandle { direction: "s"; x: parent.c; y: root.height - parent.b; width: root.width - 2 * parent.c; height: parent.b; start(d) => { root.start-resize(d); } }
+        ResizeHandle { direction: "w"; x: 0; y: parent.c; width: parent.b; height: root.height - 2 * parent.c; start(d) => { root.start-resize(d); } }
+        ResizeHandle { direction: "e"; x: root.width - parent.b; y: parent.c; width: parent.b; height: root.height - 2 * parent.c; start(d) => { root.start-resize(d); } }
+        ResizeHandle { direction: "nw"; x: 0; y: 0; width: parent.c; height: parent.c; start(d) => { root.start-resize(d); } }
+        ResizeHandle { direction: "ne"; x: root.width - parent.c; y: 0; width: parent.c; height: parent.c; start(d) => { root.start-resize(d); } }
+        ResizeHandle { direction: "sw"; x: 0; y: root.height - parent.c; width: parent.c; height: parent.c; start(d) => { root.start-resize(d); } }
+        ResizeHandle { direction: "se"; x: root.width - parent.c; y: root.height - parent.c; width: parent.c; height: parent.c; start(d) => { root.start-resize(d); } }
     }
 }
