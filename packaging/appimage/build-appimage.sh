@@ -42,6 +42,16 @@ export LD_LIBRARY_PATH="$APPDIR/usr/lib/carla${LD_LIBRARY_PATH:+:$LD_LIBRARY_PAT
     --desktop-file "$APPDIR/carlita.desktop" --icon-file "$APPDIR/carlita.svg"
 rm -f "$APPDIR"/usr/lib/libjack.so*
 
+# Carla clears LD_LIBRARY_PATH when it starts a plugin bridge, so its own
+# programs and libraries must find the bundled libraries (liblo, libmagic,
+# fluidsynth...) in usr/lib through their RPATH. Carla ships them with only
+# $ORIGIN, which made every bridge fail on machines without those libraries.
+find "$APPDIR/usr/lib/carla" -type f | while read -r f; do
+    file -b "$f" | grep -q '^ELF' || continue
+    rel="$(realpath --relative-to="$(dirname "$f")" "$APPDIR/usr/lib")"
+    patchelf --set-rpath "\$ORIGIN:\$ORIGIN/$rel" "$f"
+done
+
 mkdir -p "$ROOT/dist"
 ARCH=x86_64 "$TOOLS/appimagetool" "$APPDIR" "$ROOT/dist/Carlita-$VERSION-x86_64.AppImage"
 echo "Built dist/Carlita-$VERSION-x86_64.AppImage"

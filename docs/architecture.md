@@ -66,7 +66,7 @@
 | Fullscreen default, windowed, F11, size remembered | Done. Real fullscreen needs a window manager (kiosk setup uses matchbox). |
 | Editor fills the main area, scaling, input mapping, per-plugin setting, native resize | Prototype done. See [editor-scaling.md](editor-scaling.md). |
 | Generic parameter page for plugins without editors | Done |
-| Dark theme, 60 fps sidebar slides that follow the finger | Done |
+| Dark theme, 60 fps sidebar slides that follow the finger | Done. The look and themes are Xythos' (`ui/theme.slint`; the background is `assets/background/`, Jost in `assets/fonts/`). The theme gradients need the GPU renderer (femtovg); the software renderer draws gradient fills without rounded corners. |
 | Kiosk mode | Example systemd and xinit files in `packaging/kiosk/` |
 | AppImage | `packaging/appimage/build-appimage.sh` and a CI job on tags. The full AppImage build has not been tried yet. |
 | CLAP | Needs Carla ≥ 2.6. Ubuntu ships 2.5.8, so bundle a newer Carla in the AppImage. |

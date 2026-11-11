@@ -28,9 +28,9 @@ component ChainRow inherits Rectangle {
         height: root.height - 6px;
         y: 3px;
         border-radius: Theme.radius;
-        background: root.item.selected ? Theme.surface-3 : Theme.surface-2;
-        border-width: root.item.selected ? 2px : 0px;
-        border-color: Theme.accent;
+        background: Theme.surface-2;
+        border-width: root.item.selected ? 2px : 1px;
+        border-color: root.item.selected ? Theme.paint : Theme.border-strong;
         opacity: root.swiping ? max(0.3, 1 - abs(root.swipe) / root.width) : 1;
         animate x { duration: root.swiping ? 0ms : 160ms; easing: ease-out; }
 
@@ -67,7 +67,6 @@ component ChainRow inherits Rectangle {
                     Text {
                         text: root.item.name;
                         font-size: Theme.font;
-                        font-weight: 600;
                         color: root.item.bypassed ? Theme.text-faint : Theme.text;
                         overflow: elide;
                     }
@@ -77,6 +76,7 @@ component ChainRow inherits Rectangle {
                             : root.item.status == "crashed" ? "Crashed · tap to reload"
                             : root.item.format + "  ·  PDC " + root.item.latency + (root.item.midi-learned ? "  ·  MIDI" : "");
                         font-size: Theme.font-small;
+                        font-weight: Theme.regular;
                         color: root.item.status == "failed" || root.item.status == "crashed" ? Theme.danger : Theme.text-dim;
                         overflow: elide;
                     }
@@ -119,11 +119,13 @@ component ChainRow inherits Rectangle {
                 height: Theme.touch;
                 y: (parent.height - self.height) / 2;
                 border-radius: self.width / 2;
-                background: root.item.bypassed ? Theme.surface-3 : Theme.accent;
+                background: root.item.bypassed ? Theme.surface-3 : Theme.paint;
+                border-width: 1px;
+                border-color: root.item.bypassed ? Theme.border-strong : transparent;
                 Text {
                     text: "⏻";
                     font-size: 22px;
-                    color: root.item.bypassed ? Theme.text-faint : #000;
+                    color: root.item.bypassed ? Theme.text-faint : Theme.on-paint;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
@@ -153,7 +155,7 @@ export component ChainPanel inherits Rectangle {
     callback undo;
     callback close;
 
-    background: Theme.surface;
+    background: Theme.popup;
     border-width: 1px;
     border-color: Theme.border;
 
@@ -176,18 +178,19 @@ export component ChainPanel inherits Rectangle {
                     Text {
                         text: "Chain";
                         font-size: Theme.font-title;
-                        font-weight: 700;
                         color: Theme.text;
                     }
                     Text {
                         text: root.preset-name == "" ? "Unsaved preset" : root.preset-name;
                         font-size: Theme.font-small;
+                        font-weight: Theme.regular;
                         color: Theme.accent;
                         overflow: elide;
                     }
                     Text {
                         text: "DSP " + root.dsp-load + "   ·   " + root.latency;
                         font-size: Theme.font-small;
+                        font-weight: Theme.regular;
                         color: Theme.text-dim;
                     }
                 }
@@ -260,7 +263,7 @@ export component ChainPanel inherits Rectangle {
                     width: list.width;
                     height: 4px;
                     border-radius: 2px;
-                    background: Theme.accent;
+                    background: Theme.paint;
                     y: root.drop-index > root.drag-index ? (root.drop-index + 1) * Theme.row - 2px : root.drop-index * Theme.row - 2px;
                 }
             }
@@ -269,7 +272,9 @@ export component ChainPanel inherits Rectangle {
         if root.undo-text != "": Rectangle {
             height: Theme.touch + 8px;
             border-radius: Theme.radius;
-            background: Theme.surface-3;
+            background: Theme.surface-2;
+            border-width: 1px;
+            border-color: Theme.border-strong;
             HorizontalLayout {
                 padding-left: Theme.pad;
                 padding-right: 6px;

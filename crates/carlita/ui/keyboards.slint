@@ -16,11 +16,13 @@ component Key inherits Rectangle {
     min-height: 54px;
     horizontal-stretch: root.wide ? 2 : 1;
     border-radius: 8px;
-    background: touch.pressed || root.active ? Theme.accent : Theme.surface-3;
+    background: touch.pressed || root.active ? Theme.paint : Theme.surface-3;
+    border-width: 1px;
+    border-color: touch.pressed || root.active ? transparent : Theme.border-strong;
     Text {
         text: root.label;
         font-size: Theme.font-large;
-        color: touch.pressed || root.active ? #000 : Theme.text;
+        color: touch.pressed || root.active ? Theme.on-paint : Theme.text;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -39,7 +41,7 @@ export component TextKeyboard inherits Rectangle {
     property <bool> symbols: false;
     callback done;
 
-    background: Theme.surface;
+    background: transparent;
     property <[[string]]> letters: [
         ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
         ["a", "s", "d", "f", "g", "h", "j", "k", "l"],
@@ -113,7 +115,7 @@ export component TextPrompt inherits Rectangle {
     VerticalLayout {
         alignment: end;
         Rectangle {
-            background: Theme.surface;
+            background: Theme.popup;
             border-width: 1px;
             border-color: Theme.border;
             VerticalLayout {
@@ -127,15 +129,14 @@ export component TextPrompt inherits Rectangle {
                         Text {
                             text: root.title;
                             font-size: Theme.font-large;
-                            font-weight: 700;
                             color: Theme.text;
                         }
                         Rectangle {
                             height: Theme.touch;
                             border-radius: Theme.radius;
-                            background: Theme.bg;
+                            background: Theme.surface;
                             border-width: 2px;
-                            border-color: Theme.accent;
+                            border-color: Theme.paint;
                             Text {
                                 x: Theme.pad;
                                 width: parent.width - 2 * Theme.pad;
@@ -180,7 +181,7 @@ export component Piano inherits Rectangle {
     callback note(int, bool);
     callback octave(int);
 
-    background: Theme.surface;
+    background: Theme.popup;
     border-width: 1px;
     border-color: Theme.border;
 
@@ -206,6 +207,7 @@ export component Piano inherits Rectangle {
                 color: Theme.text-dim;
                 horizontal-alignment: center;
                 font-size: Theme.font-small;
+                font-weight: Theme.regular;
             }
             BigButton {
                 text: "Oct −";
@@ -222,7 +224,7 @@ export component Piano inherits Rectangle {
                     x: i * keys.white-w;
                     width: keys.white-w - 2px;
                     border-radius: 4px;
-                    background: wt.pressed ? Theme.accent : #e8e8ea;
+                    background: wt.pressed ? Theme.paint : #d4d4d8;
                     wt := TouchArea {
                         pointer-event(e) => {
                             if e.kind == PointerEventKind.down {
@@ -239,7 +241,9 @@ export component Piano inherits Rectangle {
                     height: parent.height * 0.6;
                     y: 0;
                     border-radius: 4px;
-                    background: bt.pressed ? Theme.accent : #1a1a1d;
+                    background: bt.pressed ? Theme.paint : #0c0c0e;
+                    border-width: 1px;
+                    border-color: Theme.border-strong;
                     bt := TouchArea {
                         pointer-event(e) => {
                             if e.kind == PointerEventKind.down {

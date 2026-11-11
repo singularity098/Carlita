@@ -78,6 +78,7 @@ The app runs fullscreen by default, and small legacy plugin editors can be scale
 The UI is a polished dark theme that responds instantly to touch and never disturbs the audio.
 
 - Dark theme throughout, high contrast and readable on a stage
+- The look is Xythos' (decided 2026-11-11): its very dark background image, every box translucent black over it with hairline grey outlines (black at 50% for what the window shows in its base state, 95% for what appears over it: sidebars, the plugin browser, dialogs, the toast), Jost Light text, and Xythos' themes picked in Display options (Iris, the default, then Ember, Abyss, Phosphor, Synthwave, Gold Leaf, Aurora, Blood Moon, Glacier, Graphite, Oxide). A theme paints the highlights (picked chips, primary buttons, switches, the selected plugin's outline) with its two or three colours, sets the text colours, and adds faint glows (and Phosphor's scanlines). Theme names are stored in the settings: never rename one.
 - Smooth sidebar slide animations at the display's full refresh rate (60 fps or better)
 - Sidebars follow the finger while dragging, then snap open or closed
 - Visible response to a touch within one frame

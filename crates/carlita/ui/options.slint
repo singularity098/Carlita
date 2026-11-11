@@ -87,6 +87,8 @@ export global Options {
     in property <[string]> scaling-options: ["Off", "Fit", "100%", "150%", "200%", "300%"];
     in property <int> input-mode; // 0 synthetic, 1 xtest
     callback set-fullscreen(bool);
+    // Picks a theme by name (Theme.names).
+    callback set-theme(string);
     callback set-brightness(float);
     callback set-default-scaling(int);
     callback set-plugin-scaling(int);
@@ -113,9 +115,9 @@ component ListRow inherits Rectangle {
     callback clicked;
     min-height: Theme.row - 8px;
     border-radius: Theme.radius;
-    background: touch.pressed ? Theme.surface-3 : Theme.surface-2;
-    border-width: root.highlight ? 2px : 0px;
-    border-color: Theme.accent;
+    background: touch.pressed ? Theme.pressed : Theme.surface-2;
+    border-width: root.highlight ? 2px : 1px;
+    border-color: root.highlight ? Theme.paint : touch.has-hover ? Theme.border-hover : Theme.border-strong;
     touch := TouchArea {
         clicked => { root.clicked(); }
     }
@@ -135,6 +137,7 @@ component ListRow inherits Rectangle {
             if root.subtitle != "": Text {
                 text: root.subtitle;
                 font-size: Theme.font-small;
+                font-weight: Theme.regular;
                 color: Theme.text-dim;
                 overflow: elide;
             }
@@ -154,6 +157,7 @@ component ChipGrid inherits Rectangle {
         text: root.empty-text;
         color: Theme.text-faint;
         font-size: Theme.font-small;
+        font-weight: Theme.regular;
         vertical-alignment: center;
     }
     for o[i] in root.options: Chip {
@@ -170,7 +174,9 @@ component AudioPage inherits VerticalLayout {
     spacing: 12px;
     Rectangle {
         border-radius: Theme.radius;
-        background: Options.engine-running ? Theme.surface-2 : Theme.danger.darker(60%);
+        background: Options.engine-running ? Theme.surface-2 : Theme.danger.transparentize(80%);
+        border-width: 1px;
+        border-color: Options.engine-running ? Theme.border-strong : Theme.danger.transparentize(40%);
         height: 86px;
         VerticalLayout {
             padding: Theme.pad;
@@ -178,13 +184,13 @@ component AudioPage inherits VerticalLayout {
                 text: Options.engine-status;
                 color: Theme.text;
                 font-size: Theme.font;
-                font-weight: 600;
                 wrap: word-wrap;
             }
             Text {
                 text: "DSP " + Options.dsp-load + "   ·   latency " + Options.latency + "   ·   xruns " + Options.xruns;
                 color: Theme.text-dim;
                 font-size: Theme.font-small;
+                font-weight: Theme.regular;
             }
         }
     }
@@ -244,7 +250,6 @@ component PresetsPage inherits VerticalLayout {
         text: Options.current-preset == "" ? "Current chain is not saved" : "Current: " + Options.current-preset;
         color: Theme.accent;
         font-size: Theme.font;
-        font-weight: 600;
     }
     HorizontalLayout {
         spacing: 8px;
@@ -436,6 +441,12 @@ component BluetoothPage inherits VerticalLayout {
 
 component DisplayPage inherits VerticalLayout {
     spacing: 12px;
+    SectionTitle { text: "THEME"; }
+    ChipGrid {
+        options: Theme.names;
+        selected: Theme.names[Theme.index];
+        picked(v) => { Options.set-theme(v); }
+    }
     SettingRow {
         label: "Fullscreen";
         detail: "F11 toggles it too";
@@ -510,7 +521,7 @@ export component OptionsPanel inherits Rectangle {
     callback close;
     callback page-opened(int);
 
-    background: Theme.surface;
+    background: Theme.popup;
     border-width: 1px;
     border-color: Theme.border;
 
@@ -528,18 +539,18 @@ export component OptionsPanel inherits Rectangle {
         // Section rail.
         Rectangle {
             width: 92px;
-            background: Theme.bg;
+            background: #00000066;
             VerticalLayout {
                 padding-top: 8px;
                 spacing: 2px;
                 alignment: start;
                 for p[i] in root.pages: Rectangle {
                     height: 76px;
-                    background: i == root.page ? Theme.surface : transparent;
+                    background: i == root.page ? Theme.pressed : transparent;
                     Rectangle {
                         x: 0;
                         width: 4px;
-                        background: i == root.page ? Theme.accent : transparent;
+                        background: i == root.page ? Theme.paint : transparent;
                     }
                     VerticalLayout {
                         alignment: center;
@@ -553,6 +564,7 @@ export component OptionsPanel inherits Rectangle {
                         Text {
                             text: p.label;
                             font-size: 12px;
+                            font-weight: Theme.regular;
                             horizontal-alignment: center;
                             color: i == root.page ? Theme.text : Theme.text-dim;
                         }
@@ -586,7 +598,6 @@ export component OptionsPanel inherits Rectangle {
                 Text {
                     text: root.pages[root.page].label;
                     font-size: Theme.font-title;
-                    font-weight: 700;
                     color: Theme.text;
                 }
                 if root.page == 0: AudioPage { }
