@@ -1,10 +1,10 @@
-// Carlita's look, taken from Xythos: the very dark background image, every box
-// translucent black over it with a hairline grey outline, and a theme that
-// paints the highlights (outlines, fills, toggles) with two or three colours.
+// Carlita's look: a flat dark background, every box translucent black over it
+// with a hairline grey outline, and a theme that paints the highlights
+// (outlines, fills, toggles) with two or three colours.
 //
-// The rule (from Xythos): what the window shows in its base state is black at
-// 50%; everything that appears over it (sidebars, the browser, dialogs, the
-// toast) is black at 95%, so it reads clearly.
+// The rule: what the window shows in its base state is black at 50%;
+// everything that appears over it (sidebars, the browser, dialogs, the toast)
+// is black at 95%, so it reads clearly.
 
 // A theme: a fixed look picked by name in Display options. Iris is the
 // default. The names are stored in settings.json: never rename one.
@@ -18,9 +18,6 @@ export struct ThemeLook {
     accent: color,
     text: color,
     text-dim: color,
-    // Faint glows over the background, top right and bottom left.
-    glow-a: color,
-    glow-b: color,
     // Faint CRT lines over the whole window (Phosphor).
     scanlines: bool,
 }
@@ -29,20 +26,19 @@ export global Theme {
     // Index into `looks`; set from Rust (Settings.display.theme).
     in-out property <int> index: 0;
 
-    // Xythos' themes, colours already lifted to be light enough to read
-    // over the dark background (Xythos' ink::lighten()).
+    // Colours light enough to read over the dark background.
     out property <[ThemeLook]> looks: [
-        { name: "Iris", paint-a: #7278fe, paint-b: #c688d6, paint-c: #a85eea, accent: #ffffff, text: #e6e6ea, text-dim: #8a8a94, glow-a: #00000000, glow-b: #00000000, scanlines: false },
-        { name: "Ember", paint-a: #ffb36b, paint-b: #ff6a3d, paint-c: #e0336f, accent: #ffb36b, text: #f0e2d8, text-dim: #9c8a80, glow-a: #ff6e2814, glow-b: #c8285a0d, scanlines: false },
-        { name: "Abyss", paint-a: #7ff5e0, paint-b: #2ec8e8, paint-c: #3a7bff, accent: #7ff5e0, text: #d8eaf0, text-dim: #7f99a5, glow-a: #00c8dc12, glow-b: #285aff0f, scanlines: false },
-        { name: "Phosphor", paint-a: #b8ffc8, paint-b: #4dff88, paint-c: #22d36a, accent: #b8ffc8, text: #9cf0b0, text-dim: #5f9c6c, glow-a: #3cff7812, glow-b: #00000000, scanlines: true },
-        { name: "Synthwave", paint-a: #ff4fd8, paint-b: #b65cff, paint-c: #29e0ff, accent: #ff4fd8, text: #ece2fa, text-dim: #9486ab, glow-a: #ff3caa1c, glow-b: #00dcff14, scanlines: false },
-        { name: "Gold Leaf", paint-a: #f6e2b3, paint-b: #d4af6a, paint-c: #a77c3c, accent: #f6e2b3, text: #ece4d4, text-dim: #948a76, glow-a: #e6be6e0f, glow-b: #00000000, scanlines: false },
-        { name: "Aurora", paint-a: #8dffc3, paint-b: #2fd6c3, paint-c: #9a6bff, accent: #8dffc3, text: #dcefe8, text-dim: #82988f, glow-a: #3cffaa12, glow-b: #965aff14, scanlines: false },
-        { name: "Blood Moon", paint-a: #ff9aa4, paint-b: #e0263f, paint-c: #af3254, accent: #ff9aa4, text: #eedcde, text-dim: #9b8285, glow-a: #c814281a, glow-b: #7800280f, scanlines: false },
-        { name: "Glacier", paint-a: #ffffff, paint-b: #cfe6ff, paint-c: #8fbaf0, accent: #cfe6ff, text: #e6eef7, text-dim: #8796a8, glow-a: #aad2ff0f, glow-b: #ffffff08, scanlines: false },
-        { name: "Graphite", paint-a: #ffffff, paint-b: #d0d0d0, paint-c: #8e8e8e, accent: #ffffff, text: #e8e8e8, text-dim: #8e8e8e, glow-a: #ffffff08, glow-b: #00000000, scanlines: false },
-        { name: "Oxide", paint-a: #f0a46c, paint-b: #c8693c, paint-c: #4fc2a6, accent: #f0a46c, text: #eee2d8, text-dim: #978a80, glow-a: #d2784614, glow-b: #3cbea00f, scanlines: false },
+        { name: "Iris", paint-a: #7278fe, paint-b: #c688d6, paint-c: #a85eea, accent: #ffffff, text: #e6e6ea, text-dim: #8a8a94, scanlines: false },
+        { name: "Ember", paint-a: #ffb36b, paint-b: #ff6a3d, paint-c: #e0336f, accent: #ffb36b, text: #f0e2d8, text-dim: #9c8a80, scanlines: false },
+        { name: "Abyss", paint-a: #7ff5e0, paint-b: #2ec8e8, paint-c: #3a7bff, accent: #7ff5e0, text: #d8eaf0, text-dim: #7f99a5, scanlines: false },
+        { name: "Phosphor", paint-a: #b8ffc8, paint-b: #4dff88, paint-c: #22d36a, accent: #b8ffc8, text: #9cf0b0, text-dim: #5f9c6c, scanlines: true },
+        { name: "Synthwave", paint-a: #ff4fd8, paint-b: #b65cff, paint-c: #29e0ff, accent: #ff4fd8, text: #ece2fa, text-dim: #9486ab, scanlines: false },
+        { name: "Gold Leaf", paint-a: #f6e2b3, paint-b: #d4af6a, paint-c: #a77c3c, accent: #f6e2b3, text: #ece4d4, text-dim: #948a76, scanlines: false },
+        { name: "Aurora", paint-a: #8dffc3, paint-b: #2fd6c3, paint-c: #9a6bff, accent: #8dffc3, text: #dcefe8, text-dim: #82988f, scanlines: false },
+        { name: "Blood Moon", paint-a: #ff9aa4, paint-b: #e0263f, paint-c: #af3254, accent: #ff9aa4, text: #eedcde, text-dim: #9b8285, scanlines: false },
+        { name: "Glacier", paint-a: #ffffff, paint-b: #cfe6ff, paint-c: #8fbaf0, accent: #cfe6ff, text: #e6eef7, text-dim: #8796a8, scanlines: false },
+        { name: "Graphite", paint-a: #ffffff, paint-b: #d0d0d0, paint-c: #8e8e8e, accent: #ffffff, text: #e8e8e8, text-dim: #8e8e8e, scanlines: false },
+        { name: "Oxide", paint-a: #f0a46c, paint-b: #c8693c, paint-c: #4fc2a6, accent: #f0a46c, text: #eee2d8, text-dim: #978a80, scanlines: false },
     ];
     out property <[string]> names: [
         "Iris", "Ember", "Abyss", "Phosphor", "Synthwave", "Gold Leaf", "Aurora",
@@ -64,13 +60,11 @@ export global Theme {
     out property <color> text: root.look.text;
     out property <color> text-dim: root.look.text-dim;
     out property <color> text-faint: #5c5c64;
-    out property <color> glow-a: root.look.glow-a;
-    out property <color> glow-b: root.look.glow-b;
     out property <bool> scanlines: root.look.scanlines;
 
     // --------------------------------------------------------- the boxes
-    // Behind the background image (shown if it can't load).
-    out property <color> bg: #000000;
+    // The window background.
+    out property <color> bg: #15151a;
     // Base state: panels, rows and buttons on the main area.
     out property <color> surface: #00000080;
     // Over the main area: the sidebars, the browser, dialogs, the toast.

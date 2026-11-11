@@ -81,8 +81,8 @@ component WindowButton inherits Rectangle {
     in property <bool> danger;
     callback clicked;
     width: 52px;
-    background: touch.pressed ? (root.danger ? Theme.danger : Theme.surface-3.brighter(20%))
-        : touch.has-hover ? (root.danger ? Theme.danger : Theme.surface-3)
+    background: touch.pressed ? (root.danger ? Theme.danger.darker(20%) : #ffffff33)
+        : touch.has-hover ? (root.danger ? Theme.danger : Theme.pressed)
         : transparent;
     Path {
         width: 16px;
@@ -93,10 +93,12 @@ component WindowButton inherits Rectangle {
         viewbox-height: 14;
         commands: root.icon;
         fill: transparent;
-        stroke: root.danger && (touch.has-hover || touch.pressed) ? #000 : Theme.text-dim;
+        stroke: root.danger && (touch.has-hover || touch.pressed) ? #fff
+            : touch.has-hover || touch.pressed ? Theme.text : Theme.text-dim;
         stroke-width: 1.6px;
     }
     touch := TouchArea {
+        mouse-cursor: default;
         clicked => { root.clicked(); }
     }
 }
@@ -125,17 +127,24 @@ export component TrackBar inherits Rectangle {
     }
 
     // The empty part of the bar moves the window (windowed) or is swiped up
-    // to hide the bar (fullscreen).
+    // to hide the bar (fullscreen). The move starts once the pointer has
+    // moved a little, so a double click still reaches the bar.
     TouchArea {
-        mouse-cursor: root.fullscreen ? default : move;
+        property <bool> dragging;
         pointer-event(e) => {
-            if !root.fullscreen && e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
-                root.start-drag();
+            if e.kind == PointerEventKind.down {
+                self.dragging = false;
             }
         }
         moved => {
-            if root.fullscreen && self.mouse-y - self.pressed-y < -24px {
-                root.dismiss();
+            if root.fullscreen {
+                if self.mouse-y - self.pressed-y < -24px {
+                    root.dismiss();
+                }
+            } else if !self.dragging && self.pressed
+                && (abs(self.mouse-x - self.pressed-x) > 4px || abs(self.mouse-y - self.pressed-y) > 4px) {
+                self.dragging = true;
+                root.start-drag();
             }
         }
         double-clicked => {

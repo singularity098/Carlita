@@ -255,7 +255,6 @@ impl Rig {
             name: plugin.name.clone(),
             plugin,
             bypassed: false,
-            scaling: None,
             state: None,
         }
     }

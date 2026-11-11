@@ -12,14 +12,14 @@ use carlita_core::midi::{self, BypassChange, MidiAction, MidiMapping, MidiMessag
 use carlita_core::paths::AppPaths;
 use carlita_core::rig::{self, Location, Row, RowKind, Spot};
 use carlita_core::{
-    CatalogFilter, ChainSlot, EditorScaling, PluginCatalog, PluginCategory, PluginFormat, Preset,
-    PresetStore, Rig, ScaleTransform, Settings, SlotId, TrackId,
+    CatalogFilter, ChainSlot, PluginCatalog, PluginCategory, PluginFormat, Preset, PresetStore,
+    Rig, Settings, SlotId, TrackId,
 };
 use carlita_engine::{
     editor_window_title, Command, EngineConfig, EngineHandle, Event, Meters, PluginLoad,
     PluginRuntimeInfo,
 };
-use carlita_x11::{EditorHost, HostCommand, HostEvent, InputMode, PointerKind};
+use carlita_x11::{Area, EditorHost, HostCommand, HostEvent};
 use crossbeam_channel::Receiver;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::cell::RefCell;
@@ -34,14 +34,6 @@ const ROW_PARALLEL: f32 = 52.0;
 const ROW_LANE: f32 = 40.0;
 const ROW_DRY: f32 = 48.0;
 const TOAST_TIMEOUT: Duration = Duration::from_secs(4);
-const SCALING_CHOICES: [EditorScaling; 6] = [
-    EditorScaling::Off,
-    EditorScaling::Fit,
-    EditorScaling::Fixed(1.0),
-    EditorScaling::Fixed(1.5),
-    EditorScaling::Fixed(2.0),
-    EditorScaling::Fixed(3.0),
-];
 
 #[derive(Default)]
 pub struct StartOptions {
@@ -82,14 +74,9 @@ enum Confirm {
     Quit,
 }
 
-/// What the main area shows for the selected plugin.
+/// The plugin editor shown (or about to be shown) in the main area.
 struct EditorView {
     slot: SlotId,
-    /// Native editor size when captured.
-    size: Option<(u32, u32)>,
-    resizable: bool,
-    transform: Option<ScaleTransform>,
-    resize_requested: bool,
 }
 
 struct Undo {
@@ -129,7 +116,10 @@ pub struct App {
     reload_chain_on_start: bool,
     tried_fallback: bool,
     editor_host: Option<EditorHost>,
-    capture_available: bool,
+    /// Whether editors can be shown inside the main window (X11 only).
+    embed_available: bool,
+    /// What the editor host was last told about the main area.
+    editor_area: Option<(Area, bool)>,
     system: SystemWorker,
     midi: MidiListener,
     learning: Option<(SlotId, MidiAction)>,
@@ -210,10 +200,6 @@ fn volume_text(v: f32) -> String {
     }
 }
 
-fn scaling_index(s: EditorScaling) -> i32 {
-    SCALING_CHOICES.iter().position(|c| *c == s).unwrap_or(1) as i32
-}
-
 impl App {
     pub fn new(ui: &MainWindow, opts: StartOptions) -> anyhow::Result<Rc<RefCell<Self>>> {
         let paths = AppPaths::resolve();
@@ -232,13 +218,6 @@ impl App {
         } else {
             None
         };
-        if let Some(h) = &editor_host {
-            h.send(HostCommand::SetInputMode(if settings.display.xtest_input {
-                InputMode::XTest
-            } else {
-                InputMode::SendEvent
-            }));
-        }
 
         let mut midi = MidiListener::new();
         midi.listen(&settings.midi.learn_input);
@@ -274,7 +253,8 @@ impl App {
             skip_default_preset: opts.skip_default_preset,
             reload_chain_on_start: false,
             tried_fallback: false,
-            capture_available: editor_host.is_some(),
+            embed_available: editor_host.is_some(),
+            editor_area: None,
             editor_host,
             system: SystemWorker::spawn(),
             midi,
@@ -344,8 +324,6 @@ impl App {
         let o = ui.global::<Options>();
         o.set_version(ss(env!("CARGO_PKG_VERSION")));
         o.set_fullscreen(d.fullscreen);
-        o.set_default_scaling(scaling_index(d.default_scaling));
-        o.set_input_mode(d.xtest_input as i32);
         o.set_keyboard_visible(self.settings.show_keyboard);
         self.refresh_audio_options();
         self.refresh_presets();
@@ -423,7 +401,8 @@ impl App {
         on!(ui, on_start_drag, |a| {
             a.with_winit(|w| {
                 let _ = w.drag_window();
-            })
+            });
+            a.end_window_gesture();
         });
         on!(ui, on_start_resize, |a, dir: SharedString| {
             use slint::winit_030::winit::window::ResizeDirection as D;
@@ -439,7 +418,8 @@ impl App {
             };
             a.with_winit(|w| {
                 let _ = w.drag_resize_window(d);
-            })
+            });
+            a.end_window_gesture();
         });
         on!(ui, on_minimize_window, |a| a
             .ui()
@@ -455,9 +435,19 @@ impl App {
             ui.set_window_maximized(m);
         });
         // Closing saves the window size and settings in `shutdown`.
-        ui.on_close_window(|| {
-            let _ = slint::quit_event_loop();
-        });
+        on!(ui, on_close_window, |a| a.quit());
+        {
+            // Closed by the window manager (Alt+F4 and the like).
+            let app = Rc::downgrade(app);
+            ui.window().on_close_requested(move || {
+                if let Some(app) = app.upgrade() {
+                    if let Ok(mut a) = app.try_borrow_mut() {
+                        a.release_editors();
+                    }
+                }
+                slint::CloseRequestResponse::HideWindow
+            });
+        }
         on!(ui, on_add_track, |a| {
             a.view_track = a.rig.add_track(None);
             a.rig_changed();
@@ -521,15 +511,7 @@ impl App {
         });
 
         // ---- main area
-        on!(
-            ui,
-            on_editor_pointer,
-            |a, kind: SharedString, x: f32, y: f32| a.editor_pointer(&kind, x, y)
-        );
-        on!(ui, on_editor_scroll, |a, x: f32, y: f32, dy: f32| {
-            a.editor_pointer(if dy > 0.0 { "scroll-up" } else { "scroll-down" }, x, y)
-        });
-        on!(ui, on_area_resized, |a| a.relayout_editor());
+        on!(ui, on_area_changed, |a| a.place_editor());
         on!(ui, on_set_param, |a, index: i32, value: f32| {
             if let Some(slot) = a.selected {
                 a.engine.send(Command::SetParameter {
@@ -580,8 +562,6 @@ impl App {
                 _ => {}
             }
         });
-        on!(ui, on_sidebar_changed, |a, _left: bool, _right: bool| a
-            .relayout_editor());
 
         // ---- options: audio
         let o = ui.global::<Options>();
@@ -735,31 +715,6 @@ impl App {
             a.ui().global::<Options>().set_brightness(v);
             a.save_settings();
         });
-        on!(o, on_set_default_scaling, |a, i: i32| {
-            a.settings.display.default_scaling = SCALING_CHOICES[i.clamp(0, 5) as usize];
-            a.ui().global::<Options>().set_default_scaling(i);
-            a.save_settings();
-            a.relayout_editor();
-        });
-        on!(o, on_set_plugin_scaling, |a, i: i32| {
-            if let Some(slot) = a.selected.and_then(|s| a.rig.get_mut(s)) {
-                slot.scaling = (i >= 0).then(|| SCALING_CHOICES[i.min(5) as usize]);
-            }
-            a.update_editor_ui();
-            a.relayout_editor();
-        });
-        on!(o, on_set_input_mode, |a, i: i32| {
-            a.settings.display.xtest_input = i == 1;
-            if let Some(h) = &a.editor_host {
-                h.send(HostCommand::SetInputMode(if i == 1 {
-                    InputMode::XTest
-                } else {
-                    InputMode::SendEvent
-                }));
-            }
-            a.ui().global::<Options>().set_input_mode(i);
-            a.save_settings();
-        });
 
         // ---- options: system
         on!(o, on_rescan_plugins, |a| a.start_scan());
@@ -837,6 +792,26 @@ impl App {
                 });
             }
         }
+    }
+
+    /// After a move or resize is handed to the window manager, it gets the
+    /// button release, not Slint. Without one, Slint keeps the pointer
+    /// grabbed by the title bar: the cursor stays a move cursor and the next
+    /// clicks on the window buttons are lost. So release it here.
+    fn end_window_gesture(&self) {
+        let ui = self.ui.clone();
+        slint::Timer::single_shot(Duration::ZERO, move || {
+            if let Some(ui) = ui.upgrade() {
+                use slint::platform::{PointerEventButton, WindowEvent};
+                let position = slint::LogicalPosition::new(-1.0, -1.0);
+                let w = ui.window();
+                w.dispatch_event(WindowEvent::PointerReleased {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+                w.dispatch_event(WindowEvent::PointerExited);
+            }
+        });
     }
 
     fn with_winit(&self, f: impl FnOnce(&slint::winit_030::winit::window::Window)) {
@@ -1575,20 +1550,19 @@ impl App {
         match (rt.map(|r| &r.status), info) {
             (Some(SlotStatus::Ready), Some(info)) if info.has_custom_ui => {
                 self.engine.send(Command::ShowEditor { slot, show: true });
-                if self.capture_available {
-                    if let Some(h) = &self.editor_host {
-                        h.send(HostCommand::Attach {
-                            key: slot.0,
-                            title: editor_window_title(slot),
-                        });
-                    }
-                    self.editor = Some(EditorView {
-                        slot,
-                        size: None,
-                        resizable: false,
-                        transform: None,
-                        resize_requested: false,
+                let parent = if self.embed_available {
+                    self.main_x11_window()
+                } else {
+                    None
+                };
+                if let (Some(parent), Some(h)) = (parent, &self.editor_host) {
+                    h.send(HostCommand::Attach {
+                        key: slot.0,
+                        title: editor_window_title(slot),
+                        parent,
                     });
+                    self.editor = Some(EditorView { slot });
+                    self.place_editor();
                     let ui = self.ui();
                     ui.set_editor_title(ss(&name));
                     ui.set_editor_mode(ss("waiting"));
@@ -1624,9 +1598,7 @@ impl App {
             }
         }
         self.editor = None;
-        let ui = self.ui();
-        ui.set_editor_mode(ss("empty"));
-        ui.set_editor_image(slint::Image::default());
+        self.ui().set_editor_mode(ss("empty"));
     }
 
     fn set_editor_message(&self, title: &str, message: &str) {
@@ -1636,91 +1608,58 @@ impl App {
         ui.set_editor_mode(ss("message"));
     }
 
-    fn scaling_for(&self, slot: SlotId) -> EditorScaling {
-        self.rig
-            .get(slot)
-            .and_then(|s| s.scaling)
-            .unwrap_or(self.settings.display.default_scaling)
-    }
-
     fn update_editor_ui(&self) {
         let ui = self.ui();
         let o = ui.global::<Options>();
         match self.selected.and_then(|s| self.rig.get(s)) {
-            Some(s) => {
-                o.set_selected_plugin(ss(&s.name));
-                o.set_plugin_scaling(s.scaling.map_or(-1, scaling_index));
-            }
-            None => {
-                o.set_selected_plugin(ss(""));
-                o.set_plugin_scaling(-1);
-            }
+            Some(s) => o.set_selected_plugin(ss(&s.name)),
+            None => o.set_selected_plugin(ss("")),
         }
     }
 
-    /// Recomputes where the captured editor is drawn.
-    fn relayout_editor(&mut self) {
+    /// The main window's X11 id, once it exists (None under Wayland).
+    fn main_x11_window(&self) -> Option<u32> {
+        use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let mut id = None;
+        self.with_winit(|w| {
+            id = match w.window_handle().map(|h| h.as_raw()) {
+                Ok(RawWindowHandle::Xlib(h)) => Some(h.window as u32),
+                Ok(RawWindowHandle::Xcb(h)) => Some(h.window.get()),
+                _ => None,
+            };
+        });
+        id
+    }
+
+    /// Tells the editor host where the main area is, and whether the editor
+    /// may show: an X11 child window always covers what Slint draws, so the
+    /// editor hides while a sidebar, the browser or a dialog is over it.
+    fn place_editor(&mut self) {
+        let Some(h) = &self.editor_host else { return };
         let ui = self.ui();
-        let area = (ui.get_area_width(), ui.get_area_height());
-        let Some(ed) = self.editor.as_ref() else {
-            return;
+        let scale = ui.window().scale_factor();
+        let px = |v: f32| (v * scale).round();
+        let area = Area {
+            x: px(ui.get_area_x()) as i32,
+            y: px(ui.get_area_y()) as i32,
+            width: px(ui.get_area_width()).max(0.0) as u32,
+            height: px(ui.get_area_height()).max(0.0) as u32,
         };
-        let Some(size) = ed.size else { return };
-        let scaling = self.scaling_for(ed.slot);
-        // Editors that can resize themselves are given the space instead of
-        // being pixel-scaled.
-        if ed.resizable && scaling == EditorScaling::Fit && !ed.resize_requested {
-            if let Some(h) = &self.editor_host {
-                h.send(HostCommand::Resize {
-                    key: ed.slot.0,
-                    width: area.0 as u32,
-                    height: area.1 as u32,
-                });
-            }
-            if let Some(ed) = self.editor.as_mut() {
-                ed.resize_requested = true;
-            }
-        }
-        let t = ScaleTransform::compute((size.0 as f32, size.1 as f32), area, scaling);
-        ui.set_editor_x(t.offset_x);
-        ui.set_editor_y(t.offset_y);
-        ui.set_editor_w(t.width);
-        ui.set_editor_h(t.height);
-        if let Some(ed) = self.editor.as_mut() {
-            ed.transform = Some(t);
+        let state = (area, !ui.get_editor_covered());
+        if self.editor_area != Some(state) {
+            self.editor_area = Some(state);
+            h.send(HostCommand::SetArea {
+                area: state.0,
+                visible: state.1,
+            });
         }
     }
 
     fn on_host_event(&mut self, e: HostEvent) {
         match e {
-            HostEvent::Attached {
-                key,
-                width,
-                height,
-                resizable,
-            } => {
-                if let Some(ed) = self.editor.as_mut().filter(|ed| ed.slot.0 == key) {
-                    ed.size = Some((width, height));
-                    ed.resizable = resizable;
-                    self.relayout_editor();
-                }
-            }
-            HostEvent::Frame(f) => {
-                let Some(ed) = self.editor.as_mut().filter(|ed| ed.slot.0 == f.key) else {
-                    return;
-                };
-                let resized = ed.size != Some((f.width, f.height));
-                ed.size = Some((f.width, f.height));
-                let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
-                    &f.rgba, f.width, f.height,
-                );
-                let ui = self.ui();
-                ui.set_editor_image(slint::Image::from_rgba8(buf));
-                if ui.get_editor_mode() != "image" {
-                    ui.set_editor_mode(ss("image"));
-                }
-                if resized {
-                    self.relayout_editor();
+            HostEvent::Attached { key, .. } => {
+                if self.editor.as_ref().is_some_and(|ed| ed.slot.0 == key) {
+                    self.ui().set_editor_mode(ss("embedded"));
                 }
             }
             HostEvent::NotFound { key } => {
@@ -1758,44 +1697,8 @@ impl App {
             }
             HostEvent::Unavailable(reason) => {
                 log::warn!("editor embedding unavailable: {reason}");
-                self.capture_available = false;
+                self.embed_available = false;
             }
-        }
-    }
-
-    fn editor_pointer(&mut self, kind: &str, x: f32, y: f32) {
-        let Some(ed) = self.editor.as_ref() else {
-            return;
-        };
-        let Some(t) = ed.transform else { return };
-        let kind = match kind {
-            "down" => PointerKind::Down,
-            "up" => PointerKind::Up,
-            "move" => PointerKind::Move,
-            "scroll-up" => PointerKind::ScrollUp,
-            "scroll-down" => PointerKind::ScrollDown,
-            _ => return,
-        };
-        // Clamp so a drag that leaves the editor keeps tracking at its edge.
-        let (ex, ey) = match t.to_editor(x, y) {
-            Some(p) => p,
-            None if kind == PointerKind::Move || kind == PointerKind::Up => {
-                let cx = x.clamp(t.offset_x, t.offset_x + t.width - 1.0);
-                let cy = y.clamp(t.offset_y, t.offset_y + t.height - 1.0);
-                match t.to_editor(cx, cy) {
-                    Some(p) => p,
-                    None => return,
-                }
-            }
-            None => return,
-        };
-        if let Some(h) = &self.editor_host {
-            h.send(HostCommand::Pointer {
-                key: ed.slot.0,
-                kind,
-                x: ex,
-                y: ey,
-            });
         }
     }
 
@@ -1966,11 +1869,9 @@ impl App {
             Confirm::Shutdown => self.system.send(SysCmd::PowerOff),
             Confirm::Restart => {
                 self.restart_requested = true;
-                let _ = slint::quit_event_loop();
+                self.quit();
             }
-            Confirm::Quit => {
-                let _ = slint::quit_event_loop();
-            }
+            Confirm::Quit => self.quit(),
         }
     }
 
@@ -2281,10 +2182,26 @@ impl App {
         }
     }
 
+    /// Leaves the event loop.
+    fn quit(&mut self) {
+        self.release_editors();
+        let _ = slint::quit_event_loop();
+    }
+
+    /// Hands the editor windows back to their plugins. They live inside the
+    /// main window, and would be destroyed with it when the app closes,
+    /// which kills the plugin (or its bridge process) with an X error.
+    fn release_editors(&mut self) {
+        self.hide_editor();
+        // Dropping the host waits until every window has been handed back.
+        self.editor_host = None;
+        self.embed_available = false;
+    }
+
     pub fn shutdown(&mut self) {
         self.remember_window_size();
         self.save_settings();
-        self.hide_editor();
+        self.release_editors();
         self.engine.send(Command::Stop);
         if self.restart_requested {
             let exe = std::env::var_os("APPIMAGE")

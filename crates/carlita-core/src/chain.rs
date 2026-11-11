@@ -2,7 +2,6 @@
 //! existed (see [`crate::rig`] for the current model).
 
 use crate::plugin::PluginDescriptor;
-use crate::scaling::EditorScaling;
 use serde::{Deserialize, Serialize};
 
 /// Stable identity of a slot, independent of its position.
@@ -19,9 +18,6 @@ pub struct ChainSlot {
     pub name: String,
     #[serde(default)]
     pub bypassed: bool,
-    /// Per-plugin editor scaling; `None` uses the global default.
-    #[serde(default)]
-    pub scaling: Option<EditorScaling>,
     /// Carla plugin state (`.carxs` XML). Filled in when a preset is saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
@@ -60,7 +56,6 @@ impl Chain {
             name: plugin.name.clone(),
             plugin,
             bypassed: false,
-            scaling: None,
             state: None,
         }
     }

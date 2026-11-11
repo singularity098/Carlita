@@ -1,6 +1,6 @@
 [package]
 name = "carlita-x11"
-description = "Captures fixed-size X11 plugin editors off-screen (XComposite) and forwards touch input to them"
+description = "Shows X11 plugin editors inside Carlita's window by reparenting them"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,7 +9,4 @@ license.workspace = true
 anyhow.workspace = true
 log.workspace = true
 crossbeam-channel.workspace = true
-x11rb = { version = "0.13", features = ["composite", "damage", "xtest"] }
-
-[dev-dependencies]
-x11rb = { version = "0.13", features = ["composite", "damage", "xtest"] }
+x11rb = "0.13"

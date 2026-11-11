@@ -64,33 +64,30 @@ Swiping in from the right edge opens settings, including WiFi and Bluetooth.
 - **Presets:** save, save as, load, rename, delete
 - **WiFi:** on/off toggle, list of networks, connect with an on-screen keyboard (via NetworkManager over D-Bus)
 - **Bluetooth:** on/off toggle, list of paired and nearby devices, pair and connect (via BlueZ over D-Bus)
-- **Display:** fullscreen / windowed, brightness if the hardware supports it, default plugin editor scaling
+- **Display:** theme, fullscreen / windowed, brightness if the hardware supports it
 - **System:** app version, rescan plugins, restart app, shut down / reboot the PC
 - Toggles apply immediately; no separate Save step
 - Also has a button which can toggle on/off a virtual musical keyboard on the bottom of the screen, which may be used to send midi notes to the plugins
 
-## Display and plugin editor scaling
+## Display and plugin editors
 
-The app runs fullscreen by default, and small legacy plugin editors can be scaled up to fill the screen.
+The app runs fullscreen by default, and the selected plugin's editor is shown inside the app's window.
 
 - Starts fullscreen by default; can also run in a resizable window
 - Toggle between fullscreen and windowed from the options sidebar or a keyboard shortcut
 - Remember window size and mode between launches
-- The selected plugin's editor fills the main area between the two sidebar strips
-- **Scale to fit:** plugin editors smaller than the screen can be scaled up, keeping their aspect ratio
-- Touches on a scaled editor are mapped back to the plugin's real coordinates, so knobs and buttons work
-- Scaling can be set per plugin (off, fit to screen, or a fixed factor) and is remembered
-- Plugins that support resizing or HiDPI natively use that instead of pixel scaling
+- The selected plugin's editor is shown in the main area between the two sidebar strips, never as a separate window
+- Editors are shown at their own size; editors that can resize fill the area
 - Plugins without an editor get a generic parameter page with large sliders
 
-**Open question:** scaling a fixed-size X11 editor means redirecting its window off-screen (XComposite), drawing it scaled, and forwarding input (XTest). This is the riskiest requirement and should be prototyped early with a yabridged plugin.
+Scaling small fixed-size editors up was dropped (decided 2026-11-11) in favour of showing the editor inside the app's window, with real input. See [editor-embedding.md](editor-embedding.md).
 
 ## Look, feel and performance
 
 The UI is a polished dark theme that responds instantly to touch and never disturbs the audio.
 
 - Dark theme throughout, high contrast and readable on a stage
-- The look is Xythos' (decided 2026-11-11): its very dark background image, every box translucent black over it with hairline grey outlines (black at 50% for what the window shows in its base state, 95% for what appears over it: sidebars, the plugin browser, dialogs, the toast), Jost Light text, and Xythos' themes picked in Display options (Iris, the default, then Ember, Abyss, Phosphor, Synthwave, Gold Leaf, Aurora, Blood Moon, Glacier, Graphite, Oxide). A theme paints the highlights (picked chips, primary buttons, switches, the selected plugin's outline) with its two or three colours, sets the text colours, and adds faint glows (and Phosphor's scanlines). Theme names are stored in the settings: never rename one.
+- The look comes from Xythos (decided 2026-11-11), with a flat dark background instead of Xythos' background image: every box translucent black over it with hairline grey outlines (black at 50% for what the window shows in its base state, 95% for what appears over it: sidebars, the plugin browser, dialogs, the toast), Jost Light text, and Xythos' themes picked in Display options (Iris, the default, then Ember, Abyss, Phosphor, Synthwave, Gold Leaf, Aurora, Blood Moon, Glacier, Graphite, Oxide). A theme paints the highlights (picked chips, primary buttons, switches, the selected plugin's outline) with its two or three colours, and sets the text colours (Phosphor adds scanlines). Theme names are stored in the settings: never rename one.
 - Smooth sidebar slide animations at the display's full refresh rate (60 fps or better)
 - Sidebars follow the finger while dragging, then snap open or closed
 - Visible response to a touch within one frame
