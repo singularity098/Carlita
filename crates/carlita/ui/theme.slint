@@ -1,31 +1,111 @@
-// Carlita's dark, high-contrast stage theme.
+// Carlita's look, taken from Xythos: the very dark background image, every box
+// translucent black over it with a hairline grey outline, and a theme that
+// paints the highlights (outlines, fills, toggles) with two or three colours.
+//
+// The rule (from Xythos): what the window shows in its base state is black at
+// 50%; everything that appears over it (sidebars, the browser, dialogs, the
+// toast) is black at 95%, so it reads clearly.
+
+// A theme: a fixed look picked by name in Display options. Iris is the
+// default. The names are stored in settings.json: never rename one.
+export struct ThemeLook {
+    name: string,
+    // The highlight paint, spread across each highlighted thing.
+    paint-a: color,
+    paint-b: color,
+    paint-c: color,
+    // The highlight where the paint can't go (text).
+    accent: color,
+    text: color,
+    text-dim: color,
+    // Faint glows over the background, top right and bottom left.
+    glow-a: color,
+    glow-b: color,
+    // Faint CRT lines over the whole window (Phosphor).
+    scanlines: bool,
+}
 
 export global Theme {
-    out property <color> bg: #0c0d10;
-    out property <color> surface: #16181d;
-    out property <color> surface-2: #1f2229;
-    out property <color> surface-3: #2a2e37;
-    out property <color> border: #343946;
-    out property <color> text: #f2f4f8;
-    out property <color> text-dim: #a4abba;
-    out property <color> text-faint: #6c7383;
-    out property <color> accent: #ff8a1f;
-    out property <color> accent-dim: #8a4a12;
-    out property <color> ok: #3ddc84;
-    out property <color> warn: #ffc53d;
-    out property <color> danger: #ff4d5e;
+    // Index into `looks`; set from Rust (Settings.display.theme).
+    in-out property <int> index: 0;
+
+    // Xythos' themes, colours already lifted to be light enough to read
+    // over the dark background (Xythos' ink::lighten()).
+    out property <[ThemeLook]> looks: [
+        { name: "Iris", paint-a: #7278fe, paint-b: #c688d6, paint-c: #a85eea, accent: #ffffff, text: #e6e6ea, text-dim: #8a8a94, glow-a: #00000000, glow-b: #00000000, scanlines: false },
+        { name: "Ember", paint-a: #ffb36b, paint-b: #ff6a3d, paint-c: #e0336f, accent: #ffb36b, text: #f0e2d8, text-dim: #9c8a80, glow-a: #ff6e2814, glow-b: #c8285a0d, scanlines: false },
+        { name: "Abyss", paint-a: #7ff5e0, paint-b: #2ec8e8, paint-c: #3a7bff, accent: #7ff5e0, text: #d8eaf0, text-dim: #7f99a5, glow-a: #00c8dc12, glow-b: #285aff0f, scanlines: false },
+        { name: "Phosphor", paint-a: #b8ffc8, paint-b: #4dff88, paint-c: #22d36a, accent: #b8ffc8, text: #9cf0b0, text-dim: #5f9c6c, glow-a: #3cff7812, glow-b: #00000000, scanlines: true },
+        { name: "Synthwave", paint-a: #ff4fd8, paint-b: #b65cff, paint-c: #29e0ff, accent: #ff4fd8, text: #ece2fa, text-dim: #9486ab, glow-a: #ff3caa1c, glow-b: #00dcff14, scanlines: false },
+        { name: "Gold Leaf", paint-a: #f6e2b3, paint-b: #d4af6a, paint-c: #a77c3c, accent: #f6e2b3, text: #ece4d4, text-dim: #948a76, glow-a: #e6be6e0f, glow-b: #00000000, scanlines: false },
+        { name: "Aurora", paint-a: #8dffc3, paint-b: #2fd6c3, paint-c: #9a6bff, accent: #8dffc3, text: #dcefe8, text-dim: #82988f, glow-a: #3cffaa12, glow-b: #965aff14, scanlines: false },
+        { name: "Blood Moon", paint-a: #ff9aa4, paint-b: #e0263f, paint-c: #af3254, accent: #ff9aa4, text: #eedcde, text-dim: #9b8285, glow-a: #c814281a, glow-b: #7800280f, scanlines: false },
+        { name: "Glacier", paint-a: #ffffff, paint-b: #cfe6ff, paint-c: #8fbaf0, accent: #cfe6ff, text: #e6eef7, text-dim: #8796a8, glow-a: #aad2ff0f, glow-b: #ffffff08, scanlines: false },
+        { name: "Graphite", paint-a: #ffffff, paint-b: #d0d0d0, paint-c: #8e8e8e, accent: #ffffff, text: #e8e8e8, text-dim: #8e8e8e, glow-a: #ffffff08, glow-b: #00000000, scanlines: false },
+        { name: "Oxide", paint-a: #f0a46c, paint-b: #c8693c, paint-c: #4fc2a6, accent: #f0a46c, text: #eee2d8, text-dim: #978a80, glow-a: #d2784614, glow-b: #3cbea00f, scanlines: false },
+    ];
+    out property <[string]> names: [
+        "Iris", "Ember", "Abyss", "Phosphor", "Synthwave", "Gold Leaf", "Aurora",
+        "Blood Moon", "Glacier", "Graphite", "Oxide",
+    ];
+    property <ThemeLook> look: root.looks[max(0, min(root.looks.length - 1, root.index))];
+
+    // ---------------------------------------------------------- the theme
+    out property <color> paint-a: root.look.paint-a;
+    out property <color> paint-b: root.look.paint-b;
+    out property <color> paint-c: root.look.paint-c;
+    // The highlight paint: fills of things that are on or picked, and their
+    // outlines. Text drawn on it is `on-paint`.
+    out property <brush> paint: @linear-gradient(115deg, root.paint-a 0%, root.paint-b 55%, root.paint-c 100%);
+    // The same, pressed.
+    out property <brush> paint-pressed: @linear-gradient(115deg, root.paint-a.darker(25%) 0%, root.paint-b.darker(25%) 55%, root.paint-c.darker(25%) 100%);
+    out property <color> on-paint: #000000;
+    out property <color> accent: root.look.accent;
+    out property <color> text: root.look.text;
+    out property <color> text-dim: root.look.text-dim;
+    out property <color> text-faint: #5c5c64;
+    out property <color> glow-a: root.look.glow-a;
+    out property <color> glow-b: root.look.glow-b;
+    out property <bool> scanlines: root.look.scanlines;
+
+    // --------------------------------------------------------- the boxes
+    // Behind the background image (shown if it can't load).
+    out property <color> bg: #000000;
+    // Base state: panels, rows and buttons on the main area.
+    out property <color> surface: #00000080;
+    // Over the main area: the sidebars, the browser, dialogs, the toast.
+    out property <color> popup: #000000f2;
+    // Items listed in panels and dialogs.
+    out property <color> surface-2: #0000008c;
+    // Buttons; a touch lifts them with a faint white.
+    out property <color> surface-3: #00000080;
+    out property <color> pressed: #ffffff1f;
+    // The empty part of meters, sliders and switches.
+    out property <color> track: #ffffff14;
+    // Hairline grey outlines.
+    out property <color> border: #ffffff1a;
+    out property <color> border-strong: #ffffff29;
+    out property <color> border-hover: #ffffff4d;
+    out property <color> scrim: #000000b3;
+
+    out property <color> ok: #4cc97a;
+    out property <color> warn: #f0c040;
+    out property <color> danger: #e5484d;
     out property <color> bypassed: #4b5160;
-    out property <color> scrim: #000000a0;
 
     // At least ~10 mm on a 12" 1280x800 panel.
     out property <length> touch: 52px;
     out property <length> row: 68px;
     out property <length> radius: 12px;
     out property <length> pad: 14px;
-    out property <length> font-small: 13px;
-    out property <length> font: 16px;
-    out property <length> font-large: 20px;
-    out property <length> font-title: 24px;
+    // Jost runs small, so its sizes are a little larger than usual.
+    out property <length> font-small: 15px;
+    out property <length> font: 18px;
+    out property <length> font-large: 22px;
+    out property <length> font-title: 28px;
+    // Jost Light for text, Regular for small text (as in Xythos).
+    out property <int> light: 300;
+    out property <int> regular: 400;
 
     out property <duration> slide: 220ms;
 }

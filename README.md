@@ -20,6 +20,7 @@ touchscreen.
   for options (audio, presets, MIDI learn, WiFi, Bluetooth, display, system).
 * Plugin editors fill the screen, and small fixed-size editors are scaled up.
   Touches are mapped back to the editor's own coordinates.
+* Xythos' very dark look and its themes (Display options).
 * Each plugin can run in its own process, so a crashing plugin is swapped for
   a pass-through and the rest of the chain keeps playing.
 
@@ -99,3 +100,7 @@ GPL-3.0-or-later (see [LICENSE](LICENSE)). Carla is GPL-2.0-or-later and
 Slint is used under its GPL-3.0 option. GPL-3.0-or-later is the license the
 combined binary ends up under anyway, and it remains compatible with Carla.
 The `carla-sys` crate on its own is GPL-2.0-or-later.
+
+The Jost font in `assets/fonts/` is under the SIL Open Font License
+(`assets/fonts/OFL.txt`). The look, background image and themes come from
+[Xythos](https://github.com/singularity098/xythos).

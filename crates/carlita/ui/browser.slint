@@ -32,7 +32,7 @@ export component PluginBrowser inherits Rectangle {
         x: (root.width - self.width) / 2;
         y: 24px;
         border-radius: Theme.radius * 1.5;
-        background: Theme.surface;
+        background: Theme.popup;
         border-width: 1px;
         border-color: Theme.border;
         // Swallow clicks so they do not close the browser.
@@ -47,7 +47,6 @@ export component PluginBrowser inherits Rectangle {
                 Text {
                     text: "Add plugin";
                     font-size: Theme.font-title;
-                    font-weight: 700;
                     color: Theme.text;
                     vertical-alignment: center;
                     horizontal-stretch: 1;
@@ -123,6 +122,7 @@ export component PluginBrowser inherits Rectangle {
                 text: root.scan-status;
                 color: Theme.text-dim;
                 font-size: Theme.font-small;
+                font-weight: Theme.regular;
                 overflow: elide;
             }
 
@@ -142,7 +142,9 @@ export component PluginBrowser inherits Rectangle {
                             y: 3px;
                             height: parent.height - 6px;
                             border-radius: Theme.radius;
-                            background: row-touch.pressed ? Theme.surface-3 : Theme.surface-2;
+                            background: row-touch.pressed ? Theme.pressed : Theme.surface-2;
+                            border-width: 1px;
+                            border-color: row-touch.has-hover ? Theme.border-hover : Theme.border-strong;
                             row-touch := TouchArea {
                                 clicked => { root.pick(p.key); }
                             }
@@ -156,13 +158,13 @@ export component PluginBrowser inherits Rectangle {
                                     Text {
                                         text: p.name;
                                         font-size: Theme.font;
-                                        font-weight: 600;
                                         color: Theme.text;
                                         overflow: elide;
                                     }
                                     Text {
                                         text: p.maker + (p.maker != "" ? "  ·  " : "") + p.category + (p.bridged ? "  ·  yabridge" : "");
                                         font-size: Theme.font-small;
+                                        font-weight: Theme.regular;
                                         color: Theme.text-dim;
                                         overflow: elide;
                                     }
@@ -172,7 +174,7 @@ export component PluginBrowser inherits Rectangle {
                                     Text {
                                         text: p.format;
                                         font-size: Theme.font-small;
-                                        font-weight: 700;
+                                        font-weight: Theme.regular;
                                         color: Theme.accent;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
