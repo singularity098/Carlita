@@ -30,19 +30,35 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets
 
+  # Builds the AppImage on every push and pull request and keeps it as a
+  # workflow artifact; tags starting with "v" also attach it to a release.
   appimage:
-    if: startsWith(github.ref, 'refs/tags/v')
     needs: test
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
-      - run: |
+      - name: System dependencies
+        run: |
           sudo apt-get update
           sudo apt-get install -y carla carla-dev libclang-dev clang libasound2-dev \
-            libxkbcommon-dev libfontconfig-dev libfuse2 file
+            libxkbcommon-dev libfontconfig-dev libfuse2t64 file
       - uses: dtolnay/rust-toolchain@stable
-      - run: packaging/appimage/build-appimage.sh
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: appimage
+      - name: Build AppImage
+        run: packaging/appimage/build-appimage.sh
+      - name: Smoke test
+        run: APPIMAGE_EXTRACT_AND_RUN=1 ./dist/*.AppImage --version
       - uses: actions/upload-artifact@v4
         with:
           name: Carlita-AppImage
           path: dist/*.AppImage
+          if-no-files-found: error
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.AppImage

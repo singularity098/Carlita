@@ -1,19 +1,26 @@
-//! Named presets: the whole chain including each plugin's state.
+//! Named presets: the whole rig (every track and its chain) including each
+//! plugin's state.
 
 use crate::chain::Chain;
 use crate::midi::MidiMapping;
+use crate::rig::Rig;
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub const PRESET_VERSION: u32 = 1;
+/// Version 1 held a single chain; version 2 holds a rig of tracks.
+pub const PRESET_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Preset {
     pub name: String,
     #[serde(default = "default_version")]
     pub version: u32,
-    pub chain: Chain,
+    #[serde(default)]
+    pub rig: Rig,
+    /// The single chain of a version 1 preset; moved into `rig` on load.
+    #[serde(default, skip_serializing)]
+    chain: Option<Chain>,
     #[serde(default)]
     pub midi_mappings: Vec<MidiMapping>,
 }
@@ -23,13 +30,24 @@ fn default_version() -> u32 {
 }
 
 impl Preset {
-    pub fn new(name: impl Into<String>, chain: Chain, midi_mappings: Vec<MidiMapping>) -> Self {
+    pub fn new(name: impl Into<String>, rig: Rig, midi_mappings: Vec<MidiMapping>) -> Self {
         Self {
             name: name.into(),
             version: PRESET_VERSION,
-            chain,
+            rig,
+            chain: None,
             midi_mappings,
         }
+    }
+
+    /// Upgrades a version 1 preset and makes sure there is a track.
+    fn migrate(&mut self) {
+        if let Some(chain) = self.chain.take() {
+            if self.rig.tracks.is_empty() {
+                self.rig = Rig::from_chain(chain);
+            }
+        }
+        self.rig.ensure_track();
     }
 }
 
@@ -93,6 +111,7 @@ impl PresetStore {
             );
         }
         preset.name = name.trim().to_string();
+        preset.migrate();
         Ok(preset)
     }
 
@@ -134,10 +153,10 @@ mod tests {
         assert!(store.list().is_empty());
 
         store
-            .save(&Preset::new("Clean", Chain::default(), vec![]))
+            .save(&Preset::new("Clean", Rig::new(), vec![]))
             .unwrap();
         store
-            .save(&Preset::new("ambient", Chain::default(), vec![]))
+            .save(&Preset::new("ambient", Rig::new(), vec![]))
             .unwrap();
         assert_eq!(store.list(), ["ambient", "Clean"]);
 
@@ -151,14 +170,33 @@ mod tests {
     }
 
     #[test]
+    fn loads_version_1_presets() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PresetStore::new(dir.path());
+        let v1 = r#"{"name":"Old","version":1,"chain":{"slots":[{"id":3,"plugin":{
+            "format":"internal","name":"Gain","label":"audiogain_s","filename":"",
+            "unique_id":0,"category":"utility","audio_ins":2,"audio_outs":2,
+            "midi_ins":0,"midi_outs":0,"parameters":1,"is_synth":false,
+            "has_custom_ui":false},"name":"Gain","bypassed":true}],"next_id":4},
+            "midi_mappings":[]}"#;
+        std::fs::write(dir.path().join("Old.json"), v1).unwrap();
+        let p = store.load("Old").unwrap();
+        assert_eq!(p.rig.tracks.len(), 1);
+        let s = p.rig.slots().next().unwrap();
+        assert_eq!((s.id.0, s.bypassed), (3, true));
+        // Saved again as version 2, without the old chain.
+        store.save(&p).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("Old.json")).unwrap();
+        assert!(text.contains("\"rig\"") && !text.contains("\"chain\""));
+    }
+
+    #[test]
     fn rejects_bad_names() {
         let dir = tempfile::tempdir().unwrap();
         let store = PresetStore::new(dir.path());
         assert!(store
-            .save(&Preset::new("../evil", Chain::default(), vec![]))
+            .save(&Preset::new("../evil", Rig::new(), vec![]))
             .is_err());
-        assert!(store
-            .save(&Preset::new("  ", Chain::default(), vec![]))
-            .is_err());
+        assert!(store.save(&Preset::new("  ", Rig::new(), vec![])).is_err());
     }
 }

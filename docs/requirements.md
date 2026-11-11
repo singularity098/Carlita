@@ -15,9 +15,11 @@ A touch-first plugin chain host for a pedalboard: Rust app, Carla engine, Slint 
 
 ## Audio and plugin hosting
 
-The engine runs one serial chain, glitch-free, with plugin changes made live.
+The engine runs several tracks at once, each a chain that may contain parallel blocks, glitch-free, with plugin changes made live.
 
 - Run plugins in a serial or parallel chain: input → plugin 1 → plugin 2 → … → output
+- Parallel blocks: split the signal into lanes (each a serial chain, an empty lane is the dry signal) and mix them back together
+- Several tracks (chains) play at the same time, each fed by input 1+2, input 1, input 2 or no input, with its own volume and mute
 - Supports both audio and MIDI input and output.  One plugin may send MIDI or audio down the chain to the next plugin which receives it
 - Audio through JACK / PipeWire (native pipewire support); choose input and output device, sample rate and buffer size
 - Bypass any plugin with one tap without removing it
@@ -35,8 +37,9 @@ Swiping in from the left edge opens the chain, where plugins are added, removed,
 
 - Opens with a swipe from a host-owned strip on the left screen edge (works even over a plugin editor)
 - Also opens from a visible tab or button, for windowed mode and mouse use, but these are only visible when the mouse is hovering to the side so that VST can be displayed in 100% fullscreen normally
-- Lists the chain in order; tap a plugin to show its editor in the main area
-- Drag a plugin to reorder it
+- Tabs for the tracks, with add, rename and delete; the selected track's input, mute and volume
+- Lists the chain in order, parallel lanes indented; tap a plugin to show its editor in the main area
+- Drag a plugin to reorder it, including into and out of parallel lanes; split a plugin into a parallel block and add or remove lanes
 - Swipe a plugin sideways or long-press it to remove it, with a short undo
 - An "Add plugin" button opens a searchable list, filterable by format and category, with favorites
 - Per-plugin bypass toggle visible in the list
@@ -89,6 +92,5 @@ The UI is a polished dark theme that responds instantly to touch and never distu
 ## Out of scope
 
 - Multitrack recording, timelines or arrangement
-- Splits or a patchbay
-- Hosting more than one chain at once
+- A free-form patchbay (the rig's structure is tracks, chains and parallel blocks)
 - macOS and Windows builds

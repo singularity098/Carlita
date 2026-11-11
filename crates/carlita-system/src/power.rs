@@ -66,7 +66,9 @@ impl Backlight {
         let raw: u32 = std::fs::read_to_string(self.path.join("brightness"))?
             .trim()
             .parse()?;
-        Ok((raw * 100 + self.max / 2).checked_div(self.max).unwrap_or(0))
+        Ok((raw * 100 + self.max / 2)
+            .checked_div(self.max)
+            .unwrap_or(0))
     }
 
     /// Sets brightness in percent (clamped to 5..=100 so the screen never goes black).

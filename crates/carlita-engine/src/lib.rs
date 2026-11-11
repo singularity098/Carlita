@@ -5,10 +5,10 @@
 //! (loading a bridged plugin can take seconds) never block the UI, and the UI
 //! never touches the audio thread – Carla owns that.
 //!
-//! The chain runs in Carla's *continuous rack* mode: plugins are processed in
-//! series in the order of their Carla ids, audio and MIDI flow from each
-//! plugin to the next, and adding, removing or swapping plugins happens while
-//! audio keeps running.
+//! Carla runs in *patchbay* mode. The UI sends the rig's layout (tracks,
+//! their chains and parallel blocks) and the engine connects the plugins in
+//! Carla's internal graph to match, changing only the connections that
+//! differ, so plugins are added, moved and bypassed while audio keeps running.
 
 mod carla;
 mod thread;

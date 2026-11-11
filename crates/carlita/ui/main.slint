@@ -5,13 +5,13 @@
 // editor in between, and two sidebars that slide over everything.
 import { Theme } from "theme.slint";
 import { BigButton, BigSlider, Toggle, SectionTitle } from "widgets.slint";
-import { SlotItem, PluginItem, ParamItem, WifiItem, BtItem, MappingItem } from "types.slint";
+import { SlotItem, TrackItem, PluginItem, ParamItem, WifiItem, BtItem, MappingItem } from "types.slint";
 import { ChainPanel } from "chain.slint";
 import { PluginBrowser } from "browser.slint";
 import { OptionsPanel, Options } from "options.slint";
 import { TextPrompt, Piano, TextUtil } from "keyboards.slint";
 
-export { Theme, Options, TextUtil, SlotItem, PluginItem, ParamItem, WifiItem, BtItem, MappingItem }
+export { Theme, Options, TextUtil, SlotItem, TrackItem, PluginItem, ParamItem, WifiItem, BtItem, MappingItem }
 
 // A sidebar that follows the finger and snaps open or closed.
 component EdgeStrip inherits Rectangle {
@@ -99,6 +99,16 @@ export component MainWindow inherits Window {
     in property <string> latency: "–";
     in property <string> preset-name;
     in property <string> undo-text;
+    in property <length> drop-y: -1px;
+
+    // Tracks.
+    in property <[TrackItem]> tracks;
+    in property <string> track-input;
+    in property <bool> track-muted;
+    in property <float> track-volume: 1;
+    in property <string> track-volume-text;
+    in property <float> track-left;
+    in property <float> track-right;
 
     // Main area.
     in property <string> editor-mode: "empty"; // empty | image | params | waiting | message
@@ -143,7 +153,19 @@ export component MainWindow inherits Window {
     callback select-slot(int);
     callback toggle-bypass(int, bool);
     callback remove-slot(int);
-    callback move-slot(int, int);
+    callback drag-hover(int, length);
+    callback drag-drop(int);
+    callback split-slot(int);
+    callback add-lane(int);
+    callback remove-lane(int);
+    callback add-to-lane(int);
+    callback select-track(int);
+    callback add-track;
+    callback rename-track;
+    callback delete-track;
+    callback cycle-input;
+    callback toggle-mute;
+    callback set-volume(float);
     callback undo-remove;
     callback open-browser;
     callback browser-filter(string, string, string, bool);
@@ -394,13 +416,33 @@ export component MainWindow inherits Window {
         latency: root.latency;
         preset-name: root.preset-name;
         undo-text: root.undo-text;
+        drop-y: root.drop-y;
+        tracks: root.tracks;
+        track-input: root.track-input;
+        track-muted: root.track-muted;
+        track-volume: root.track-volume;
+        track-volume-text: root.track-volume-text;
+        track-left: root.track-left;
+        track-right: root.track-right;
         select(id) => {
             root.select-slot(id);
             root.close-left();
         }
         toggle-bypass(id, b) => { root.toggle-bypass(id, b); }
         remove(id) => { root.remove-slot(id); }
-        move(a, b) => { root.move-slot(a, b); }
+        drag-hover(row, y) => { root.drag-hover(row, y); }
+        drag-drop(row) => { root.drag-drop(row); }
+        split(id) => { root.split-slot(id); }
+        add-lane(row) => { root.add-lane(row); }
+        remove-lane(row) => { root.remove-lane(row); }
+        add-to-lane(row) => { root.add-to-lane(row); }
+        select-track(id) => { root.select-track(id); }
+        add-track => { root.add-track(); }
+        rename-track => { root.rename-track(); }
+        delete-track => { root.delete-track(); }
+        cycle-input => { root.cycle-input(); }
+        toggle-mute => { root.toggle-mute(); }
+        set-volume(v) => { root.set-volume(v); }
         add-plugin => { root.open-browser(); }
         undo => { root.undo-remove(); }
         close => { root.close-left(); }

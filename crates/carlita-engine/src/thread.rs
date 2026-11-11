@@ -3,20 +3,33 @@
 use crate::carla::{self, Host, RawCallback};
 use crate::types::*;
 use carla_sys as sys;
-use carlita_core::chain::swap_sequence;
 use carlita_core::discovery::default_search_paths;
-use carlita_core::{PluginFormat, SlotId};
+use carlita_core::rig::{self, LinkKind, Node, NodeIo, PortSel, RigLayout};
+use carlita_core::{PluginFormat, SlotId, TrackId};
 use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 const TICK: Duration = Duration::from_millis(16);
 const METER_INTERVAL: Duration = Duration::from_millis(33);
 const CONNECT_DELAY: Duration = Duration::from_millis(400);
-/// Carla internal stereo gain at unity: used as a pass-through placeholder
-/// for plugins that failed to load or crashed, so the chain keeps flowing
-/// and Carla ids stay aligned with chain positions.
+/// Carla's internal stereo gain at unity: a pass-through placeholder for
+/// plugins that failed to load or crashed, so their path keeps sounding, and
+/// the bus that meters the rig input, the rig output and each track.
 const PLACEHOLDER_LABEL: &str = "audiogain_s";
+/// Parameter 0 of `audiogain_s`: linear gain, 0..=4.
+const GAIN_PARAM: u32 = 0;
+/// `PatchbayIcon::PATCHBAY_ICON_PLUGIN`: the group of a plugin.
+const ICON_PLUGIN: i32 = 1;
+/// Markers put into the callback queue before a patchbay refresh, so the
+/// callbacks that follow are filed under the right graph.
+const MARK_EXTERNAL: u32 = u32::MAX - 1;
+const MARK_INTERNAL: u32 = u32::MAX - 2;
+/// Groups of Carla's internal graph for the engine's own ports.
+const GROUP_AUDIO_IN: &str = "Audio Input";
+const GROUP_AUDIO_OUT: &str = "Audio Output";
+const GROUP_MIDI_IN: &str = "Midi Input";
+const GROUP_MIDI_OUT: &str = "Midi Output";
 
 /// Handle to the engine thread. Dropping it shuts the engine down.
 pub struct EngineHandle {
@@ -64,11 +77,43 @@ impl Drop for EngineHandle {
     }
 }
 
+/// What a Carla plugin is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Owner {
+    InputBus,
+    OutputBus,
+    TrackBus(TrackId),
+    Plugin(SlotId),
+}
+
+/// A Carla plugin. `Engine::slots[i]` is Carla plugin id `i`.
 struct Slot {
-    id: SlotId,
-    load: PluginLoad,
+    owner: Owner,
+    /// What was loaded (user plugins only).
+    load: Option<PluginLoad>,
     placeholder: bool,
     info: PluginRuntimeInfo,
+    /// Group of the plugin in Carla's internal graph.
+    group: Option<u32>,
+}
+
+impl Slot {
+    fn id(&self) -> Option<SlotId> {
+        match self.owner {
+            Owner::Plugin(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    fn bypassed(&self) -> bool {
+        self.load.as_ref().is_some_and(|l| l.bypassed)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum View {
+    Internal,
+    External,
 }
 
 #[derive(Default)]
@@ -81,6 +126,10 @@ struct Patchbay {
 }
 
 impl Patchbay {
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
     fn client_id(&self, name: &str) -> Option<u32> {
         self.clients
             .iter()
@@ -132,13 +181,21 @@ struct Engine {
     events: Sender<Event>,
     raw_rx: Receiver<RawCallback>,
     // Boxed so its address stays stable for Carla's callback pointer.
-    _raw_tx: Box<Sender<RawCallback>>,
+    raw_tx: Box<Sender<RawCallback>>,
     running: bool,
     config: EngineConfig,
     slots: Vec<Slot>,
+    layout: RigLayout,
     pending_loads: VecDeque<PluginLoad>,
-    loading_chain: bool,
-    patchbay: Patchbay,
+    loading_rig: bool,
+    /// Carla's internal graph: our plugins and how they are connected.
+    internal: Patchbay,
+    /// The JACK graph (other clients, for devices and auto-connect).
+    external: Patchbay,
+    /// Which graph the patchbay callbacks currently describe.
+    view: View,
+    /// The connections need to be brought in line with the layout.
+    dirty: bool,
     connect_at: Option<Instant>,
     last_meters: Instant,
     state_dir: tempfile::TempDir,
@@ -154,13 +211,17 @@ impl Engine {
             host,
             events,
             raw_rx,
-            _raw_tx: raw_tx,
+            raw_tx,
             running: false,
             config: EngineConfig::default(),
             slots: Vec::new(),
+            layout: RigLayout::default(),
             pending_loads: VecDeque::new(),
-            loading_chain: false,
-            patchbay: Patchbay::default(),
+            loading_rig: false,
+            internal: Patchbay::default(),
+            external: Patchbay::default(),
+            view: View::Internal,
+            dirty: false,
             connect_at: None,
             last_meters: Instant::now(),
             state_dir: tempfile::Builder::new()
@@ -201,25 +262,26 @@ impl Engine {
             return;
         }
         self.host.idle();
-        while let Ok(raw) = self.raw_rx.try_recv() {
-            self.on_callback(raw);
-        }
+        self.drain();
         if self.connect_at.is_some_and(|t| Instant::now() >= t) {
             self.connect_at = None;
-            self.emit(Event::Clients(
-                self.patchbay.clients_info(&self.config.client_name),
-            ));
-            if self.config.auto_connect {
-                self.connect_io();
-            }
+            self.with_external(|e| {
+                e.emit_clients();
+                if e.config.auto_connect {
+                    e.connect_io();
+                }
+            });
         }
         // Load queued plugins one per tick so the UI keeps updating.
         if let Some(load) = self.pending_loads.pop_front() {
-            self.add_plugin(load, None);
-            if self.pending_loads.is_empty() && self.loading_chain {
-                self.loading_chain = false;
-                self.emit(Event::ChainLoaded);
+            self.add_plugin(load);
+            if self.pending_loads.is_empty() && self.loading_rig {
+                self.loading_rig = false;
+                self.emit(Event::RigLoaded);
             }
+        }
+        if self.dirty {
+            self.rewire();
         }
         if self.last_meters.elapsed() >= METER_INTERVAL {
             self.last_meters = Instant::now();
@@ -231,27 +293,33 @@ impl Engine {
         match cmd {
             Command::Start(config) => self.start(config),
             Command::Stop => self.stop(),
-            Command::QueryDrivers => self.emit(Event::Drivers(carla::drivers())),
-            Command::AddPlugin { load, index } => {
+            Command::QueryDrivers => {
+                self.emit(Event::Drivers(carla::drivers()));
+                if self.running {
+                    self.with_external(|e| e.emit_clients());
+                }
+            }
+            Command::AddPlugin { load } => {
                 if self.require_running() {
-                    self.add_plugin(load, index)
+                    self.add_plugin(load)
                 }
             }
             Command::RemovePlugin { slot } => self.remove_plugin(slot),
-            Command::MovePlugin { from, to } => self.move_plugin(from, to),
+            Command::SetLayout(layout) => self.set_layout(layout),
             Command::SetBypass { slot, bypassed } => self.set_bypass(slot, bypassed),
-            Command::LoadChain { loads } => {
-                self.clear_chain();
+            Command::LoadRig { loads, layout } => {
+                self.clear_rig();
+                self.set_layout(layout);
                 if self.require_running() {
-                    self.loading_chain = true;
+                    self.loading_rig = true;
                     self.pending_loads = loads.into();
                     if self.pending_loads.is_empty() {
-                        self.loading_chain = false;
-                        self.emit(Event::ChainLoaded);
+                        self.loading_rig = false;
+                        self.emit(Event::RigLoaded);
                     }
                 }
             }
-            Command::ClearChain => self.clear_chain(),
+            Command::ClearRig => self.clear_rig(),
             Command::ReloadPlugin { load } => self.reload_plugin(load),
             Command::CaptureStates { reply } => {
                 let states = self.capture_states();
@@ -286,16 +354,14 @@ impl Engine {
             }
             Command::SendNote {
                 slot,
+                track,
                 channel,
                 note,
                 velocity,
             } => {
                 let target = match slot {
                     Some(s) => self.index_of(s),
-                    None => self
-                        .slots
-                        .iter()
-                        .position(|s| !s.placeholder && s.info.midi_ins > 0),
+                    None => self.first_midi_plugin(track),
                 };
                 if let Some(i) = target {
                     self.host
@@ -309,9 +375,29 @@ impl Engine {
                 self.config.input_client = input_client;
                 self.config.output_client = output_client;
                 if self.running {
-                    self.disconnect_io();
-                    self.connect_io();
+                    self.with_external(|e| {
+                        e.disconnect_io();
+                        e.connect_io();
+                    });
                 }
+            }
+            Command::DescribeGraph { reply } => {
+                let name = |g: u32| {
+                    self.internal
+                        .clients
+                        .get(&g)
+                        .cloned()
+                        .unwrap_or_else(|| g.to_string())
+                };
+                let mut edges: Vec<(String, String)> = self
+                    .internal
+                    .connections
+                    .values()
+                    .map(|(og, _, ig, _)| (name(*og), name(*ig)))
+                    .collect();
+                edges.sort();
+                edges.dedup();
+                let _ = reply.send(edges);
             }
             Command::Shutdown => unreachable!("handled in run loop"),
         }
@@ -325,7 +411,36 @@ impl Engine {
     }
 
     fn index_of(&self, slot: SlotId) -> Option<usize> {
-        self.slots.iter().position(|s| s.id == slot)
+        self.slots
+            .iter()
+            .position(|s| s.owner == Owner::Plugin(slot))
+    }
+
+    fn slot_of(&self, owner: Owner) -> Option<&Slot> {
+        self.slots.iter().find(|s| s.owner == owner)
+    }
+
+    /// The first running plugin that takes MIDI, in signal order.
+    fn first_midi_plugin(&self, track: Option<TrackId>) -> Option<usize> {
+        let tracks = self
+            .layout
+            .tracks
+            .iter()
+            .filter(|t| !matches!(track, Some(id) if id != t.id));
+        let order: Vec<SlotId> = RigLayout {
+            tracks: tracks.cloned().collect(),
+        }
+        .slot_ids()
+        .collect();
+        let found = order.iter().find_map(|id| {
+            let i = self.index_of(*id)?;
+            let s = &self.slots[i];
+            (!s.placeholder && s.info.midi_ins > 0).then_some(i)
+        });
+        match found {
+            None if track.is_some() => self.first_midi_plugin(None),
+            f => f,
+        }
     }
 
     // ---------------------------------------------------------------- engine
@@ -337,7 +452,7 @@ impl Engine {
         let h = &self.host;
         h.set_option(
             sys::ENGINE_OPTION_PROCESS_MODE,
-            sys::ENGINE_PROCESS_MODE_CONTINUOUS_RACK as i32,
+            sys::ENGINE_PROCESS_MODE_PATCHBAY as i32,
             None,
         );
         h.set_option(
@@ -409,10 +524,17 @@ impl Engine {
             );
         }
 
-        self.patchbay = Patchbay::default();
+        self.internal.clear();
+        self.external.clear();
+        self.view = View::Internal;
         match self.host.init(&config.driver, &config.client_name) {
             Ok(()) => {
                 self.running = true;
+                self.drain();
+                self.add_bus(Owner::InputBus);
+                self.add_bus(Owner::OutputBus);
+                self.sync_buses();
+                self.dirty = true;
                 let (sr, bs) = (self.host.sample_rate(), self.host.buffer_size());
                 log::info!("engine started: {} @ {sr} Hz, {bs} frames", config.driver);
                 self.config = config.clone();
@@ -421,8 +543,7 @@ impl Engine {
                     sample_rate: sr,
                     buffer_size: bs,
                 });
-                if self.config.driver.eq_ignore_ascii_case("jack") {
-                    self.host.patchbay_refresh();
+                if self.is_jack() {
                     self.connect_at = Some(Instant::now() + CONNECT_DELAY);
                 }
             }
@@ -443,9 +564,58 @@ impl Engine {
         self.running = false;
         self.slots.clear();
         self.pending_loads.clear();
-        self.loading_chain = false;
+        self.loading_rig = false;
+        self.connect_at = None;
+        self.dirty = false;
         while self.raw_rx.try_recv().is_ok() {}
+        self.internal.clear();
+        self.external.clear();
+        self.view = View::Internal;
         self.emit(Event::Stopped);
+    }
+
+    fn is_jack(&self) -> bool {
+        self.config.driver.to_ascii_lowercase().starts_with("jack")
+    }
+
+    /// Handles every queued Carla callback now. Called after each change to
+    /// Carla, so callbacks refer to the plugin ids as they are.
+    fn drain(&mut self) {
+        while let Ok(raw) = self.raw_rx.try_recv() {
+            self.on_callback(raw);
+        }
+    }
+
+    fn mark(&self, action: u32) {
+        let _ = self.raw_tx.send(RawCallback {
+            action,
+            plugin_id: 0,
+            value1: 0,
+            value2: 0,
+            valuef: 0.0,
+            text: String::new(),
+        });
+    }
+
+    /// Runs `f` with the JACK graph loaded into `self.external`, then
+    /// switches Carla's patchbay reports back to the internal graph.
+    fn with_external(&mut self, f: impl FnOnce(&mut Self)) {
+        if !self.running || !self.is_jack() {
+            return;
+        }
+        self.mark(MARK_EXTERNAL);
+        self.host.patchbay_refresh(true);
+        self.drain();
+        f(self);
+        self.mark(MARK_INTERNAL);
+        self.host.patchbay_refresh(false);
+        self.drain();
+    }
+
+    fn emit_clients(&self) {
+        self.emit(Event::Clients(
+            self.external.clients_info(&self.config.client_name),
+        ));
     }
 
     // --------------------------------------------------------------- plugins
@@ -522,14 +692,82 @@ impl Engine {
         }
     }
 
-    fn add_plugin(&mut self, load: PluginLoad, index: Option<usize>) {
-        let before = self.host.plugin_count();
-        let (placeholder, info) = match self.add_raw(&load) {
-            Ok(()) => {
-                let info = self.runtime_info(before);
-                self.prepare_loaded(before, &load, &info);
-                (false, info)
+    /// Adds an internal gain plugin used as a bus.
+    fn add_bus(&mut self, owner: Owner) {
+        let name = match owner {
+            Owner::InputBus => "Input".to_string(),
+            Owner::OutputBus => "Output".to_string(),
+            Owner::TrackBus(t) => format!("Track {}", t.0),
+            Owner::Plugin(_) => unreachable!("buses only"),
+        };
+        if let Err(e) = self.add_placeholder(&name) {
+            log::warn!("could not add the {name} bus: {e}");
+            return;
+        }
+        self.slots.push(Slot {
+            owner,
+            load: None,
+            placeholder: false,
+            info: PluginRuntimeInfo::default(),
+            group: None,
+        });
+        self.drain();
+        self.dirty = true;
+    }
+
+    /// Adds and removes track buses to match the layout and sets volumes.
+    fn sync_buses(&mut self) {
+        if !self.running {
+            return;
+        }
+        let tracks: Vec<(TrackId, f32)> = self
+            .layout
+            .tracks
+            .iter()
+            .map(|t| (t.id, t.volume))
+            .collect();
+        while let Some(i) = self.slots.iter().position(
+            |s| matches!(s.owner, Owner::TrackBus(t) if !tracks.iter().any(|(id, _)| *id == t)),
+        ) {
+            self.host.remove_plugin(i as u32);
+            self.slots.remove(i);
+            self.drain();
+            self.dirty = true;
+        }
+        for (id, volume) in tracks {
+            if self.slot_of(Owner::TrackBus(id)).is_none() {
+                self.add_bus(Owner::TrackBus(id));
             }
+            if let Some(i) = self
+                .slots
+                .iter()
+                .position(|s| s.owner == Owner::TrackBus(id))
+            {
+                self.host
+                    .set_parameter(i as u32, GAIN_PARAM, volume.clamp(0.0, 4.0));
+            }
+        }
+    }
+
+    fn set_layout(&mut self, layout: RigLayout) {
+        self.layout = layout;
+        self.sync_buses();
+        self.dirty = true;
+    }
+
+    fn add_plugin(&mut self, load: PluginLoad) {
+        if self.index_of(load.slot).is_some() {
+            return;
+        }
+        let id = self.host.plugin_count();
+        if id as usize != self.slots.len() {
+            log::warn!(
+                "Carla has {id} plugins but Carlita tracks {}",
+                self.slots.len()
+            );
+        }
+        let placeholder = match self.add_raw(&load) {
+            Ok(()) => false,
             Err(error) => {
                 log::warn!("failed to load {}: {error}", load.name);
                 self.emit(Event::PluginFailed {
@@ -547,41 +785,46 @@ impl Engine {
                     });
                     return;
                 }
-                (true, PluginRuntimeInfo::default())
+                true
             }
+        };
+        let info = if placeholder {
+            PluginRuntimeInfo::default()
+        } else {
+            self.runtime_info(id)
         };
         let slot = load.slot;
         self.slots.push(Slot {
-            id: slot,
-            load,
+            owner: Owner::Plugin(slot),
+            load: Some(load.clone()),
             placeholder,
             info: info.clone(),
+            group: None,
         });
-        if let Some(index) = index {
-            let from = self.slots.len() - 1;
-            self.move_plugin(from, index);
-        }
+        // Picks up the plugin's group in the internal graph.
+        self.drain();
         if !placeholder {
+            self.prepare_loaded(id, &load, &info);
             self.emit(Event::PluginLoaded { slot, info });
         }
+        self.dirty = true;
     }
 
     fn save_state_of(&mut self, i: usize) -> Option<String> {
-        if self.slots[i].placeholder {
-            return self.slots[i].load.state.clone();
+        let slot = &self.slots[i];
+        let id = slot.id()?;
+        if slot.placeholder {
+            return slot.load.as_ref().and_then(|l| l.state.clone());
         }
-        let path = self
-            .state_dir
-            .path()
-            .join(format!("save-{}.carxs", self.slots[i].id.0));
+        let path = self.state_dir.path().join(format!("save-{}.carxs", id.0));
         let s = self
             .host
             .save_state(i as u32, &path)
             .then(|| std::fs::read_to_string(&path).ok())
             .flatten();
         let _ = std::fs::remove_file(&path);
-        if s.is_some() {
-            self.slots[i].load.state = s.clone();
+        if let (Some(state), Some(load)) = (&s, self.slots[i].load.as_mut()) {
+            load.state = Some(state.clone());
         }
         s
     }
@@ -596,6 +839,8 @@ impl Engine {
             self.host.show_ui(i as u32, false);
             if self.host.remove_plugin(i as u32) {
                 self.slots.remove(i);
+                self.drain();
+                self.dirty = true;
             } else {
                 self.emit(Event::Error(self.host.last_error()));
                 return;
@@ -604,58 +849,50 @@ impl Engine {
         self.emit(Event::PluginRemoved { slot, state });
     }
 
-    fn move_plugin(&mut self, from: usize, to: usize) {
-        let n = self.slots.len();
-        if from >= n || n == 0 {
-            return;
-        }
-        for (a, b) in swap_sequence(from, to.min(n - 1)) {
-            if self.host.switch_plugins(a, b) {
-                self.slots.swap(a as usize, b as usize);
-            } else {
-                self.emit(Event::Error(format!(
-                    "Could not reorder plugins: {}",
-                    self.host.last_error()
-                )));
-                return;
-            }
-        }
-    }
-
     fn set_bypass(&mut self, slot: SlotId, bypassed: bool) {
         if let Some(l) = self.pending_loads.iter_mut().find(|l| l.slot == slot) {
             l.bypassed = bypassed;
         }
         if let Some(i) = self.index_of(slot) {
-            self.slots[i].load.bypassed = bypassed;
+            if let Some(l) = self.slots[i].load.as_mut() {
+                l.bypassed = bypassed;
+            }
             if !self.slots[i].placeholder {
                 self.apply_bypass(i as u32, &self.slots[i].info, bypassed);
+                // Plugins that cannot pass audio through are routed around.
+                if !self.slots[i].info.can_drywet {
+                    self.dirty = true;
+                }
             }
         }
         self.emit(Event::BypassChanged { slot, bypassed });
     }
 
-    fn clear_chain(&mut self) {
+    /// Removes every user plugin; the buses stay.
+    fn clear_rig(&mut self) {
         self.pending_loads.clear();
-        self.loading_chain = false;
-        if self.running && !self.slots.is_empty() {
-            for i in 0..self.slots.len() {
+        self.loading_rig = false;
+        let mut removed = Vec::new();
+        while let Some(i) = self.slots.iter().rposition(|s| s.id().is_some()) {
+            let id = self.slots[i].id().expect("plugin");
+            if self.running {
                 self.host.show_ui(i as u32, false);
+                self.host.remove_plugin(i as u32);
             }
-            self.host.remove_all();
+            self.slots.remove(i);
+            removed.push(id);
         }
-        for s in std::mem::take(&mut self.slots) {
-            self.emit(Event::PluginRemoved {
-                slot: s.id,
-                state: None,
-            });
+        self.drain();
+        self.dirty = true;
+        for slot in removed.into_iter().rev() {
+            self.emit(Event::PluginRemoved { slot, state: None });
         }
     }
 
     fn reload_plugin(&mut self, load: PluginLoad) {
         let Some(i) = self.index_of(load.slot) else {
             if self.require_running() {
-                self.add_plugin(load, None);
+                self.add_plugin(load);
             }
             return;
         };
@@ -664,14 +901,16 @@ impl Engine {
         match self.add_raw(&load) {
             Ok(()) => {
                 let info = self.runtime_info(id);
-                self.prepare_loaded(id, &load, &info);
                 let slot = load.slot;
                 self.slots[i] = Slot {
-                    id: slot,
-                    load,
+                    owner: Owner::Plugin(slot),
+                    load: Some(load.clone()),
                     placeholder: false,
                     info: info.clone(),
+                    group: None,
                 };
+                self.drain();
+                self.prepare_loaded(id, &load, &info);
                 self.emit(Event::PluginLoaded { slot, info });
             }
             Err(error) => {
@@ -679,19 +918,24 @@ impl Engine {
                 self.host.replace_plugin(id);
                 let _ = self.add_placeholder(&load.name);
                 self.slots[i].placeholder = true;
+                self.slots[i].info = PluginRuntimeInfo::default();
+                self.drain();
                 self.emit(Event::PluginFailed {
                     slot: load.slot,
                     error,
                 });
             }
         }
+        self.dirty = true;
     }
 
     fn capture_states(&mut self) -> Vec<(SlotId, Option<String>)> {
         let mut out = Vec::with_capacity(self.slots.len() + self.pending_loads.len());
         for i in 0..self.slots.len() {
-            let state = self.save_state_of(i);
-            out.push((self.slots[i].id, state));
+            if let Some(id) = self.slots[i].id() {
+                let state = self.save_state_of(i);
+                out.push((id, state));
+            }
         }
         // Plugins still waiting to load keep the state they came with.
         out.extend(self.pending_loads.iter().map(|l| (l.slot, l.state.clone())));
@@ -703,26 +947,48 @@ impl Engine {
         let Some(slot) = self.slots.get(i) else {
             return;
         };
+        let Some(slot_id) = slot.id() else { return };
         if slot.placeholder {
             return;
         }
-        let (slot_id, name) = (slot.id, slot.load.name.clone());
+        let name = slot
+            .load
+            .as_ref()
+            .map(|l| l.name.clone())
+            .unwrap_or_default();
         log::error!("plugin {name} crashed: {message}");
         self.host.replace_plugin(id);
         if self.add_placeholder(&name).is_ok() {
             self.slots[i].placeholder = true;
             self.slots[i].info = PluginRuntimeInfo::default();
+            self.slots[i].group = None;
         }
+        self.dirty = true;
         self.emit(Event::PluginCrashed {
             slot: slot_id,
             message,
         });
+        self.drain();
     }
 
     // ------------------------------------------------------------- callbacks
 
     fn on_callback(&mut self, cb: RawCallback) {
-        let slot = self.slots.get(cb.plugin_id as usize).map(|s| s.id);
+        if cb.action == MARK_EXTERNAL || cb.action == MARK_INTERNAL {
+            self.view = if cb.action == MARK_EXTERNAL {
+                View::External
+            } else {
+                View::Internal
+            };
+            // A refresh replays the whole graph.
+            match self.view {
+                View::External => self.external.clear(),
+                View::Internal => self.internal.clear(),
+            }
+            return;
+        }
+        let slot = self.slots.get(cb.plugin_id as usize).and_then(|s| s.id());
+        let internal = self.view == View::Internal;
         match cb.action {
             sys::ENGINE_CALLBACK_PLUGIN_UNAVAILABLE => self.crash(cb.plugin_id, cb.text),
             sys::ENGINE_CALLBACK_ERROR => {
@@ -767,59 +1033,80 @@ impl Engine {
             }
             sys::ENGINE_CALLBACK_PATCHBAY_CLIENT_ADDED
             | sys::ENGINE_CALLBACK_PATCHBAY_CLIENT_RENAMED => {
-                self.patchbay.clients.insert(cb.plugin_id, cb.text);
+                if internal
+                    && cb.action == sys::ENGINE_CALLBACK_PATCHBAY_CLIENT_ADDED
+                    && cb.value1 == ICON_PLUGIN
+                {
+                    if let Some(s) = self.slots.get_mut(cb.value2 as usize) {
+                        s.group = Some(cb.plugin_id);
+                    }
+                    self.dirty = true;
+                }
+                self.graph_mut().clients.insert(cb.plugin_id, cb.text);
             }
             sys::ENGINE_CALLBACK_PATCHBAY_CLIENT_REMOVED => {
-                self.patchbay.clients.remove(&cb.plugin_id);
-                self.patchbay.ports.retain(|(c, _), _| *c != cb.plugin_id);
+                let g = cb.plugin_id;
+                let pb = self.graph_mut();
+                pb.clients.remove(&g);
+                pb.ports.retain(|(c, _), _| *c != g);
+                pb.connections
+                    .retain(|_, (og, _, ig, _)| *og != g && *ig != g);
+                if internal {
+                    for s in self.slots.iter_mut().filter(|s| s.group == Some(g)) {
+                        s.group = None;
+                    }
+                    self.dirty = true;
+                }
             }
             sys::ENGINE_CALLBACK_PATCHBAY_PORT_ADDED
             | sys::ENGINE_CALLBACK_PATCHBAY_PORT_CHANGED => {
-                self.patchbay.ports.insert(
+                self.graph_mut().ports.insert(
                     (cb.plugin_id, cb.value1 as u32),
                     (cb.text, cb.value2 as u32),
                 );
+                self.dirty |= internal;
             }
             sys::ENGINE_CALLBACK_PATCHBAY_PORT_REMOVED => {
-                self.patchbay
+                self.graph_mut()
                     .ports
                     .remove(&(cb.plugin_id, cb.value1 as u32));
+                self.dirty |= internal;
             }
             sys::ENGINE_CALLBACK_PATCHBAY_CONNECTION_ADDED => {
                 let parts: Vec<u32> = cb.text.split(':').filter_map(|p| p.parse().ok()).collect();
                 if let [og, op, ig, ip] = parts[..] {
-                    self.patchbay
+                    self.graph_mut()
                         .connections
                         .insert(cb.plugin_id, (og, op, ig, ip));
                 }
             }
             sys::ENGINE_CALLBACK_PATCHBAY_CONNECTION_REMOVED => {
-                self.patchbay.connections.remove(&cb.plugin_id);
+                self.graph_mut().connections.remove(&cb.plugin_id);
             }
             sys::ENGINE_CALLBACK_ENGINE_STOPPED | sys::ENGINE_CALLBACK_QUIT if self.running => {
                 self.running = false;
                 self.slots.clear();
+                self.internal.clear();
+                self.external.clear();
                 self.emit(Event::Stopped);
             }
             _ => {}
         }
-        // Topology changes refresh the device lists in the UI.
-        if matches!(
-            cb.action,
-            sys::ENGINE_CALLBACK_PATCHBAY_CLIENT_ADDED
-                | sys::ENGINE_CALLBACK_PATCHBAY_CLIENT_REMOVED
-        ) && self.connect_at.is_none()
-        {
-            self.emit(Event::Clients(
-                self.patchbay.clients_info(&self.config.client_name),
-            ));
+    }
+
+    fn graph_mut(&mut self) -> &mut Patchbay {
+        match self.view {
+            View::Internal => &mut self.internal,
+            View::External => &mut self.external,
         }
     }
 
     // ---------------------------------------------------------- connections
 
+    /// Connects the JACK client to the input/output clients and hardware
+    /// MIDI. Runs inside `with_external`.
     fn connect_io(&mut self) {
-        let pb = &self.patchbay;
+        let pb = &self.external;
         let Some(own) = pb.client_id(&self.config.client_name) else {
             log::warn!("own JACK client not found in patchbay; skipping auto-connect");
             return;
@@ -868,23 +1155,23 @@ impl Engine {
         }
         let existing: Vec<_> = pb.connections.values().copied().collect();
         for c in todo {
-            if !existing.contains(&c) && !self.host.patchbay_connect(c.0, c.1, c.2, c.3) {
+            if !existing.contains(&c) && !self.host.patchbay_connect(true, c) {
                 log::warn!("could not connect {c:?}: {}", self.host.last_error());
             }
         }
     }
 
     fn disconnect_io(&mut self) {
-        let Some(own) = self.patchbay.client_id(&self.config.client_name) else {
+        let Some(own) = self.external.client_id(&self.config.client_name) else {
             return;
         };
         let ids: Vec<u32> = self
-            .patchbay
+            .external
             .connections
             .iter()
             .filter(|(_, (og, op, ig, ip))| {
                 let audio = |c: u32, p: u32| {
-                    self.patchbay
+                    self.external
                         .ports
                         .get(&(c, p))
                         .is_some_and(|(_, h)| is_audio(*h))
@@ -894,7 +1181,169 @@ impl Engine {
             .map(|(id, _)| *id)
             .collect();
         for id in ids {
-            self.host.patchbay_disconnect(id);
+            self.host.patchbay_disconnect(true, id);
+        }
+    }
+
+    // --------------------------------------------------------------- routing
+
+    /// The internal-graph group that stands for `node`.
+    fn group_of(&self, node: Node) -> Option<u32> {
+        let bus = |owner| self.slot_of(owner).and_then(|s| s.group);
+        match node {
+            Node::Input => bus(Owner::InputBus).or_else(|| self.internal.client_id(GROUP_AUDIO_IN)),
+            Node::Output => {
+                bus(Owner::OutputBus).or_else(|| self.internal.client_id(GROUP_AUDIO_OUT))
+            }
+            Node::MidiInput => self.internal.client_id(GROUP_MIDI_IN),
+            Node::MidiOutput => self.internal.client_id(GROUP_MIDI_OUT),
+            Node::Track(t) => bus(Owner::TrackBus(t)),
+            Node::Slot(id) => bus(Owner::Plugin(id)),
+        }
+    }
+
+    fn ports(&self, group: u32, input: bool, audio: bool) -> Vec<u32> {
+        self.internal
+            .ports_of(group, |h| {
+                is_input(h) == input && if audio { is_audio(h) } else { is_midi(h) }
+            })
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect()
+    }
+
+    fn node_io(&self, id: SlotId) -> Option<NodeIo> {
+        let s = self.slot_of(Owner::Plugin(id))?;
+        // A bypassed plugin that cannot pass audio through is left out, so
+        // the signal goes around it.
+        if !s.placeholder && s.bypassed() && !s.info.can_drywet {
+            return None;
+        }
+        let g = s.group?;
+        Some(NodeIo {
+            audio_ins: self.ports(g, true, true).len() as u32,
+            audio_outs: self.ports(g, false, true).len() as u32,
+            midi_ins: self.ports(g, true, false).len() as u32,
+            midi_outs: self.ports(g, false, false).len() as u32,
+        })
+    }
+
+    /// Port pairs that connect `outs` to `ins`: one to one, a mono output
+    /// to every input, several outputs summed into a mono input.
+    fn pair(outs: &[u32], ins: &[u32]) -> Vec<(u32, u32)> {
+        if outs.is_empty() || ins.is_empty() {
+            return Vec::new();
+        }
+        let n = outs.len().max(ins.len());
+        (0..n)
+            .map(|k| (outs[k % outs.len()], ins[k % ins.len()]))
+            .collect()
+    }
+
+    fn desired_connections(&self) -> HashSet<(u32, u32, u32, u32)> {
+        let mut out = HashSet::new();
+        let audio = |out: &mut HashSet<_>, from: u32, outs: &[u32], to: u32, ins: &[u32]| {
+            for (a, b) in Self::pair(outs, ins) {
+                out.insert((from, a, to, b));
+            }
+        };
+        // Hardware in -> input bus, output bus -> hardware out.
+        let hw_in = self.internal.client_id(GROUP_AUDIO_IN);
+        let hw_out = self.internal.client_id(GROUP_AUDIO_OUT);
+        let in_bus = self.slot_of(Owner::InputBus).and_then(|s| s.group);
+        let out_bus = self.slot_of(Owner::OutputBus).and_then(|s| s.group);
+        if let (Some(hw), Some(bus)) = (hw_in, in_bus) {
+            audio(
+                &mut out,
+                hw,
+                &self.ports(hw, false, true),
+                bus,
+                &self.ports(bus, true, true),
+            );
+        }
+        if let (Some(bus), Some(hw)) = (out_bus, hw_out) {
+            audio(
+                &mut out,
+                bus,
+                &self.ports(bus, false, true),
+                hw,
+                &self.ports(hw, true, true),
+            );
+        }
+        for link in rig::route(&self.layout, |id| self.node_io(id)) {
+            let Some(from) = self.group_of(link.from) else {
+                continue;
+            };
+            // A track whose bus is missing plays straight into the output.
+            let to = match link.to {
+                Node::Track(_) => self
+                    .group_of(link.to)
+                    .or_else(|| self.group_of(Node::Output)),
+                n => self.group_of(n),
+            };
+            let Some(to) = to else { continue };
+            match link.kind {
+                LinkKind::Audio => {
+                    let mut outs = self.ports(from, false, true);
+                    match link.sel {
+                        PortSel::All => {}
+                        PortSel::Left => outs.truncate(1),
+                        PortSel::Right => {
+                            if outs.len() > 1 {
+                                outs.remove(0);
+                            }
+                            outs.truncate(1);
+                        }
+                    }
+                    audio(&mut out, from, &outs, to, &self.ports(to, true, true));
+                }
+                LinkKind::Midi => {
+                    let outs = self.ports(from, false, false);
+                    let ins = self.ports(to, true, false);
+                    if let (Some(a), Some(b)) = (outs.first(), ins.first()) {
+                        out.insert((from, *a, to, *b));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Changes only the connections that differ from the layout. New
+    /// connections are made before old ones are removed, so a move never
+    /// leaves a gap in the signal.
+    fn rewire(&mut self) {
+        self.dirty = false;
+        if !self.running {
+            return;
+        }
+        let desired = self.desired_connections();
+        let current: HashMap<(u32, u32, u32, u32), u32> = self
+            .internal
+            .connections
+            .iter()
+            .map(|(id, c)| (*c, *id))
+            .collect();
+        let mut changed = false;
+        for c in &desired {
+            if !current.contains_key(c) {
+                if !self.host.patchbay_connect(false, *c) {
+                    log::warn!("could not connect {c:?}: {}", self.host.last_error());
+                }
+                changed = true;
+            }
+        }
+        for (c, id) in &current {
+            if !desired.contains(c) {
+                self.host.patchbay_disconnect(false, *id);
+                changed = true;
+            }
+        }
+        if changed {
+            let dirty = self.dirty;
+            self.drain();
+            // Our own connection changes do not need another pass.
+            self.dirty = dirty;
         }
     }
 
@@ -902,42 +1351,54 @@ impl Engine {
 
     fn meters(&self) -> Meters {
         let (dsp_load, xruns) = self.host.runtime_info();
-        let n = self.slots.len() as u32;
-        let (input, output) = if n == 0 {
-            ([0.0; 2], [0.0; 2])
-        } else {
-            (
-                [
-                    self.host.input_peak(0, true),
-                    self.host.input_peak(0, false),
+        let peak = |owner: Owner, input: bool| -> [f32; 2] {
+            match self.slots.iter().position(|s| s.owner == owner) {
+                Some(i) if input => [
+                    self.host.input_peak(i as u32, true),
+                    self.host.input_peak(i as u32, false),
                 ],
-                [
-                    self.host.output_peak(n - 1, true),
-                    self.host.output_peak(n - 1, false),
+                Some(i) => [
+                    self.host.output_peak(i as u32, true),
+                    self.host.output_peak(i as u32, false),
                 ],
-            )
+                None => [0.0; 2],
+            }
         };
-        let latencies = self
+        let latencies: Vec<(SlotId, u32)> = self
             .slots
             .iter()
             .enumerate()
-            .map(|(i, s)| {
-                (
-                    s.id,
+            .filter_map(|(i, s)| {
+                let id = s.id()?;
+                Some((
+                    id,
                     if s.placeholder {
                         0
                     } else {
                         self.host.latency(i as u32)
                     },
-                )
+                ))
             })
             .collect();
+        let path_latency = rig::path_latency(&self.layout, |id| {
+            latencies
+                .iter()
+                .find(|(s, _)| *s == id)
+                .map_or(0, |(_, l)| *l)
+        });
         Meters {
-            input,
-            output,
+            input: peak(Owner::InputBus, true),
+            output: peak(Owner::OutputBus, false),
+            tracks: self
+                .layout
+                .tracks
+                .iter()
+                .map(|t| (t.id, peak(Owner::TrackBus(t.id), false)))
+                .collect(),
             dsp_load,
             xruns,
             latencies,
+            path_latency,
             sample_rate: self.host.sample_rate(),
             buffer_size: self.host.buffer_size(),
         }

@@ -128,7 +128,10 @@ mod tests {
     fn round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
-        let mut s = Settings { default_preset: Some("Gig".into()), ..Default::default() };
+        let mut s = Settings {
+            default_preset: Some("Gig".into()),
+            ..Default::default()
+        };
         s.display.default_scaling = EditorScaling::Fixed(2.0);
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path), s);

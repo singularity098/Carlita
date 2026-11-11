@@ -1,6 +1,7 @@
 //! Commands, events and data exchanged with the engine thread.
 
-use carlita_core::{PluginDescriptor, SlotId};
+use carlita_core::rig::RigLayout;
+use carlita_core::{PluginDescriptor, SlotId, TrackId};
 use crossbeam_channel::Sender;
 
 /// How to start the audio engine.
@@ -14,9 +15,9 @@ pub struct EngineConfig {
     pub buffer_size: u32,
     /// Run plugins in separate bridge processes (crash isolation).
     pub isolate_plugins: bool,
-    /// JACK client whose outputs feed the chain input ("" = physical "system").
+    /// JACK client whose outputs feed the rig input ("" = physical "system").
     pub input_client: String,
-    /// JACK client the chain output is connected to ("" = physical "system").
+    /// JACK client the rig output is connected to ("" = physical "system").
     pub output_client: String,
     /// Connect inputs/outputs automatically after start.
     pub auto_connect: bool,
@@ -39,7 +40,7 @@ impl Default for EngineConfig {
     }
 }
 
-/// A plugin to place into the chain.
+/// A plugin to load. Where it sits in the rig comes from the layout.
 #[derive(Debug, Clone)]
 pub struct PluginLoad {
     pub slot: SlotId,
@@ -56,27 +57,27 @@ pub enum Command {
     Start(EngineConfig),
     Stop,
     QueryDrivers,
-    /// Append a plugin, or insert it at `index`.
+    /// Load a plugin. It is wired up once the layout mentions it.
     AddPlugin {
         load: PluginLoad,
-        index: Option<usize>,
     },
     RemovePlugin {
         slot: SlotId,
     },
-    MovePlugin {
-        from: usize,
-        to: usize,
-    },
+    /// Set the tracks and how their plugins are connected. Takes effect
+    /// while audio keeps running.
+    SetLayout(RigLayout),
     SetBypass {
         slot: SlotId,
         bypassed: bool,
     },
-    /// Replace the whole chain (preset load). Plugins load one by one.
-    LoadChain {
+    /// Replace every plugin (preset load). Plugins load one by one.
+    LoadRig {
         loads: Vec<PluginLoad>,
+        layout: RigLayout,
     },
-    ClearChain,
+    /// Remove every plugin; the tracks stay.
+    ClearRig,
     /// Reload a crashed/failed plugin from its last known state.
     ReloadPlugin {
         load: PluginLoad,
@@ -102,14 +103,21 @@ pub enum Command {
         index: u32,
         value: f32,
     },
-    /// Send a note to `slot`, or to the first plugin that accepts MIDI.
+    /// Send a note to `slot`, or else to the first plugin that accepts MIDI
+    /// in `track` (or in the whole rig).
     SendNote {
         slot: Option<SlotId>,
+        track: Option<TrackId>,
         channel: u8,
         note: u8,
         velocity: u8,
     },
-    /// Connect the chain to different JACK clients.
+    /// The internal graph's connections as (from, to) group names, one per
+    /// connected pair of groups (for diagnostics and tests).
+    DescribeGraph {
+        reply: Sender<Vec<(String, String)>>,
+    },
+    /// Connect the rig to different JACK clients.
     Reconnect {
         input_client: String,
         output_client: String,
@@ -164,27 +172,31 @@ pub struct ClientInfo {
 /// Periodic meter readings (~30 Hz).
 #[derive(Debug, Clone, Default)]
 pub struct Meters {
-    /// Peak level entering the chain, left/right, 0..1.
+    /// Peak level entering the rig, left/right, 0..1.
     pub input: [f32; 2],
-    /// Peak level leaving the chain, left/right, 0..1.
+    /// Peak level leaving the rig, left/right, 0..1.
     pub output: [f32; 2],
+    /// Peak level of each track's bus (after its volume), left/right.
+    pub tracks: Vec<(TrackId, [f32; 2])>,
     /// DSP load in percent.
     pub dsp_load: f32,
     pub xruns: u32,
-    /// Per-slot plugin delay (PDC) in samples, in chain order.
+    /// Per-slot plugin delay (PDC) in samples.
     pub latencies: Vec<(SlotId, u32)>,
+    /// The longest plugin delay through the rig, in samples.
+    pub path_latency: u32,
     pub sample_rate: f64,
     pub buffer_size: u32,
 }
 
 impl Meters {
-    /// Total chain latency in milliseconds: one buffer in, one out, plus PDC.
+    /// Total latency in milliseconds: one buffer in, one out, plus the
+    /// plugin delay along the longest path.
     pub fn total_latency_ms(&self) -> f32 {
         if self.sample_rate <= 0.0 {
             return 0.0;
         }
-        let pdc: u32 = self.latencies.iter().map(|(_, l)| *l).sum();
-        ((2 * self.buffer_size + pdc) as f64 / self.sample_rate * 1000.0) as f32
+        ((2 * self.buffer_size + self.path_latency) as f64 / self.sample_rate * 1000.0) as f32
     }
 }
 
@@ -241,8 +253,8 @@ pub enum Event {
         index: u32,
         value: f32,
     },
-    /// Chain finished loading (after `LoadChain`).
-    ChainLoaded,
+    /// Every plugin finished loading (after `LoadRig`).
+    RigLoaded,
     Meters(Meters),
     Info(String),
     Error(String),

@@ -5,10 +5,11 @@ A touch-first plugin chain host for a pedalboard: a Rust app built on the
 [Slint](https://slint.dev) UI, made for a small Linux PC with a ~12"
 touchscreen.
 
-* One live chain of plugins (LV2, VST2, VST3, CLAP, LADSPA, Carla internals,
-  and Windows plugins bridged with yabridge). Audio and MIDI flow from each
-  plugin into the next.
-* Add, remove, reorder and bypass plugins while audio keeps running.
+* Several tracks of plugins playing at once (LV2, VST2, VST3, CLAP, LADSPA,
+  Carla internals, and Windows plugins bridged with yabridge). Audio and MIDI
+  flow from each plugin into the next, and parallel blocks split the signal
+  into lanes (one can stay dry) and mix them back together.
+* Add, remove, reorder, split and bypass plugins while audio keeps running.
 * Swipe in from the **left** edge for the chain and from the **right** edge
   for options (audio, presets, MIDI learn, WiFi, Bluetooth, display, system).
 * Plugin editors fill the screen, and small fixed-size editors are scaled up.
@@ -42,6 +43,9 @@ To use a Carla you built yourself (≥ 2.6 is needed for CLAP), set
 ```bash
 packaging/appimage/build-appimage.sh
 ```
+
+CI builds the AppImage on every push and pull request (download it from the
+run's *Carlita-AppImage* artifact) and attaches it to a release for `v*` tags.
 
 This bundles Carla (engine, plugin bridges and the scanner) next to
 Carlita. When PipeWire is running, the AppImage uses PipeWire's JACK
@@ -80,7 +84,7 @@ Files are stored in `~/.config/carlita/settings.json`,
 | Crate | Purpose |
 | --- | --- |
 | `crates/carla-sys` | bindgen bindings to `libcarla_standalone2` |
-| `crates/carlita-core` | Chain model, presets, settings, plugin catalog and scanner, MIDI learn, editor scaling maths. Contains no FFI and has full unit tests. |
+| `crates/carlita-core` | Rig model (tracks, chains, parallel blocks, routing), presets, settings, plugin catalog and scanner, MIDI learn, editor scaling maths. Contains no FFI and has full unit tests. |
 | `crates/carlita-engine` | Engine thread that owns the Carla host: commands in, events and meters out |
 | `crates/carlita-x11` | Finds plugin editor windows, captures them with XComposite/XDamage and forwards input |
 | `crates/carlita-system` | NetworkManager, BlueZ and logind over D-Bus |
