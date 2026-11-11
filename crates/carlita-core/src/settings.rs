@@ -52,6 +52,9 @@ pub struct DisplaySettings {
     pub edge_strip_width: u32,
     /// Forward touches to captured editors with XTest instead of synthetic events.
     pub xtest_input: bool,
+    /// The UI theme, by name (`Theme.names` in `ui/theme.slint`; unknown
+    /// names fall back to the first, Iris). Never rename a theme.
+    pub theme: String,
 }
 
 impl Default for DisplaySettings {
@@ -64,6 +67,7 @@ impl Default for DisplaySettings {
             brightness: None,
             edge_strip_width: 18,
             xtest_input: false,
+            theme: "Iris".into(),
         }
     }
 }

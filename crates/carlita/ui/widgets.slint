@@ -13,12 +13,16 @@ export component BigButton inherits Rectangle {
     min-width: Theme.touch;
     horizontal-stretch: 0;
     border-radius: Theme.radius;
-    background: !root.enabled ? Theme.surface-2
-        : touch.pressed ? (root.primary ? Theme.accent-dim : Theme.surface-3.brighter(20%))
-        : root.primary ? Theme.accent
-        : root.danger ? Theme.danger.darker(45%)
+    background: root.primary && root.enabled ? (touch.pressed ? Theme.paint-pressed : Theme.paint)
+        : touch.pressed ? Theme.pressed
+        : root.danger ? Theme.danger.transparentize(80%)
         : Theme.surface-3;
-    animate background { duration: 60ms; }
+    border-width: 1px;
+    border-color: root.primary && root.enabled ? transparent
+        : root.danger ? Theme.danger.transparentize(40%)
+        : touch.has-hover ? Theme.border-hover
+        : Theme.border-strong;
+    opacity: root.enabled ? 1 : 0.45;
 
     HorizontalLayout {
         padding-left: Theme.pad;
@@ -29,14 +33,14 @@ export component BigButton inherits Rectangle {
             text: root.icon;
             font-size: Theme.font-large;
             vertical-alignment: center;
-            color: root.primary ? #000 : Theme.text;
+            color: root.primary && root.enabled ? Theme.on-paint : Theme.text;
         }
         if root.text != "": Text {
             text: root.text;
             font-size: Theme.font;
-            font-weight: 600;
+            font-weight: root.primary ? Theme.regular : Theme.light;
             vertical-alignment: center;
-            color: !root.enabled ? Theme.text-faint : root.primary ? #000 : Theme.text;
+            color: root.primary && root.enabled ? Theme.on-paint : Theme.text;
         }
     }
 
@@ -59,16 +63,17 @@ export component Toggle inherits Rectangle {
         width: 60px;
         height: 32px;
         border-radius: 16px;
-        background: root.checked ? Theme.accent : Theme.surface-3;
+        background: root.checked ? Theme.paint : Theme.track;
+        border-width: 1px;
+        border-color: root.checked ? transparent : Theme.border-strong;
         opacity: root.enabled ? 1 : 0.4;
-        animate background { duration: 120ms; }
         knob := Rectangle {
             width: 26px;
             height: 26px;
             y: 3px;
             x: root.checked ? parent.width - self.width - 3px : 3px;
             border-radius: 13px;
-            background: root.checked ? #000 : Theme.text;
+            background: root.checked ? Theme.on-paint : Theme.text-dim;
             animate x { duration: 120ms; easing: ease-out; }
         }
     }
@@ -91,15 +96,15 @@ export component Chip inherits Rectangle {
     min-width: label.preferred-width + 28px;
     horizontal-stretch: 0;
     border-radius: 22px;
-    background: root.selected ? Theme.accent : touch.pressed ? Theme.surface-3 : Theme.surface-2;
+    background: root.selected ? Theme.paint : touch.pressed ? Theme.pressed : Theme.surface-2;
     border-width: 1px;
-    border-color: root.selected ? Theme.accent : Theme.border;
+    border-color: root.selected ? transparent : touch.has-hover ? Theme.border-hover : Theme.border-strong;
 
     label := Text {
         text: root.text;
         font-size: Theme.font-small;
-        font-weight: 600;
-        color: root.selected ? #000 : Theme.text;
+        font-weight: Theme.regular;
+        color: root.selected ? Theme.on-paint : Theme.text;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -121,7 +126,7 @@ export component StereoMeter inherits Rectangle {
         HorizontalLayout {
             spacing: 3px;
             for level in [root.left, root.right]: Rectangle {
-                background: Theme.surface-3;
+                background: Theme.track;
                 border-radius: 3px;
                 clip: true;
                 Rectangle {
@@ -133,7 +138,8 @@ export component StereoMeter inherits Rectangle {
         }
         Text {
             text: root.label;
-            font-size: 11px;
+            font-size: 13px;
+            font-weight: Theme.regular;
             color: Theme.text-dim;
             horizontal-alignment: center;
         }
@@ -142,9 +148,9 @@ export component StereoMeter inherits Rectangle {
 
 export component SectionTitle inherits Text {
     font-size: Theme.font-small;
-    font-weight: 700;
+    font-weight: Theme.regular;
     color: Theme.text-dim;
-    letter-spacing: 1px;
+    letter-spacing: 1.5px;
 }
 
 // A row with a label on the left and arbitrary content on the right.
@@ -166,6 +172,7 @@ export component SettingRow inherits Rectangle {
             if root.detail != "": Text {
                 text: root.detail;
                 font-size: Theme.font-small;
+                font-weight: Theme.regular;
                 color: Theme.text-dim;
                 wrap: word-wrap;
             }
@@ -201,12 +208,12 @@ export component BigSlider inherits Rectangle {
         y: (parent.height - self.height) / 2;
         height: 10px;
         border-radius: 5px;
-        background: Theme.surface-3;
+        background: Theme.track;
         Rectangle {
             x: 0;
             width: parent.width * root.fraction;
             border-radius: 5px;
-            background: Theme.accent;
+            background: Theme.paint;
         }
     }
     Rectangle {
@@ -216,6 +223,8 @@ export component BigSlider inherits Rectangle {
         height: 36px;
         border-radius: 18px;
         background: touch.pressed ? Theme.accent : Theme.text;
+        border-width: 1px;
+        border-color: #00000080;
     }
     touch := TouchArea {
         function set-from(x: length) {

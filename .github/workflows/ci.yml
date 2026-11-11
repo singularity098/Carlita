@@ -43,7 +43,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y carla carla-dev libclang-dev clang libasound2-dev \
-            libxkbcommon-dev libfontconfig-dev libfuse2t64 file
+            libxkbcommon-dev libfontconfig-dev libfuse2t64 file patchelf
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

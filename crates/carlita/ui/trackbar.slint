@@ -30,7 +30,7 @@ component TrackTab inherits Rectangle {
         y: 0;
         height: 3px;
         border-radius: 1.5px;
-        background: Theme.accent;
+        background: Theme.paint;
     }
 
     row := HorizontalLayout {
@@ -41,7 +41,7 @@ component TrackTab inherits Rectangle {
         Text {
             text: root.item.name;
             font-size: Theme.font;
-            font-weight: 600;
+            font-weight: Theme.regular;
             color: root.item.selected ? Theme.text : Theme.text-dim;
             vertical-alignment: center;
             overflow: elide;
@@ -50,7 +50,7 @@ component TrackTab inherits Rectangle {
         if root.item.muted: Text {
             text: "M";
             font-size: 12px;
-            font-weight: 700;
+            font-weight: Theme.regular;
             color: Theme.warn;
             vertical-alignment: center;
         }
@@ -152,20 +152,11 @@ export component TrackBar inherits Rectangle {
         // Logo.
         Rectangle {
             width: 28px;
-            Rectangle {
+            Image {
                 width: 24px;
                 height: 24px;
                 y: (parent.height - self.height) / 2;
-                border-radius: 6px;
-                background: Theme.accent;
-                Text {
-                    text: "C";
-                    font-size: 15px;
-                    font-weight: 800;
-                    color: #000;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
+                source: @image-url("../../../assets/branding/png/carlita-app-icon-64.png");
             }
         }
 

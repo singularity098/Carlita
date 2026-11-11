@@ -4,7 +4,9 @@
 // down from the top edge), a host-owned strip on each screen edge (always
 // ours, so edge swipes work even while a plugin editor fills the screen),
 // the plugin editor in between, and two sidebars that slide over it.
-import { Theme } from "theme.slint";
+import "../../../assets/fonts/Jost-Light.ttf";
+import "../../../assets/fonts/Jost-Regular.ttf";
+import { Theme, ThemeLook } from "theme.slint";
 import { BigButton, BigSlider, Toggle, SectionTitle } from "widgets.slint";
 import { SlotItem, TrackItem, PluginItem, ParamItem, WifiItem, BtItem, MappingItem } from "types.slint";
 import { ChainPanel } from "chain.slint";
@@ -13,7 +15,7 @@ import { OptionsPanel, Options } from "options.slint";
 import { TextPrompt, Piano, TextUtil } from "keyboards.slint";
 import { TrackBar } from "trackbar.slint";
 
-export { Theme, Options, TextUtil, SlotItem, TrackItem, PluginItem, ParamItem, WifiItem, BtItem, MappingItem }
+export { Theme, ThemeLook, Options, TextUtil, SlotItem, TrackItem, PluginItem, ParamItem, WifiItem, BtItem, MappingItem }
 
 // A sidebar that follows the finger and snaps open or closed.
 component EdgeStrip inherits Rectangle {
@@ -36,12 +38,13 @@ component EdgeStrip inherits Rectangle {
         x: root.right-side ? root.width - self.width : 0;
         y: (root.height - self.height) / 2;
         border-radius: 10px;
-        background: tab-touch.pressed ? Theme.accent : Theme.surface-3;
-        opacity: 0.92;
+        background: tab-touch.pressed ? Theme.paint : Theme.popup;
+        border-width: 1px;
+        border-color: tab-touch.pressed ? transparent : Theme.border-strong;
         Text {
             text: root.icon;
             font-size: 22px;
-            color: tab-touch.pressed ? #000 : Theme.text;
+            color: tab-touch.pressed ? Theme.on-paint : Theme.text;
             horizontal-alignment: center;
             vertical-alignment: center;
         }
@@ -88,12 +91,12 @@ component TopStrip inherits Rectangle {
         x: (root.width - self.width) / 2;
         y: 0;
         border-radius: 10px;
-        background: tab-touch.pressed ? Theme.accent : Theme.surface-3;
+        background: tab-touch.pressed ? Theme.paint : Theme.popup;
         opacity: 0.92;
         Text {
             text: "Tracks";
             font-size: Theme.font-small;
-            font-weight: 600;
+            font-weight: Theme.regular;
             color: tab-touch.pressed ? #000 : Theme.text;
             horizontal-alignment: center;
             vertical-alignment: center;
@@ -142,12 +145,15 @@ export component MainWindow inherits Window {
     title: "Carlita";
     // Carlita draws its own title bar (the track bar).
     no-frame: true;
+    icon: @image-url("../../../assets/branding/png/carlita-app-icon-256.png");
     background: Theme.bg;
     min-width: 800px;
     min-height: 480px;
     preferred-width: 1280px;
     preferred-height: 800px;
     default-font-size: Theme.font;
+    default-font-family: "Jost";
+    default-font-weight: Theme.light;
 
     // ---------------------------------------------------------- properties
     in property <length> strip-width: 18px;
@@ -294,6 +300,33 @@ export component MainWindow inherits Window {
         }
     }
 
+    // ----------------------------------------------------------- background
+    // Xythos' dark background image, scaled to cover the window, and the
+    // theme's faint glows over it (top right and bottom left).
+    Image {
+        width: root.width;
+        height: root.height;
+        source: @image-url("../../../assets/background/background.png");
+        image-fit: cover;
+        accessible-role: none;
+    }
+    if Theme.glow-a.alpha > 0: Rectangle {
+        property <length> r: root.width * 0.62;
+        x: root.width * 0.85 - self.r;
+        y: -self.r;
+        width: 2 * self.r;
+        height: 2 * self.r;
+        background: @radial-gradient(circle, Theme.glow-a 0%, Theme.glow-a.transparentize(100%) 70%);
+    }
+    if Theme.glow-b.alpha > 0: Rectangle {
+        property <length> r: root.width * 0.5;
+        x: -self.r;
+        y: root.height - self.r;
+        width: 2 * self.r;
+        height: 2 * self.r;
+        background: @radial-gradient(circle, Theme.glow-b 0%, Theme.glow-b.transparentize(100%) 70%);
+    }
+
     // ------------------------------------------------------------ main area
     editor-area := Rectangle {
         x: root.strip-width;
@@ -340,7 +373,6 @@ export component MainWindow inherits Window {
                 Text {
                     text: root.editor-title;
                     font-size: Theme.font-title;
-                    font-weight: 700;
                     color: Theme.text;
                 }
                 Text {
@@ -351,6 +383,8 @@ export component MainWindow inherits Window {
                     height: 84px;
                     border-radius: Theme.radius;
                     background: Theme.surface;
+                    border-width: 1px;
+                    border-color: Theme.border-strong;
                     HorizontalLayout {
                         padding-left: Theme.pad;
                         padding-right: Theme.pad;
@@ -367,6 +401,7 @@ export component MainWindow inherits Window {
                             Text {
                                 text: p.text;
                                 font-size: Theme.font-small;
+                                font-weight: Theme.regular;
                                 color: Theme.accent;
                             }
                         }
@@ -389,12 +424,16 @@ export component MainWindow inherits Window {
         if root.editor-mode == "empty" || root.editor-mode == "waiting" || root.editor-mode == "message": VerticalLayout {
             alignment: center;
             spacing: 18px;
-            Text {
-                text: root.editor-mode == "waiting" ? "Opening " + root.editor-title + "…"
-                    : root.editor-mode == "message" ? root.editor-title
-                    : "Carlita";
+            if root.editor-mode == "empty": Image {
+                source: @image-url("../../../assets/branding/carlita-logo.svg");
+                height: 96px;
+                image-fit: contain;
+                accessible-role: image;
+                accessible-label: "Carlita";
+            }
+            if root.editor-mode != "empty": Text {
+                text: root.editor-mode == "waiting" ? "Opening " + root.editor-title + "…" : root.editor-title;
                 font-size: 34px;
-                font-weight: 700;
                 color: Theme.text;
                 horizontal-alignment: center;
             }
@@ -516,7 +555,7 @@ export component MainWindow inherits Window {
         y: root.top-inset;
         height: root.height - root.top-inset;
         background: #000;
-        opacity: 0.55 * max(root.left-pos, root.right-pos);
+        opacity: 0.6 * max(root.left-pos, root.right-pos);
         TouchArea {
             property <bool> swiped;
             moved => {
@@ -665,7 +704,7 @@ export component MainWindow inherits Window {
             x: (root.width - self.width) / 2;
             y: (root.height - self.height) / 2;
             border-radius: Theme.radius * 1.5;
-            background: Theme.surface;
+            background: Theme.popup;
             border-width: 1px;
             border-color: Theme.border;
             VerticalLayout {
@@ -707,9 +746,9 @@ export component MainWindow inherits Window {
         x: (root.width - self.width) / 2;
         y: root.height - root.keyboard-height - self.height - 24px;
         border-radius: Theme.radius;
-        background: root.toast-error ? Theme.danger.darker(40%) : Theme.surface-3;
+        background: root.toast-error ? Theme.danger.mix(#000, 25%).transparentize(5%) : Theme.popup;
         border-width: 1px;
-        border-color: root.toast-error ? Theme.danger : Theme.border;
+        border-color: root.toast-error ? Theme.danger : Theme.border-strong;
         toast-text := Text {
             width: parent.width - 40px;
             text: root.toast;
@@ -736,5 +775,17 @@ export component MainWindow inherits Window {
         ResizeHandle { direction: "ne"; x: root.width - parent.c; y: 0; width: parent.c; height: parent.c; start(d) => { root.start-resize(d); } }
         ResizeHandle { direction: "sw"; x: 0; y: root.height - parent.c; width: parent.c; height: parent.c; start(d) => { root.start-resize(d); } }
         ResizeHandle { direction: "se"; x: root.width - parent.c; y: root.height - parent.c; width: parent.c; height: parent.c; start(d) => { root.start-resize(d); } }
+    }
+
+    // Phosphor's faint CRT lines, over everything (they take no input).
+    if Theme.scanlines: Image {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        source: @image-url("../../../assets/background/scanlines.png");
+        horizontal-tiling: repeat;
+        vertical-tiling: repeat;
+        accessible-role: none;
     }
 }

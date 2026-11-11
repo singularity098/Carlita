@@ -5,8 +5,8 @@ use crate::midi_in::MidiListener;
 use crate::scan::{self, ScanMsg};
 use crate::system::{SysCmd, SysEvent, SystemWorker};
 use crate::{
-    BtItem, MainWindow, MappingItem, Options, ParamItem, PluginItem, SlotItem, TextUtil, TrackItem,
-    WifiItem,
+    BtItem, MainWindow, MappingItem, Options, ParamItem, PluginItem, SlotItem, TextUtil, Theme,
+    TrackItem, WifiItem,
 };
 use carlita_core::midi::{self, BypassChange, MidiAction, MidiMapping, MidiMessage};
 use carlita_core::paths::AppPaths;
@@ -155,6 +155,19 @@ fn with_app(app: &Rc<RefCell<App>>, f: impl FnOnce(&mut App) + 'static) {
             slint::Timer::single_shot(Duration::ZERO, move || f(&mut app.borrow_mut()));
         }
     }
+}
+
+/// Shows the theme called `name` (Iris for an unknown name) and returns the
+/// name it picked.
+fn apply_theme(ui: &MainWindow, name: &str) -> String {
+    let theme = ui.global::<Theme>();
+    let names = theme.get_names();
+    let index = names.iter().position(|n| n == name).unwrap_or(0);
+    theme.set_index(index as i32);
+    names
+        .row_data(index)
+        .map(|n| n.to_string())
+        .unwrap_or_default()
 }
 
 fn ss(s: impl AsRef<str>) -> SharedString {
@@ -322,6 +335,7 @@ impl App {
         }
         ui.window().set_fullscreen(d.fullscreen);
         ui.set_strip_width(d.edge_strip_width as f32);
+        apply_theme(ui, &d.theme);
         ui.set_browser_formats(strings(PluginFormat::ALL.iter().map(|f| f.label())));
         ui.set_browser_categories(strings(PluginCategory::ALL.iter().map(|c| c.label())));
         ui.set_keyboard_visible(self.settings.show_keyboard);
@@ -711,6 +725,10 @@ impl App {
 
         // ---- options: display
         on!(o, on_set_fullscreen, |a, v: bool| a.set_fullscreen(v));
+        on!(o, on_set_theme, |a, name: SharedString| {
+            a.settings.display.theme = apply_theme(&a.ui(), &name);
+            a.save_settings();
+        });
         on!(o, on_set_brightness, |a, v: f32| {
             a.settings.display.brightness = Some(v.round() as u32);
             a.system.send(SysCmd::SetBrightness(v.round() as u32));
