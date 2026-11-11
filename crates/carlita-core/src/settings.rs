@@ -1,6 +1,5 @@
 //! Application settings, applied immediately and saved on every change.
 
-use crate::scaling::EditorScaling;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -45,13 +44,10 @@ pub struct DisplaySettings {
     pub fullscreen: bool,
     pub window_width: u32,
     pub window_height: u32,
-    pub default_scaling: EditorScaling,
     /// Brightness 0..=100, if the hardware supports it.
     pub brightness: Option<u32>,
     /// Width of the invisible edge strips that open the sidebars, in pixels.
     pub edge_strip_width: u32,
-    /// Forward touches to captured editors with XTest instead of synthetic events.
-    pub xtest_input: bool,
     /// The UI theme, by name (`Theme.names` in `ui/theme.slint`; unknown
     /// names fall back to the first, Iris). Never rename a theme.
     pub theme: String,
@@ -63,10 +59,8 @@ impl Default for DisplaySettings {
             fullscreen: true,
             window_width: 1280,
             window_height: 800,
-            default_scaling: EditorScaling::Fit,
             brightness: None,
             edge_strip_width: 18,
-            xtest_input: false,
             theme: "Iris".into(),
         }
     }
@@ -129,6 +123,15 @@ mod tests {
     }
 
     #[test]
+    fn settings_from_before_editor_embedding_still_load() {
+        let s: Settings = serde_json::from_str(
+            r#"{"display":{"fullscreen":false,"default_scaling":"Fit","xtest_input":true}}"#,
+        )
+        .unwrap();
+        assert!(!s.display.fullscreen);
+    }
+
+    #[test]
     fn round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
@@ -136,7 +139,7 @@ mod tests {
             default_preset: Some("Gig".into()),
             ..Default::default()
         };
-        s.display.default_scaling = EditorScaling::Fixed(2.0);
+        s.display.theme = "Abyss".into();
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path), s);
     }

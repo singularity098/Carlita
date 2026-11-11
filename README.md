@@ -22,9 +22,9 @@ touchscreen.
   to bring it in.
 * Swipe in from the **left** edge for the chain and from the **right** edge
   for options (audio, presets, MIDI learn, WiFi, Bluetooth, display, system).
-* Plugin editors fill the screen, and small fixed-size editors are scaled up.
-  Touches are mapped back to the editor's own coordinates.
-* Xythos' very dark look and its themes (Display options).
+* The selected plugin's editor is shown inside Carlita's window, in the main
+  area (editors that can resize fill it).
+* A flat dark look and a choice of themes (Display options).
 * Each plugin can run in its own process, so a crashing plugin is swapped for
   a pass-through and the rest of the chain keeps playing.
 
@@ -69,11 +69,12 @@ jackd --no-realtime -d dummy -r 48000 -p 256 &
 ```
 
 ```bash
-xvfb-run -a -s "-screen 0 1280x800x24 +extension Composite" cargo test --workspace
+xvfb-run -a -s "-screen 0 1280x800x24" cargo test --workspace
 ```
 
-The engine test runs the real Carla engine against JACK. The editor-capture
-test creates an X11 window, captures it off-screen and forwards a click to it.
+The engine test runs the real Carla engine against JACK. The editor-embedding
+test creates X11 windows and checks that an editor is moved into the main
+window, hidden, shown and handed back.
 Both tests skip themselves when JACK or X is not available, unless
 `CARLITA_REQUIRE_ENGINE=1` is set (CI sets it).
 
@@ -95,9 +96,9 @@ Files are stored in `~/.config/carlita/settings.json`,
 | Crate | Purpose |
 | --- | --- |
 | `crates/carla-sys` | bindgen bindings to `libcarla_standalone2` |
-| `crates/carlita-core` | Rig model (tracks, chains, parallel blocks, routing), presets, settings, plugin catalog and scanner, MIDI learn, editor scaling maths. Contains no FFI and has full unit tests. |
+| `crates/carlita-core` | Rig model (tracks, chains, parallel blocks, routing), presets, settings, plugin catalog and scanner, MIDI learn. Contains no FFI and has full unit tests. |
 | `crates/carlita-engine` | Engine thread that owns the Carla host: commands in, events and meters out |
-| `crates/carlita-x11` | Finds plugin editor windows, captures them with XComposite/XDamage and forwards input |
+| `crates/carlita-x11` | Finds plugin editor windows and shows them inside the main window (reparenting) |
 | `crates/carlita-system` | NetworkManager, BlueZ and logind over D-Bus |
 | `crates/carlita` | The Slint app (`ui/*.slint`) and the glue between all of the above |
 
@@ -109,5 +110,5 @@ combined binary ends up under anyway, and it remains compatible with Carla.
 The `carla-sys` crate on its own is GPL-2.0-or-later.
 
 The Jost font in `assets/fonts/` is under the SIL Open Font License
-(`assets/fonts/OFL.txt`). The look, background image and themes come from
+(`assets/fonts/OFL.txt`). The look and themes come from
 [Xythos](https://github.com/singularity098/xythos).

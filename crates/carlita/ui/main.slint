@@ -3,7 +3,9 @@
 // Layout: the track bar on top (docked in a window; in fullscreen it slides
 // down from the top edge), a host-owned strip on each screen edge (always
 // ours, so edge swipes work even while a plugin editor fills the screen),
-// the plugin editor in between, and two sidebars that slide over it.
+// the plugin editor in between, and two sidebars that slide over it. A plugin
+// editor is a window of its own placed over the main area, so it is hidden
+// while anything covers that area (see `editor-covered`).
 import "../../../assets/fonts/Jost-Light.ttf";
 import "../../../assets/fonts/Jost-Regular.ttf";
 import { Theme, ThemeLook } from "theme.slint";
@@ -197,16 +199,18 @@ export component MainWindow inherits Window {
     in property <float> track-right;
 
     // Main area.
-    in property <string> editor-mode: "empty"; // empty | image | params | waiting | message
+    in property <string> editor-mode: "empty"; // empty | embedded | params | waiting | message
     in property <string> editor-title;
     in property <string> editor-message;
-    in property <image> editor-image;
-    in property <length> editor-x;
-    in property <length> editor-y;
-    in property <length> editor-w;
-    in property <length> editor-h;
+    // Where a plugin's own editor window is placed (it sits above everything
+    // drawn here, so it is hidden while something covers the main area).
+    out property <length> area-x: editor-area.x;
+    out property <length> area-y: editor-area.y;
     out property <length> area-width: editor-area.width;
     out property <length> area-height: editor-area.height;
+    out property <bool> editor-covered: root.left-pos > 0 || root.right-pos > 0
+        || (!root.docked && root.top-pos > 0) || root.browser-open || root.prompt-open
+        || root.confirm-text != "" || root.toast != "";
     in property <[ParamItem]> params;
 
     // Browser.
@@ -264,9 +268,7 @@ export component MainWindow inherits Window {
     callback browser-favorite(string);
     callback rescan;
     callback browser-keyboard;
-    callback editor-pointer(string, length, length);
-    callback editor-scroll(length, length, length);
-    callback area-resized;
+    callback area-changed;
     callback set-param(int, float);
     callback prompt-done(bool, string);
     callback confirm-done(bool);
@@ -274,14 +276,14 @@ export component MainWindow inherits Window {
     callback piano-octave(int);
     callback toggle-fullscreen;
     callback options-page(int);
-    callback sidebar-changed(bool, bool);
+    changed editor-covered => { root.area-changed(); }
 
-    function open-left() { root.left-pos = 1; root.right-pos = 0; root.top-pos = 0; root.sidebar-changed(true, false); }
-    function open-top() { root.top-pos = 1; root.left-pos = 0; root.right-pos = 0; root.sidebar-changed(false, false); }
+    function open-left() { root.left-pos = 1; root.right-pos = 0; root.top-pos = 0; }
+    function open-top() { root.top-pos = 1; root.left-pos = 0; root.right-pos = 0; }
     function close-top() { root.top-pos = 0; }
-    function close-left() { root.left-pos = 0; root.sidebar-changed(false, root.right-pos > 0); }
-    function open-right() { root.right-pos = 1; root.left-pos = 0; root.top-pos = 0; root.sidebar-changed(false, true); }
-    function close-right() { root.right-pos = 0; root.sidebar-changed(root.left-pos > 0, false); }
+    function close-left() { root.left-pos = 0; }
+    function open-right() { root.right-pos = 1; root.left-pos = 0; root.top-pos = 0; }
+    function close-right() { root.right-pos = 0; }
 
     forward-focus: keys;
     keys := FocusScope {
@@ -300,68 +302,28 @@ export component MainWindow inherits Window {
         }
     }
 
-    // ----------------------------------------------------------- background
-    // Xythos' dark background image, scaled to cover the window, and the
-    // theme's faint glows over it (top right and bottom left).
-    Image {
-        width: root.width;
-        height: root.height;
-        source: @image-url("../../../assets/background/background.png");
-        image-fit: cover;
-        accessible-role: none;
-    }
-    if Theme.glow-a.alpha > 0: Rectangle {
-        property <length> r: root.width * 0.62;
-        x: root.width * 0.85 - self.r;
-        y: -self.r;
-        width: 2 * self.r;
-        height: 2 * self.r;
-        background: @radial-gradient(circle, Theme.glow-a 0%, Theme.glow-a.transparentize(100%) 70%);
-    }
-    if Theme.glow-b.alpha > 0: Rectangle {
-        property <length> r: root.width * 0.5;
-        x: -self.r;
-        y: root.height - self.r;
-        width: 2 * self.r;
-        height: 2 * self.r;
-        background: @radial-gradient(circle, Theme.glow-b 0%, Theme.glow-b.transparentize(100%) 70%);
-    }
-
     // ------------------------------------------------------------ main area
+    // In fullscreen the area starts below the top edge strip, which a plugin
+    // editor would otherwise cover.
     editor-area := Rectangle {
         x: root.strip-width;
-        y: root.top-inset;
+        y: root.docked ? root.top-inset : root.strip-width;
         width: root.width - 2 * root.strip-width;
-        height: root.height - root.top-inset - root.keyboard-height;
+        height: root.height - self.y - root.keyboard-height;
         clip: true;
-        changed width => { root.area-resized(); }
-        changed height => { root.area-resized(); }
+        changed x => { root.area-changed(); }
+        changed y => { root.area-changed(); }
+        changed width => { root.area-changed(); }
+        changed height => { root.area-changed(); }
 
-        if root.editor-mode == "image": Rectangle {
-            Image {
-                x: root.editor-x;
-                y: root.editor-y;
-                width: root.editor-w;
-                height: root.editor-h;
-                source: root.editor-image;
-                image-fit: fill;
-                image-rendering: smooth;
-            }
-            TouchArea {
-                pointer-event(e) => {
-                    if e.kind == PointerEventKind.down {
-                        root.editor-pointer("down", self.mouse-x, self.mouse-y);
-                    } else if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
-                        root.editor-pointer("up", self.mouse-x, self.mouse-y);
-                    } else if e.kind == PointerEventKind.move {
-                        root.editor-pointer("move", self.mouse-x, self.mouse-y);
-                    }
-                }
-                scroll-event(e) => {
-                    root.editor-scroll(self.mouse-x, self.mouse-y, e.delta-y);
-                    accept
-                }
-            }
+        // The editor window covers this; it shows while the editor is
+        // hidden under a sidebar or dialog.
+        if root.editor-mode == "embedded": Text {
+            text: root.editor-title;
+            font-size: Theme.font-title;
+            color: Theme.text-faint;
+            horizontal-alignment: center;
+            vertical-alignment: center;
         }
 
         if root.editor-mode == "params": Flickable {

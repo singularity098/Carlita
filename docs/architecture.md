@@ -4,11 +4,11 @@
             ┌──────────── UI thread (Slint event loop) ────────────┐
  touch ───► │ ui/*.slint ◄──► app.rs (App state, 16 ms poll timer) │
             └───▲───────────────▲──────────────▲────────────▲──────┘
-      commands/ │ events  frames│/input   D-Bus│      MIDI  │ scan results
+      commands/ │ events   area/│events   D-Bus│      MIDI  │ scan results
     ┌───────────┴──┐  ┌─────────┴───┐  ┌───────┴──────┐ ┌───┴────┐ ┌──────────┐
-    │ engine thread│  │ x11 capture │  │ system worker│ │ midir  │ │ scanner  │
-    │ Carla host   │  │ XComposite  │  │ NM/BlueZ/    │ │ (learn)│ │ carla-   │
-    │ (patchbay)   │  │ XDamage     │  │ logind       │ │        │ │ discovery│
+    │ engine thread│  │ x11 editor  │  │ system worker│ │ midir  │ │ scanner  │
+    │ Carla host   │  │ embedding   │  │ NM/BlueZ/    │ │ (learn)│ │ carla-   │
+    │ (patchbay)   │  │ (reparent)  │  │ logind       │ │        │ │ discovery│
     └──────┬───────┘  └─────────────┘  └──────────────┘ └────────┘ └──────────┘
            │ Carla owns the realtime audio thread and plugin bridge processes
 ```
@@ -55,7 +55,7 @@
   Plugins that fail to load get the same placeholder.
 * **Presets** are JSON files that contain the whole rig, each plugin's
   Carla state (`.carxs` XML from `carla_save_plugin_state`), per-plugin
-  scaling and MIDI-learn mappings. File writes are atomic. Version 1 presets
+  and MIDI-learn mappings. File writes are atomic. Version 1 presets
   (a single chain) load as a one-track rig.
 * **Scanning** runs `carla-discovery-native` once per binary, in a separate
   process with a timeout. The results are cached in `plugins.json`.
@@ -90,9 +90,9 @@
 | On-screen text keyboard (WiFi passwords, names) | Done |
 | Virtual piano → plugins | Done. Notes go to the selected plugin if it takes MIDI, otherwise to the first plugin that does. Single touch only. |
 | Fullscreen default, windowed, F11, size remembered | Done. Real fullscreen needs a window manager (kiosk setup uses matchbox). |
-| Editor fills the main area, scaling, input mapping, per-plugin setting, native resize | Prototype done. See [editor-scaling.md](editor-scaling.md). |
+| Editor shown in the main area, native resize | Done: editors are reparented into the main window, at their own size; resizable editors fill the area. Scaling was dropped. See [editor-embedding.md](editor-embedding.md). |
 | Generic parameter page for plugins without editors | Done |
-| Dark theme, 60 fps sidebar slides that follow the finger | Done. The look and themes are Xythos' (`ui/theme.slint`; the background is `assets/background/`, Jost in `assets/fonts/`). The theme gradients need the GPU renderer (femtovg); the software renderer draws gradient fills without rounded corners. |
+| Dark theme, 60 fps sidebar slides that follow the finger | Done. The look and themes come from Xythos (`ui/theme.slint`, flat dark background; Jost in `assets/fonts/`). The theme gradients need the GPU renderer (femtovg); the software renderer draws gradient fills without rounded corners. |
 | Kiosk mode | Example systemd and xinit files in `packaging/kiosk/` |
 | AppImage | `packaging/appimage/build-appimage.sh` and a CI job on tags. The full AppImage build has not been tried yet. |
 | CLAP | Needs Carla ≥ 2.6. Ubuntu ships 2.5.8, so bundle a newer Carla in the AppImage. |

@@ -4,95 +4,64 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::properties::WmSizeHints;
-use x11rb::protocol::composite::{ConnectionExt as _, Redirect};
-use x11rb::protocol::damage::{ConnectionExt as _, ReportLevel};
 use x11rb::protocol::xproto::{
-    AtomEnum, ButtonPressEvent, ButtonReleaseEvent, ChangeWindowAttributesAux, ConfigureWindowAux,
-    ConnectionExt as _, EventMask, ImageFormat, KeyButMask, Motion, MotionNotifyEvent, StackMode,
-    Window, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, MOTION_NOTIFY_EVENT,
+    AtomEnum, ChangeWindowAttributesAux, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux,
+    EventMask, MapState, UnmapNotifyEvent, Window, WindowClass, UNMAP_NOTIFY_EVENT,
 };
-use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::protocol::Event as XEvent;
 use x11rb::rust_connection::RustConnection;
 
 /// How long to keep looking for an editor window after it was requested.
 const FIND_TIMEOUT: Duration = Duration::from_secs(15);
-/// Frame rate cap for captured editors.
-const FRAME_INTERVAL: Duration = Duration::from_millis(16);
-/// Capture at least this often even without damage events (some GL editors
-/// do not generate damage).
-const IDLE_REFRESH: Duration = Duration::from_millis(500);
-/// Off-screen position of captured editors.
-const PARK_X: i32 = -16000;
+/// How often to look for requested windows (new windows also trigger a look).
+const SEARCH_INTERVAL: Duration = Duration::from_millis(100);
+/// How long to wait for the window manager to let go of an editor window.
+const WITHDRAW_TIMEOUT: Duration = Duration::from_secs(1);
+/// How often to put an editor back if something (a window manager) takes it
+/// out of Carlita's window again.
+const MAX_REEMBED: u32 = 5;
 
-/// One captured editor frame, RGBA8, tightly packed.
-pub struct EditorFrame {
-    pub key: u64,
+/// The part of the main window an editor may use, in physical pixels
+/// relative to the main window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Area {
+    pub x: i32,
+    pub y: i32,
     pub width: u32,
     pub height: u32,
-    pub rgba: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PointerKind {
-    Down,
-    Up,
-    Move,
-    ScrollUp,
-    ScrollDown,
-}
-
-/// How pointer input reaches the editor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum InputMode {
-    /// Synthetic events with XSendEvent (no visible side effects).
-    #[default]
-    SendEvent,
-    /// Real input through XTest: while a finger is down the editor is raised
-    /// at the screen origin, unscaled, and real pointer events are injected.
-    /// Works with toolkits that ignore synthetic events, at the cost of the
-    /// unscaled editor being visible during the gesture.
-    XTest,
 }
 
 pub enum HostCommand {
-    /// Start looking for the window titled `title` and capture it.
+    /// Look for the window titled `title` and show it inside `parent` (the
+    /// main window's X11 id).
     Attach {
         key: u64,
         title: String,
+        parent: u32,
     },
+    /// Stop showing the editor and hand its window back.
     Detach {
         key: u64,
     },
-    /// Pointer event in editor coordinates.
-    Pointer {
-        key: u64,
-        kind: PointerKind,
-        x: i32,
-        y: i32,
+    /// Where editors are shown, and whether they are shown at all (hidden
+    /// while something covers the main area).
+    SetArea {
+        area: Area,
+        visible: bool,
     },
-    /// Ask a resizable editor to take a new size.
-    Resize {
-        key: u64,
-        width: u32,
-        height: u32,
-    },
-    SetInputMode(InputMode),
     Shutdown,
 }
 
 pub enum HostEvent {
-    /// The editor window was found and is being captured.
+    /// The editor window was found and is shown in the main window.
     Attached {
         key: u64,
         width: u32,
         height: u32,
-        resizable: bool,
     },
     NotFound {
         key: u64,
     },
-    Frame(EditorFrame),
     /// The editor window went away (closed or crashed).
     Lost {
         key: u64,
@@ -100,7 +69,7 @@ pub enum HostEvent {
     Unavailable(String),
 }
 
-/// Handle to the capture thread.
+/// Handle to the thread that embeds editor windows.
 pub struct EditorHost {
     tx: Sender<HostCommand>,
     events: Receiver<HostEvent>,
@@ -113,10 +82,10 @@ impl EditorHost {
         let (ev_tx, ev_rx) = unbounded();
         let thread = std::thread::Builder::new()
             .name("carlita-x11".into())
-            .spawn(move || match Capture::new(ev_tx.clone()) {
-                Ok(c) => c.run(rx),
+            .spawn(move || match Embedder::new(ev_tx.clone()) {
+                Ok(e) => e.run(rx),
                 Err(e) => {
-                    log::warn!("editor capture unavailable: {e:#}");
+                    log::warn!("editor embedding unavailable: {e:#}");
                     let _ = ev_tx.send(HostEvent::Unavailable(format!("{e:#}")));
                 }
             })
@@ -138,6 +107,8 @@ impl EditorHost {
 }
 
 impl Drop for EditorHost {
+    /// Hands every editor window back before returning, so none is destroyed
+    /// together with the main window.
     fn drop(&mut self) {
         let _ = self.tx.send(HostCommand::Shutdown);
         if let Some(t) = self.thread.take() {
@@ -148,62 +119,75 @@ impl Drop for EditorHost {
 
 struct Pending {
     title: String,
+    parent: Window,
     since: Instant,
 }
 
-struct Captured {
+/// An editor window found and being taken back from the window manager.
+struct Withdrawing {
     window: Window,
-    damage: u32,
+    parent: Window,
+    since: Instant,
+}
+
+struct Embedded {
+    /// The editor's window.
+    window: Window,
+    /// Our child of the main window that holds (and clips) it.
+    holder: Window,
     width: u32,
     height: u32,
-    dirty: bool,
-    last_frame: Instant,
-    /// Where the window was before we parked it.
-    original: (i16, i16),
+    reembeds: u32,
 }
 
 struct Atoms {
     net_wm_name: u32,
     utf8_string: u32,
+    wm_state: u32,
 }
 
-struct Capture {
+struct Embedder {
     conn: RustConnection,
     root: Window,
     atoms: Atoms,
     events: Sender<HostEvent>,
     pending: HashMap<u64, Pending>,
-    captured: HashMap<u64, Captured>,
-    input_mode: InputMode,
-    button_down: bool,
+    withdrawing: HashMap<u64, Withdrawing>,
+    embedded: HashMap<u64, Embedded>,
+    area: Area,
+    visible: bool,
 }
 
-impl Capture {
+impl Embedder {
     fn new(events: Sender<HostEvent>) -> Result<Self> {
         let (conn, screen) =
             x11rb::connect(None).context("cannot connect to the X server (is DISPLAY set?)")?;
         let root = conn.setup().roots[screen].root;
-        conn.composite_query_version(0, 4)?
-            .reply()
-            .context("XComposite extension missing")?;
-        conn.damage_query_version(1, 1)?
-            .reply()
-            .context("XDamage extension missing")?;
         let atom =
             |name: &[u8]| -> Result<u32> { Ok(conn.intern_atom(false, name)?.reply()?.atom) };
         let atoms = Atoms {
             net_wm_name: atom(b"_NET_WM_NAME")?,
             utf8_string: atom(b"UTF8_STRING")?,
+            wm_state: atom(b"WM_STATE")?,
         };
+        // New and newly mapped windows trigger a search right away, so an
+        // editor spends as little time as possible as a window of its own.
+        conn.change_window_attributes(
+            root,
+            &ChangeWindowAttributesAux::new().event_mask(EventMask::SUBSTRUCTURE_NOTIFY),
+        )?
+        .check()
+        .context("cannot watch for new windows")?;
         Ok(Self {
             conn,
             root,
             atoms,
             events,
             pending: HashMap::new(),
-            captured: HashMap::new(),
-            input_mode: InputMode::default(),
-            button_down: false,
+            withdrawing: HashMap::new(),
+            embedded: HashMap::new(),
+            area: Area::default(),
+            visible: false,
         })
     }
 
@@ -212,7 +196,7 @@ impl Capture {
     }
 
     fn run(mut self, rx: Receiver<HostCommand>) {
-        let mut last_search = Instant::now() - Duration::from_secs(1);
+        let mut last_search = Instant::now() - SEARCH_INTERVAL;
         loop {
             match rx.recv_timeout(Duration::from_millis(8)) {
                 Ok(HostCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
@@ -223,14 +207,17 @@ impl Capture {
                 }
                 Err(RecvTimeoutError::Timeout) => {}
             }
-            if !self.pending.is_empty() && last_search.elapsed() > Duration::from_millis(100) {
+            let new_windows = self.pump_x_events();
+            if !self.pending.is_empty() && (new_windows || last_search.elapsed() > SEARCH_INTERVAL)
+            {
                 last_search = Instant::now();
                 self.search_pending();
             }
-            self.pump_x_events();
-            self.capture_dirty();
+            if !self.withdrawing.is_empty() {
+                self.check_withdrawing();
+            }
         }
-        for key in self.captured.keys().copied().collect::<Vec<_>>() {
+        for key in self.embedded.keys().copied().collect::<Vec<_>>() {
             self.release(key);
         }
         let _ = self.conn.flush();
@@ -238,33 +225,39 @@ impl Capture {
 
     fn handle(&mut self, cmd: HostCommand) -> Result<()> {
         match cmd {
-            HostCommand::Attach { key, title } => {
+            HostCommand::Attach { key, title, parent } => {
+                self.withdrawing.remove(&key);
                 self.release(key);
                 self.pending.insert(
                     key,
                     Pending {
                         title,
+                        parent,
                         since: Instant::now(),
                     },
                 );
+                // Carla may have shown the window already.
+                self.search_pending();
             }
             HostCommand::Detach { key } => {
                 self.pending.remove(&key);
+                self.withdrawing.remove(&key);
                 self.release(key);
             }
-            HostCommand::Pointer { key, kind, x, y } => self.pointer(key, kind, x, y)?,
-            HostCommand::Resize { key, width, height } => {
-                if let Some(c) = self.captured.get(&key) {
-                    self.conn.configure_window(
-                        c.window,
-                        &ConfigureWindowAux::new().width(width).height(height),
-                    )?;
-                    self.conn.flush()?;
+            HostCommand::SetArea { area, visible } => {
+                let resized = area.width != self.area.width || area.height != self.area.height;
+                self.area = area;
+                self.visible = visible;
+                for key in self.embedded.keys().copied().collect::<Vec<_>>() {
+                    if resized {
+                        self.fit_resizable(key);
+                    }
+                    self.place(key);
                 }
             }
-            HostCommand::SetInputMode(m) => self.input_mode = m,
             HostCommand::Shutdown => {}
         }
+        self.conn.flush()?;
         Ok(())
     }
 
@@ -296,10 +289,42 @@ impl Capture {
         (!wm.value.is_empty()).then(|| String::from_utf8_lossy(&wm.value).into_owned())
     }
 
+    /// Whether the window has been shown. Carla sets an editor's size limits
+    /// before showing it, so a window is only taken once it is mapped.
+    fn is_mapped(&self, w: Window) -> bool {
+        self.conn
+            .get_window_attributes(w)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .is_some_and(|a| a.map_state != MapState::UNMAPPED)
+    }
+
+    /// The editor's size limits, if it can be resized.
+    fn size_limits(&self, w: Window) -> Option<((u32, u32), (u32, u32))> {
+        let hints = WmSizeHints::get_normal_hints(&self.conn, w)
+            .ok()?
+            .reply()
+            .ok()?;
+        match hints {
+            Some(h) => {
+                let min = h
+                    .min_size
+                    .map_or((1, 1), |(w, h)| (w.max(1) as u32, h.max(1) as u32));
+                let max = h
+                    .max_size
+                    .map_or((u32::MAX, u32::MAX), |(w, h)| (w as u32, h as u32));
+                (min != max).then_some((min, max))
+            }
+            None => Some(((1, 1), (u32::MAX, u32::MAX))),
+        }
+    }
+
+    /// Finds a window by title among the top-level windows and, below them,
+    /// the window manager's frames.
     fn find_window(&self, root: Window, title: &str, depth: u32) -> Option<Window> {
         let tree = self.conn.query_tree(root).ok()?.reply().ok()?;
         for &child in &tree.children {
-            if self.window_title(child).as_deref() == Some(title) {
+            if self.window_title(child).as_deref() == Some(title) && self.is_mapped(child) {
                 return Some(child);
             }
         }
@@ -318,11 +343,9 @@ impl Capture {
         for key in keys {
             let p = &self.pending[&key];
             if let Some(w) = self.find_window(self.root, &p.title, 0) {
+                let parent = p.parent;
                 self.pending.remove(&key);
-                if let Err(e) = self.start_capture(key, w) {
-                    log::warn!("cannot capture editor window: {e:#}");
-                    self.emit(HostEvent::NotFound { key });
-                }
+                self.withdraw(key, w, parent);
             } else if p.since.elapsed() > FIND_TIMEOUT {
                 self.pending.remove(&key);
                 self.emit(HostEvent::NotFound { key });
@@ -330,444 +353,265 @@ impl Capture {
         }
     }
 
-    // ------------------------------------------------------------- capture
+    // ----------------------------------------------------------- embedding
 
-    fn start_capture(&mut self, key: u64, window: Window) -> Result<()> {
-        let geo = self.conn.get_geometry(window)?.reply()?;
-        let resizable = match WmSizeHints::get_normal_hints(&self.conn, window)?.reply()? {
-            Some(h) => match (h.min_size, h.max_size) {
-                (Some(min), Some(max)) => min != max,
-                _ => true,
-            },
-            None => true,
-        };
-        // Keep the window mapped (so it keeps drawing) but off-screen, and
-        // ask the server to render it into an off-screen pixmap.
-        self.conn.change_window_attributes(
-            window,
-            &ChangeWindowAttributesAux::new().event_mask(EventMask::STRUCTURE_NOTIFY),
-        )?;
-        self.conn
-            .configure_window(window, &ConfigureWindowAux::new().x(PARK_X).y(0))?;
-        self.conn
-            .composite_redirect_window(window, Redirect::AUTOMATIC)?;
-        let damage = self.conn.generate_id()?;
-        self.conn
-            .damage_create(damage, window, ReportLevel::NON_EMPTY)?;
-        self.conn.flush()?;
+    fn is_managed(&self, w: Window) -> bool {
+        let has_state = self
+            .conn
+            .get_property(false, w, self.atoms.wm_state, self.atoms.wm_state, 0, 1)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .and_then(|p| p.value32().and_then(|mut v| v.next()))
+            // 0 = WithdrawnState.
+            .is_some_and(|state| state != 0);
+        let parent = self
+            .conn
+            .query_tree(w)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .map(|t| t.parent);
+        has_state || parent.is_some_and(|p| p != self.root)
+    }
 
-        self.captured.insert(
-            key,
-            Captured {
+    /// Takes a found editor window away from the window manager, the way a
+    /// program withdraws its own window (ICCCM 4.1.4): unmap it and tell the
+    /// window manager. Otherwise the window manager keeps treating the
+    /// window as its own and may unmap or move it later.
+    fn withdraw(&mut self, key: u64, window: Window, parent: Window) {
+        if self.is_managed(window) {
+            let _ = self.conn.unmap_window(window);
+            let ev = UnmapNotifyEvent {
+                response_type: UNMAP_NOTIFY_EVENT,
+                sequence: 0,
+                event: self.root,
                 window,
-                damage,
-                width: geo.width as u32,
-                height: geo.height as u32,
-                dirty: true,
-                last_frame: Instant::now() - FRAME_INTERVAL,
-                original: (geo.x, geo.y),
+                from_configure: false,
+            };
+            let _ = self.conn.send_event(
+                false,
+                self.root,
+                EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+                ev,
+            );
+            let _ = self.conn.flush();
+        }
+        self.withdrawing.insert(
+            key,
+            Withdrawing {
+                window,
+                parent,
+                since: Instant::now(),
             },
         );
+        self.check_withdrawing();
+    }
+
+    /// Embeds the editors the window manager has let go of.
+    fn check_withdrawing(&mut self) {
+        let keys: Vec<u64> = self.withdrawing.keys().copied().collect();
+        for key in keys {
+            let w = &self.withdrawing[&key];
+            if self.is_managed(w.window) && w.since.elapsed() < WITHDRAW_TIMEOUT {
+                continue;
+            }
+            let w = self.withdrawing.remove(&key).unwrap();
+            if let Err(e) = self.embed(key, w.window, w.parent) {
+                log::warn!("cannot embed editor window: {e:#}");
+                self.emit(HostEvent::NotFound { key });
+            }
+        }
+    }
+
+    fn embed(&mut self, key: u64, window: Window, parent: Window) -> Result<()> {
+        let geo = self.conn.get_geometry(window)?.reply()?;
+        let holder = self.conn.generate_id()?;
+        self.conn
+            .create_window(
+                x11rb::COPY_DEPTH_FROM_PARENT,
+                holder,
+                parent,
+                0,
+                0,
+                (geo.width as u32).max(1) as u16,
+                (geo.height as u32).max(1) as u16,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                x11rb::COPY_FROM_PARENT,
+                &CreateWindowAux::new().background_pixel(0),
+            )?
+            .check()
+            .context("cannot create the editor's holder window")?;
+        self.reembed(window, holder);
+        self.embedded.insert(
+            key,
+            Embedded {
+                window,
+                holder,
+                width: geo.width as u32,
+                height: geo.height as u32,
+                reembeds: 0,
+            },
+        );
+        self.fit_resizable(key);
+        self.place(key);
+        self.conn.flush()?;
         self.emit(HostEvent::Attached {
             key,
             width: geo.width as u32,
             height: geo.height as u32,
-            resizable,
         });
         Ok(())
     }
 
-    fn release(&mut self, key: u64) {
-        if let Some(c) = self.captured.remove(&key) {
-            let _ = self.conn.damage_destroy(c.damage);
+    /// Moves the editor into its holder, without hearing about it (the
+    /// move unmaps the window, which would look like the editor closing).
+    fn reembed(&self, window: Window, holder: Window) {
+        let mask = |m| ChangeWindowAttributesAux::new().event_mask(m);
+        let _ = self
+            .conn
+            .change_window_attributes(window, &mask(EventMask::NO_EVENT));
+        let _ = self.conn.reparent_window(window, holder, 0, 0);
+        let _ = self.conn.map_window(window);
+        let _ = self
+            .conn
+            .change_window_attributes(window, &mask(EventMask::STRUCTURE_NOTIFY));
+    }
+
+    /// Gives an editor that can resize the whole area (within its limits).
+    fn fit_resizable(&mut self, key: u64) {
+        let Some(e) = self.embedded.get(&key) else {
+            return;
+        };
+        // Read every time: a plugin may change its mind.
+        let Some((min, max)) = self.size_limits(e.window) else {
+            return;
+        };
+        if self.area.width == 0 || self.area.height == 0 {
+            return;
+        }
+        let w = self.area.width.clamp(min.0, max.0.max(min.0));
+        let h = self.area.height.clamp(min.1, max.1.max(min.1));
+        if (w, h) != (e.width, e.height) {
             let _ = self
                 .conn
-                .composite_unredirect_window(c.window, Redirect::AUTOMATIC);
-            let _ = self.conn.configure_window(
-                c.window,
-                &ConfigureWindowAux::new()
-                    .x(c.original.0 as i32)
-                    .y(c.original.1 as i32),
+                .configure_window(e.window, &ConfigureWindowAux::new().width(w).height(h));
+        }
+    }
+
+    /// Puts the holder in the middle of the area, as large as the editor but
+    /// no larger than the area (a larger editor is cut off at the right and
+    /// bottom), or hides it.
+    fn place(&self, key: u64) {
+        let Some(e) = self.embedded.get(&key) else {
+            return;
+        };
+        let a = self.area;
+        if !self.visible || a.width == 0 || a.height == 0 {
+            let _ = self.conn.unmap_window(e.holder);
+            return;
+        }
+        let w = e.width.min(a.width).max(1);
+        let h = e.height.min(a.height).max(1);
+        let x = a.x + (a.width - w) as i32 / 2;
+        let y = a.y + (a.height - h) as i32 / 2;
+        let _ = self.conn.configure_window(
+            e.holder,
+            &ConfigureWindowAux::new().x(x).y(y).width(w).height(h),
+        );
+        let _ = self.conn.map_window(e.holder);
+    }
+
+    /// Hands the editor window back as an unmapped top-level window (so it
+    /// is not destroyed with the main window) and removes the holder.
+    fn release(&mut self, key: u64) {
+        if let Some(e) = self.embedded.remove(&key) {
+            let _ = self.conn.change_window_attributes(
+                e.window,
+                &ChangeWindowAttributesAux::new().event_mask(EventMask::NO_EVENT),
             );
+            let _ = self.conn.unmap_window(e.window);
+            let _ = self.conn.reparent_window(e.window, self.root, 0, 0);
+            let _ = self.conn.destroy_window(e.holder);
             let _ = self.conn.flush();
         }
     }
 
+    /// The editor window is gone or was closed: drop it without touching it.
+    fn lost(&mut self, key: u64) {
+        if let Some(e) = self.embedded.remove(&key) {
+            let _ = self.conn.destroy_window(e.holder);
+            self.emit(HostEvent::Lost { key });
+        }
+    }
+
     fn key_for_window(&self, w: Window) -> Option<u64> {
-        self.captured
+        self.embedded
             .iter()
-            .find(|(_, c)| c.window == w)
+            .find(|(_, e)| e.window == w)
             .map(|(k, _)| *k)
     }
 
-    fn key_for_damage(&self, d: u32) -> Option<u64> {
-        self.captured
-            .iter()
-            .find(|(_, c)| c.damage == d)
-            .map(|(k, _)| *k)
-    }
-
-    fn pump_x_events(&mut self) {
+    /// Handles X events; returns whether a window appeared.
+    fn pump_x_events(&mut self) -> bool {
+        let mut new_windows = false;
         while let Ok(Some(ev)) = self.conn.poll_for_event() {
             match ev {
-                XEvent::DamageNotify(d) => {
-                    if let Some(k) = self.key_for_damage(d.damage) {
-                        self.captured.get_mut(&k).unwrap().dirty = true;
-                    }
-                    let _ = self
-                        .conn
-                        .damage_subtract(d.damage, x11rb::NONE, x11rb::NONE);
-                }
-                XEvent::ConfigureNotify(c) => {
+                XEvent::CreateNotify(_) | XEvent::MapNotify(_) => new_windows = true,
+                // Events about the editor itself (not the root's children).
+                XEvent::ConfigureNotify(c) if c.event == c.window => {
                     if let Some(k) = self.key_for_window(c.window) {
-                        let cap = self.captured.get_mut(&k).unwrap();
-                        cap.width = c.width as u32;
-                        cap.height = c.height as u32;
-                        cap.dirty = true;
-                        // Window managers may move it back; park it again.
-                        if c.x as i32 != PARK_X
-                            && self.input_mode == InputMode::SendEvent
-                            && !self.button_down
-                        {
-                            let _ = self.conn.configure_window(
-                                c.window,
-                                &ConfigureWindowAux::new().x(PARK_X).y(0),
-                            );
+                        let e = self.embedded.get_mut(&k).unwrap();
+                        if (e.width, e.height) != (c.width as u32, c.height as u32) {
+                            e.width = c.width as u32;
+                            e.height = c.height as u32;
+                            self.place(k);
                         }
                     }
                 }
-                XEvent::DestroyNotify(d) => {
+                XEvent::DestroyNotify(d) if d.event == d.window => {
                     if let Some(k) = self.key_for_window(d.window) {
-                        self.captured.remove(&k);
-                        self.emit(HostEvent::Lost { key: k });
+                        self.lost(k);
                     }
                 }
-                XEvent::UnmapNotify(u) => {
+                XEvent::UnmapNotify(u) if u.event == u.window => {
+                    // The plugin closed its editor (and did not just get
+                    // reparented, which unmaps the window too).
                     if let Some(k) = self.key_for_window(u.window) {
-                        self.release(k);
-                        self.emit(HostEvent::Lost { key: k });
+                        let holder = self.embedded[&k].holder;
+                        let parent = self
+                            .conn
+                            .query_tree(u.window)
+                            .ok()
+                            .and_then(|c| c.reply().ok())
+                            .map(|t| t.parent);
+                        if parent == Some(holder) {
+                            self.release(k);
+                            self.emit(HostEvent::Lost { key: k });
+                        }
+                    }
+                }
+                XEvent::ReparentNotify(r) if r.event == r.window => {
+                    // Something (a window manager tidying up) took the editor
+                    // out of the holder: put it back.
+                    if let Some(k) = self.key_for_window(r.window) {
+                        let e = self.embedded.get_mut(&k).unwrap();
+                        if r.parent != e.holder {
+                            e.reembeds += 1;
+                            if e.reembeds > MAX_REEMBED {
+                                log::warn!("editor window keeps being taken away; giving up");
+                                self.release(k);
+                                self.emit(HostEvent::Lost { key: k });
+                            } else {
+                                let (w, h) = (e.window, e.holder);
+                                self.reembed(w, h);
+                            }
+                        }
                     }
                 }
                 _ => {}
             }
         }
         let _ = self.conn.flush();
-    }
-
-    fn capture_dirty(&mut self) {
-        let keys: Vec<u64> = self.captured.keys().copied().collect();
-        for key in keys {
-            let c = &self.captured[&key];
-            let due = (c.dirty && c.last_frame.elapsed() >= FRAME_INTERVAL)
-                || c.last_frame.elapsed() >= IDLE_REFRESH;
-            if !due {
-                continue;
-            }
-            match self.grab(c.window, c.width, c.height) {
-                Ok(rgba) => {
-                    let c = self.captured.get_mut(&key).unwrap();
-                    c.dirty = false;
-                    c.last_frame = Instant::now();
-                    let (width, height) = (c.width, c.height);
-                    self.emit(HostEvent::Frame(EditorFrame {
-                        key,
-                        width,
-                        height,
-                        rgba,
-                    }));
-                }
-                Err(e) => {
-                    log::debug!("capture failed: {e:#}");
-                    self.captured.get_mut(&key).unwrap().last_frame = Instant::now();
-                }
-            }
-        }
-    }
-
-    /// Copies the window's off-screen pixmap and converts BGRX to RGBA.
-    fn grab(&self, window: Window, width: u32, height: u32) -> Result<Vec<u8>> {
-        let pixmap = self.conn.generate_id()?;
-        self.conn.composite_name_window_pixmap(window, pixmap)?;
-        let image = self
-            .conn
-            .get_image(
-                ImageFormat::Z_PIXMAP,
-                pixmap,
-                0,
-                0,
-                width as u16,
-                height as u16,
-                !0,
-            )?
-            .reply();
-        let _ = self.conn.free_pixmap(pixmap);
-        let image = image?;
-        let px = (width * height) as usize;
-        let data = image.data;
-        if data.len() < px * 4 {
-            anyhow::bail!("unexpected image format (depth {})", image.depth);
-        }
-        let mut rgba = Vec::with_capacity(px * 4);
-        for p in data.chunks_exact(4).take(px) {
-            rgba.extend_from_slice(&[p[2], p[1], p[0], 255]);
-        }
-        Ok(rgba)
-    }
-
-    // --------------------------------------------------------------- input
-
-    /// Finds the deepest child of `top` containing (x, y) (relative to `top`).
-    fn target_at(&self, top: Window, x: i32, y: i32) -> (Window, i16, i16) {
-        let (mut win, mut wx, mut wy) = (top, x as i16, y as i16);
-        for _ in 0..16 {
-            let Ok(Ok(r)) = self
-                .conn
-                .translate_coordinates(win, win, wx, wy)
-                .map(|c| c.reply())
-            else {
-                break;
-            };
-            if r.child == x11rb::NONE {
-                break;
-            }
-            let Ok(Ok(t)) = self
-                .conn
-                .translate_coordinates(win, r.child, wx, wy)
-                .map(|c| c.reply())
-            else {
-                break;
-            };
-            win = r.child;
-            wx = t.dst_x;
-            wy = t.dst_y;
-        }
-        (win, wx, wy)
-    }
-
-    fn pointer(&mut self, key: u64, kind: PointerKind, x: i32, y: i32) -> Result<()> {
-        let Some(c) = self.captured.get(&key) else {
-            return Ok(());
-        };
-        let top = c.window;
-        match kind {
-            PointerKind::Down => self.button_down = true,
-            PointerKind::Up => self.button_down = false,
-            _ => {}
-        }
-        if self.input_mode == InputMode::XTest {
-            return self.pointer_xtest(key, top, kind, x, y);
-        }
-
-        let (target, ex, ey) = self.target_at(top, x, y);
-        let origin = self
-            .conn
-            .translate_coordinates(top, self.root, 0, 0)?
-            .reply()?;
-        let (rx, ry) = (origin.dst_x + x as i16, origin.dst_y + y as i16);
-        let state = if self.button_down {
-            KeyButMask::BUTTON1
-        } else {
-            KeyButMask::default()
-        };
-        let time = x11rb::CURRENT_TIME;
-
-        match kind {
-            PointerKind::Move => {
-                let ev = MotionNotifyEvent {
-                    response_type: MOTION_NOTIFY_EVENT,
-                    detail: Motion::NORMAL,
-                    sequence: 0,
-                    time,
-                    root: self.root,
-                    event: target,
-                    child: x11rb::NONE,
-                    root_x: rx,
-                    root_y: ry,
-                    event_x: ex,
-                    event_y: ey,
-                    state,
-                    same_screen: true,
-                };
-                let mask = if self.button_down {
-                    EventMask::BUTTON_MOTION | EventMask::POINTER_MOTION
-                } else {
-                    EventMask::POINTER_MOTION
-                };
-                self.conn.send_event(true, target, mask, ev)?;
-            }
-            PointerKind::Down | PointerKind::ScrollUp | PointerKind::ScrollDown => {
-                let button = match kind {
-                    PointerKind::ScrollUp => 4,
-                    PointerKind::ScrollDown => 5,
-                    _ => 1,
-                };
-                let press = ButtonPressEvent {
-                    response_type: BUTTON_PRESS_EVENT,
-                    detail: button,
-                    sequence: 0,
-                    time,
-                    root: self.root,
-                    event: target,
-                    child: x11rb::NONE,
-                    root_x: rx,
-                    root_y: ry,
-                    event_x: ex,
-                    event_y: ey,
-                    state: KeyButMask::default(),
-                    same_screen: true,
-                };
-                self.conn
-                    .send_event(true, target, EventMask::BUTTON_PRESS, press)?;
-                if button != 1 {
-                    let release = ButtonReleaseEvent {
-                        response_type: BUTTON_RELEASE_EVENT,
-                        ..press
-                    };
-                    self.conn
-                        .send_event(true, target, EventMask::BUTTON_RELEASE, release)?;
-                }
-            }
-            PointerKind::Up => {
-                let release = ButtonReleaseEvent {
-                    response_type: BUTTON_RELEASE_EVENT,
-                    detail: 1,
-                    sequence: 0,
-                    time,
-                    root: self.root,
-                    event: target,
-                    child: x11rb::NONE,
-                    root_x: rx,
-                    root_y: ry,
-                    event_x: ex,
-                    event_y: ey,
-                    state: KeyButMask::BUTTON1,
-                    same_screen: true,
-                };
-                self.conn
-                    .send_event(true, target, EventMask::BUTTON_RELEASE, release)?;
-            }
-        }
-        if let Some(c) = self.captured.get_mut(&key) {
-            c.dirty = true;
-        }
-        self.conn.flush()?;
-        Ok(())
-    }
-
-    fn pointer_xtest(
-        &mut self,
-        key: u64,
-        top: Window,
-        kind: PointerKind,
-        x: i32,
-        y: i32,
-    ) -> Result<()> {
-        let (rx, ry) = (x as i16, y as i16);
-        match kind {
-            PointerKind::Down => {
-                self.conn.configure_window(
-                    top,
-                    &ConfigureWindowAux::new()
-                        .x(0)
-                        .y(0)
-                        .stack_mode(StackMode::ABOVE),
-                )?;
-                self.conn.xtest_fake_input(
-                    MOTION_NOTIFY_EVENT,
-                    0,
-                    x11rb::CURRENT_TIME,
-                    self.root,
-                    rx,
-                    ry,
-                    0,
-                )?;
-                self.conn.xtest_fake_input(
-                    BUTTON_PRESS_EVENT,
-                    1,
-                    x11rb::CURRENT_TIME,
-                    self.root,
-                    0,
-                    0,
-                    0,
-                )?;
-            }
-            PointerKind::Move => {
-                self.conn.xtest_fake_input(
-                    MOTION_NOTIFY_EVENT,
-                    0,
-                    x11rb::CURRENT_TIME,
-                    self.root,
-                    rx,
-                    ry,
-                    0,
-                )?;
-            }
-            PointerKind::Up => {
-                self.conn.xtest_fake_input(
-                    MOTION_NOTIFY_EVENT,
-                    0,
-                    x11rb::CURRENT_TIME,
-                    self.root,
-                    rx,
-                    ry,
-                    0,
-                )?;
-                self.conn.xtest_fake_input(
-                    BUTTON_RELEASE_EVENT,
-                    1,
-                    x11rb::CURRENT_TIME,
-                    self.root,
-                    0,
-                    0,
-                    0,
-                )?;
-                self.conn
-                    .configure_window(top, &ConfigureWindowAux::new().x(PARK_X).y(0))?;
-            }
-            PointerKind::ScrollUp | PointerKind::ScrollDown => {
-                let button = if kind == PointerKind::ScrollUp { 4 } else { 5 };
-                self.conn.configure_window(
-                    top,
-                    &ConfigureWindowAux::new()
-                        .x(0)
-                        .y(0)
-                        .stack_mode(StackMode::ABOVE),
-                )?;
-                self.conn.xtest_fake_input(
-                    MOTION_NOTIFY_EVENT,
-                    0,
-                    x11rb::CURRENT_TIME,
-                    self.root,
-                    rx,
-                    ry,
-                    0,
-                )?;
-                self.conn.xtest_fake_input(
-                    BUTTON_PRESS_EVENT,
-                    button,
-                    x11rb::CURRENT_TIME,
-                    self.root,
-                    0,
-                    0,
-                    0,
-                )?;
-                self.conn.xtest_fake_input(
-                    BUTTON_RELEASE_EVENT,
-                    button,
-                    x11rb::CURRENT_TIME,
-                    self.root,
-                    0,
-                    0,
-                    0,
-                )?;
-                self.conn
-                    .configure_window(top, &ConfigureWindowAux::new().x(PARK_X).y(0))?;
-            }
-        }
-        if let Some(c) = self.captured.get_mut(&key) {
-            c.dirty = true;
-        }
-        self.conn.flush()?;
-        Ok(())
+        new_windows
     }
 }

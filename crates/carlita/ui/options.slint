@@ -81,18 +81,11 @@ export global Options {
     in property <bool> fullscreen;
     in property <bool> brightness-available;
     in property <float> brightness;
-    in property <int> default-scaling; // index into scaling-options
-    in property <int> plugin-scaling;  // -1 = use default
     in property <string> selected-plugin;
-    in property <[string]> scaling-options: ["Off", "Fit", "100%", "150%", "200%", "300%"];
-    in property <int> input-mode; // 0 synthetic, 1 xtest
     callback set-fullscreen(bool);
     // Picks a theme by name (Theme.names).
     callback set-theme(string);
     callback set-brightness(float);
-    callback set-default-scaling(int);
-    callback set-plugin-scaling(int);
-    callback set-input-mode(int);
 
     // ---- keyboard
     in property <bool> keyboard-visible;
@@ -461,28 +454,6 @@ component DisplayPage inherits VerticalLayout {
         maximum: 100;
         value: Options.brightness;
         changed(v) => { Options.set-brightness(v); }
-    }
-    SectionTitle { text: "DEFAULT EDITOR SCALING"; }
-    ChipGrid {
-        options: Options.scaling-options;
-        selected: Options.scaling-options[Options.default-scaling];
-        picked(v) => {
-            Options.set-default-scaling(v == "Off" ? 0 : v == "Fit" ? 1 : v == "100%" ? 2 : v == "150%" ? 3 : v == "200%" ? 4 : 5);
-        }
-    }
-    if Options.selected-plugin != "": SectionTitle { text: "SCALING FOR \"" + Options.selected-plugin + "\""; }
-    if Options.selected-plugin != "": ChipGrid {
-        options: ["Default", "Off", "Fit", "100%", "150%", "200%", "300%"];
-        selected: Options.plugin-scaling < 0 ? "Default" : Options.scaling-options[Options.plugin-scaling];
-        picked(v) => {
-            Options.set-plugin-scaling(v == "Default" ? -1 : v == "Off" ? 0 : v == "Fit" ? 1 : v == "100%" ? 2 : v == "150%" ? 3 : v == "200%" ? 4 : 5);
-        }
-    }
-    SectionTitle { text: "TOUCH FORWARDING TO EDITORS"; }
-    ChipGrid {
-        options: ["Synthetic events", "XTest (compat)"];
-        selected: Options.input-mode == 0 ? "Synthetic events" : "XTest (compat)";
-        picked(v) => { Options.set-input-mode(v == "Synthetic events" ? 0 : 1); }
     }
 }
 
