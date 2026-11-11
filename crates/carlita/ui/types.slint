@@ -1,7 +1,20 @@
 // Data exchanged between Rust and the UI.
 
+// One row of the chain list: a plugin, or the header of a parallel block,
+// the header of one of its lanes, or the "dry" placeholder of an empty lane.
 export struct SlotItem {
+    // Slot id for plugin rows, -1 otherwise.
     id: int,
+    // "plugin", "parallel", "lane" or "dry"
+    kind: string,
+    // 1 inside a parallel lane.
+    depth: int,
+    // Header text for non-plugin rows.
+    label: string,
+    y: length,
+    h: length,
+    // Serial plugins can be split into a parallel block.
+    can-split: bool,
     name: string,
     format: string,
     bypassed: bool,
@@ -57,4 +70,13 @@ export struct MappingItem {
     trigger: string,
     plugin: string,
     action: string,
+}
+
+export struct TrackItem {
+    id: int,
+    name: string,
+    selected: bool,
+    muted: bool,
+    // Peak level of the track's output, 0..1.
+    level: float,
 }

@@ -236,11 +236,6 @@ impl Host {
         unsafe { sys::carla_replace_plugin(self.h, id) }
     }
 
-    pub fn switch_plugins(&self, a: u32, b: u32) -> bool {
-        // SAFETY: valid handle.
-        unsafe { sys::carla_switch_plugins(self.h, a, b) }
-    }
-
     pub fn set_active(&self, id: u32, on: bool) {
         // SAFETY: valid handle.
         unsafe { sys::carla_set_active(self.h, id, on) }
@@ -409,19 +404,22 @@ impl Host {
         unsafe { sys::carla_send_midi_note(self.h, id, channel, note, velocity) }
     }
 
-    pub fn patchbay_refresh(&self) -> bool {
+    /// Replays the internal graph (`external = false`) or the JACK graph
+    /// through the patchbay callbacks. Carla reports only the graph that was
+    /// refreshed last.
+    pub fn patchbay_refresh(&self, external: bool) -> bool {
         // SAFETY: valid handle.
-        unsafe { sys::carla_patchbay_refresh(self.h, true) }
+        unsafe { sys::carla_patchbay_refresh(self.h, external) }
     }
 
-    pub fn patchbay_connect(&self, ga: u32, pa: u32, gb: u32, pb: u32) -> bool {
+    pub fn patchbay_connect(&self, external: bool, c: (u32, u32, u32, u32)) -> bool {
         // SAFETY: valid handle.
-        unsafe { sys::carla_patchbay_connect(self.h, true, ga, pa, gb, pb) }
+        unsafe { sys::carla_patchbay_connect(self.h, external, c.0, c.1, c.2, c.3) }
     }
 
-    pub fn patchbay_disconnect(&self, connection: u32) -> bool {
+    pub fn patchbay_disconnect(&self, external: bool, connection: u32) -> bool {
         // SAFETY: valid handle.
-        unsafe { sys::carla_patchbay_disconnect(self.h, true, connection) }
+        unsafe { sys::carla_patchbay_disconnect(self.h, external, connection) }
     }
 }
 

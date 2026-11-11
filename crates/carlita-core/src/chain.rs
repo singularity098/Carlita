@@ -1,8 +1,5 @@
-//! The plugin chain: an ordered list of slots.
-//!
-//! The chain mirrors Carla's rack: slot index `i` is Carla plugin id `i`.
-//! Reordering is expressed as a sequence of adjacent swaps, which is what
-//! `carla_switch_plugins` performs while audio keeps running.
+//! Plugin slots, and the single chain that presets held before tracks
+//! existed (see [`crate::rig`] for the current model).
 
 use crate::plugin::PluginDescriptor;
 use crate::scaling::EditorScaling;
@@ -89,31 +86,8 @@ impl Chain {
         Some((i, self.slots.remove(i)))
     }
 
-    /// Moves a slot; returns the adjacent swaps that achieve it (in order).
-    pub fn move_slot(&mut self, from: usize, to: usize) -> Vec<(u32, u32)> {
-        let n = self.slots.len();
-        if from >= n || n == 0 {
-            return Vec::new();
-        }
-        let to = to.min(n - 1);
-        let swaps = swap_sequence(from, to);
-        for &(a, b) in &swaps {
-            self.slots.swap(a as usize, b as usize);
-        }
-        swaps
-    }
-
     pub fn clear(&mut self) {
         self.slots.clear();
-    }
-}
-
-/// Adjacent swaps that move the item at `from` to `to`.
-pub fn swap_sequence(from: usize, to: usize) -> Vec<(u32, u32)> {
-    if from < to {
-        (from..to).map(|i| (i as u32, i as u32 + 1)).collect()
-    } else {
-        (to..from).rev().map(|i| (i as u32 + 1, i as u32)).collect()
     }
 }
 
@@ -141,29 +115,6 @@ mod tests {
             has_custom_ui: false,
             yabridge: false,
         }
-    }
-
-    fn names(c: &Chain) -> Vec<&str> {
-        c.slots.iter().map(|s| s.name.as_str()).collect()
-    }
-
-    #[test]
-    fn moving_matches_swaps() {
-        let mut c = Chain::default();
-        for n in ["a", "b", "c", "d"] {
-            let s = c.new_slot(desc(n));
-            c.push(s);
-        }
-        let swaps = c.move_slot(0, 2);
-        assert_eq!(swaps, vec![(0, 1), (1, 2)]);
-        assert_eq!(names(&c), ["b", "c", "a", "d"]);
-        let swaps = c.move_slot(3, 0);
-        assert_eq!(swaps, vec![(3, 2), (2, 1), (1, 0)]);
-        assert_eq!(names(&c), ["d", "b", "c", "a"]);
-        assert!(c.move_slot(1, 1).is_empty());
-        // Out-of-range targets clamp to the end.
-        c.move_slot(0, 99);
-        assert_eq!(names(&c), ["b", "c", "a", "d"]);
     }
 
     #[test]

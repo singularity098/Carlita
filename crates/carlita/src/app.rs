@@ -6,13 +6,14 @@ use crate::scan::{self, ScanMsg};
 use crate::system::{SysCmd, SysEvent, SystemWorker};
 use crate::{
     BtItem, MainWindow, MappingItem, Options, ParamItem, PluginItem, SlotItem, TextUtil, Theme,
-    WifiItem,
+    TrackItem, WifiItem,
 };
 use carlita_core::midi::{self, BypassChange, MidiAction, MidiMapping, MidiMessage};
 use carlita_core::paths::AppPaths;
+use carlita_core::rig::{self, Location, Row, RowKind, Spot};
 use carlita_core::{
-    CatalogFilter, Chain, ChainSlot, EditorScaling, PluginCatalog, PluginCategory, PluginFormat,
-    Preset, PresetStore, ScaleTransform, Settings, SlotId,
+    CatalogFilter, ChainSlot, EditorScaling, PluginCatalog, PluginCategory, PluginFormat, Preset,
+    PresetStore, Rig, ScaleTransform, Settings, SlotId, TrackId,
 };
 use carlita_engine::{
     editor_window_title, Command, EngineConfig, EngineHandle, Event, Meters, PluginLoad,
@@ -27,6 +28,11 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 const UNDO_TIMEOUT: Duration = Duration::from_secs(6);
+/// Row heights of the chain list.
+const ROW_PLUGIN: f32 = 68.0;
+const ROW_PARALLEL: f32 = 52.0;
+const ROW_LANE: f32 = 40.0;
+const ROW_DRY: f32 = 48.0;
 const TOAST_TIMEOUT: Duration = Duration::from_secs(4);
 const SCALING_CHOICES: [EditorScaling; 6] = [
     EditorScaling::Off,
@@ -64,10 +70,12 @@ enum Prompt {
     Rename(String),
     WifiPassword(String),
     Search,
+    RenameTrack(TrackId),
 }
 
 enum Confirm {
     DeletePreset(String),
+    DeleteTrack(TrackId),
     Reboot,
     Shutdown,
     Restart,
@@ -86,7 +94,7 @@ struct EditorView {
 
 struct Undo {
     slot: ChainSlot,
-    index: usize,
+    location: Location,
     at: Instant,
 }
 
@@ -97,7 +105,18 @@ pub struct App {
     catalog: PluginCatalog,
     filter: CatalogFilter,
     presets: PresetStore,
-    chain: Chain,
+    rig: Rig,
+    /// The track shown in the chain panel.
+    view_track: TrackId,
+    /// Rows of the chain panel, as last shown.
+    rows: Vec<Row>,
+    /// Row a dragged plugin would be dropped on.
+    drop_row: Option<usize>,
+    /// Where the next plugin picked in the browser goes.
+    add_target: Option<Location>,
+    /// The plugin last shown for each track, shown again when the track is
+    /// picked in the track bar.
+    track_selection: HashMap<TrackId, SlotId>,
     runtime: HashMap<SlotId, SlotRuntime>,
     mappings: Vec<MidiMapping>,
     selected: Option<SlotId>,
@@ -121,6 +140,7 @@ pub struct App {
     options_page: i32,
     last_sys_refresh: Instant,
     slots_model: Rc<VecModel<SlotItem>>,
+    tracks_model: Rc<VecModel<TrackItem>>,
     meters: Meters,
     restart_requested: bool,
 }
@@ -158,6 +178,38 @@ fn strings(v: impl IntoIterator<Item = impl AsRef<str>>) -> ModelRc<SharedString
     ModelRc::new(VecModel::from(v.into_iter().map(ss).collect::<Vec<_>>()))
 }
 
+fn load_of(s: &ChainSlot) -> PluginLoad {
+    PluginLoad {
+        slot: s.id,
+        plugin: s.plugin.clone(),
+        name: s.name.clone(),
+        bypassed: s.bypassed,
+        state: s.state.clone(),
+    }
+}
+
+/// "A", "B", … for lane headers.
+fn lane_name(lane: usize) -> String {
+    let mut n = lane;
+    let mut out = String::new();
+    loop {
+        out.insert(0, (b'A' + (n % 26) as u8) as char);
+        if n < 26 {
+            return out;
+        }
+        n = n / 26 - 1;
+    }
+}
+
+/// A linear gain as decibels.
+fn volume_text(v: f32) -> String {
+    if v <= 0.0001 {
+        "-∞ dB".into()
+    } else {
+        format!("{:+.1} dB", 20.0 * v.log10())
+    }
+}
+
 fn scaling_index(s: EditorScaling) -> i32 {
     SCALING_CHOICES.iter().position(|c| *c == s).unwrap_or(1) as i32
 }
@@ -193,6 +245,10 @@ impl App {
 
         let slots_model = Rc::new(VecModel::default());
         ui.set_slots(ModelRc::from(slots_model.clone()));
+        let tracks_model = Rc::new(VecModel::default());
+        ui.set_tracks(ModelRc::from(tracks_model.clone()));
+        let rig = Rig::new();
+        let view_track = rig.tracks[0].id;
 
         let app = Rc::new(RefCell::new(App {
             ui: ui.as_weak(),
@@ -201,7 +257,12 @@ impl App {
             catalog,
             filter: CatalogFilter::default(),
             presets,
-            chain: Chain::default(),
+            rig,
+            view_track,
+            rows: Vec::new(),
+            drop_row: None,
+            add_target: None,
+            track_selection: HashMap::new(),
             runtime: HashMap::new(),
             mappings: Vec::new(),
             selected: None,
@@ -225,6 +286,7 @@ impl App {
             options_page: 0,
             last_sys_refresh: Instant::now(),
             slots_model,
+            tracks_model,
             meters: Meters::default(),
             restart_requested: false,
         }));
@@ -320,12 +382,117 @@ impl App {
             .set_bypass(SlotId(id as u64), b));
         on!(ui, on_remove_slot, |a, id: i32| a
             .remove_slot(SlotId(id as u64)));
-        on!(ui, on_move_slot, |a, from: i32, to: i32| a
-            .move_slot(from as usize, to as usize));
+        on!(ui, on_drag_hover, |a, row: i32, y: f32| a
+            .drag_hover(row as usize, y));
+        on!(ui, on_drag_drop, |a, row: i32| a.drag_drop(row as usize));
+        on!(ui, on_split_slot, |a, id: i32| {
+            if a.rig.split(SlotId(id as u64)) {
+                a.rig_changed();
+            }
+        });
+        on!(ui, on_add_lane, |a, row: i32| {
+            if let Some(r) = a.rows.get(row as usize).copied() {
+                if a.rig.add_lane(a.view_track, r.block) {
+                    a.rig_changed();
+                }
+            }
+        });
+        on!(ui, on_remove_lane, |a, row: i32| a
+            .remove_lane(row as usize));
+        on!(ui, on_add_to_lane, |a, row: i32| {
+            if let Some(Row {
+                block,
+                lane: Some(lane),
+                ..
+            }) = a.rows.get(row as usize).copied()
+            {
+                a.open_browser(Some(Location {
+                    track: a.view_track,
+                    spot: Spot::Lane {
+                        block,
+                        lane,
+                        index: usize::MAX,
+                    },
+                }));
+            }
+        });
         on!(ui, on_undo_remove, |a| a.undo_remove());
-        on!(ui, on_open_browser, |a| {
-            a.refresh_browser();
-            a.ui().set_browser_open(true);
+        on!(ui, on_open_browser, |a| a.open_browser(None));
+        on!(ui, on_select_track, |a, id: i32| a
+            .select_track(TrackId(id as u64)));
+        on!(ui, on_start_drag, |a| {
+            a.with_winit(|w| {
+                let _ = w.drag_window();
+            })
+        });
+        on!(ui, on_start_resize, |a, dir: SharedString| {
+            use slint::winit_030::winit::window::ResizeDirection as D;
+            let d = match dir.as_str() {
+                "n" => D::North,
+                "s" => D::South,
+                "e" => D::East,
+                "w" => D::West,
+                "ne" => D::NorthEast,
+                "nw" => D::NorthWest,
+                "se" => D::SouthEast,
+                _ => D::SouthWest,
+            };
+            a.with_winit(|w| {
+                let _ = w.drag_resize_window(d);
+            })
+        });
+        on!(ui, on_minimize_window, |a| a
+            .ui()
+            .window()
+            .set_minimized(true));
+        on!(ui, on_toggle_maximize, |a| {
+            let ui = a.ui();
+            let m = !ui.window().is_maximized();
+            if m {
+                a.remember_window_size();
+            }
+            ui.window().set_maximized(m);
+            ui.set_window_maximized(m);
+        });
+        // Closing saves the window size and settings in `shutdown`.
+        ui.on_close_window(|| {
+            let _ = slint::quit_event_loop();
+        });
+        on!(ui, on_add_track, |a| {
+            a.view_track = a.rig.add_track(None);
+            a.rig_changed();
+        });
+        on!(ui, on_rename_track, |a| {
+            let name = a
+                .rig
+                .track(a.view_track)
+                .map(|t| t.name.clone())
+                .unwrap_or_default();
+            a.open_prompt(
+                Prompt::RenameTrack(a.view_track),
+                "Rename track",
+                name,
+                false,
+            );
+        });
+        on!(ui, on_delete_track, |a| a.delete_track());
+        on!(ui, on_cycle_input, |a| {
+            if let Some(t) = a.rig.track_mut(a.view_track) {
+                t.input = t.input.next();
+                a.rig_changed();
+            }
+        });
+        on!(ui, on_toggle_mute, |a| {
+            if let Some(t) = a.rig.track_mut(a.view_track) {
+                t.muted = !t.muted;
+                a.rig_changed();
+            }
+        });
+        on!(ui, on_set_volume, |a, v: f32| {
+            if let Some(t) = a.rig.track_mut(a.view_track) {
+                t.volume = v.clamp(0.0, 2.0);
+                a.rig_changed();
+            }
         });
         on!(
             ui,
@@ -387,6 +554,7 @@ impl App {
             let channel = a.settings.midi.keyboard_channel;
             a.engine.send(Command::SendNote {
                 slot,
+                track: Some(a.view_track),
                 channel,
                 note: note.clamp(0, 127) as u8,
                 velocity: if on { 100 } else { 0 },
@@ -574,7 +742,7 @@ impl App {
             a.relayout_editor();
         });
         on!(o, on_set_plugin_scaling, |a, i: i32| {
-            if let Some(slot) = a.selected.and_then(|s| a.chain.get_mut(s)) {
+            if let Some(slot) = a.selected.and_then(|s| a.rig.get_mut(s)) {
                 slot.scaling = (i >= 0).then(|| SCALING_CHOICES[i.min(5) as usize]);
             }
             a.update_editor_ui();
@@ -647,6 +815,12 @@ impl App {
             self.undo = None;
             self.ui().set_undo_text(ss(""));
         }
+        // The window manager can maximize or restore the window too.
+        let ui = self.ui();
+        let maximized = ui.window().is_maximized();
+        if ui.get_window_maximized() != maximized {
+            ui.set_window_maximized(maximized);
+        }
         if self.toast_at.is_some_and(|t| t.elapsed() > TOAST_TIMEOUT) {
             self.toast_at = None;
             self.ui().set_toast(ss(""));
@@ -663,6 +837,27 @@ impl App {
                 });
             }
         }
+    }
+
+    fn with_winit(&self, f: impl FnOnce(&slint::winit_030::winit::window::Window)) {
+        use slint::winit_030::WinitWindowAccessor;
+        self.ui().window().with_winit_window(f);
+    }
+
+    /// Shows a track: its chain in the panel and the plugin last shown for
+    /// it in the main area.
+    fn select_track(&mut self, id: TrackId) {
+        if self.rig.track(id).is_none() {
+            return;
+        }
+        self.view_track = id;
+        let slot = self
+            .track_selection
+            .get(&id)
+            .copied()
+            .filter(|s| self.rig.track_of(*s) == Some(id));
+        self.select(slot);
+        self.refresh_slots();
     }
 
     fn toast(&mut self, text: impl Into<String>, error: bool) {
@@ -721,22 +916,25 @@ impl App {
     }
 
     fn loads(&self) -> Vec<PluginLoad> {
-        self.chain
-            .slots
-            .iter()
-            .map(|s| PluginLoad {
-                slot: s.id,
-                plugin: s.plugin.clone(),
-                name: s.name.clone(),
-                bypassed: s.bypassed,
-                state: s.state.clone(),
-            })
-            .collect()
+        self.rig.slots().map(load_of).collect()
+    }
+
+    fn load_rig(&self) {
+        self.engine.send(Command::LoadRig {
+            loads: self.loads(),
+            layout: self.rig.layout(),
+        });
+    }
+
+    /// Sends the rig's structure to the engine and redraws the chain.
+    fn rig_changed(&mut self) {
+        self.engine.send(Command::SetLayout(self.rig.layout()));
+        self.refresh_slots();
     }
 
     /// Pulls every plugin's current state into the chain (blocking, bounded).
     fn capture_states(&mut self) {
-        if !self.engine_running || self.chain.is_empty() {
+        if !self.engine_running || self.rig.is_empty() {
             return;
         }
         let (tx, rx) = crossbeam_channel::bounded(1);
@@ -744,7 +942,7 @@ impl App {
         match rx.recv_timeout(Duration::from_secs(8)) {
             Ok(states) => {
                 for (id, state) in states {
-                    if let (Some(slot), Some(state)) = (self.chain.get_mut(id), state) {
+                    if let (Some(slot), Some(state)) = (self.rig.get_mut(id), state) {
                         slot.state = Some(state);
                     }
                 }
@@ -780,9 +978,9 @@ impl App {
                     }
                 } else if self.reload_chain_on_start {
                     self.reload_chain_on_start = false;
-                    self.engine.send(Command::LoadChain {
-                        loads: self.loads(),
-                    });
+                    self.load_rig();
+                } else {
+                    self.engine.send(Command::SetLayout(self.rig.layout()));
                 }
                 self.engine.send(Command::QueryDrivers);
             }
@@ -859,7 +1057,7 @@ impl App {
             Event::PluginFailed { slot, error } => {
                 self.runtime.entry(slot).or_default().status = SlotStatus::Failed(error.clone());
                 let name = self
-                    .chain
+                    .rig
                     .get(slot)
                     .map(|s| s.name.clone())
                     .unwrap_or_default();
@@ -869,7 +1067,7 @@ impl App {
             Event::PluginCrashed { slot, message } => {
                 self.runtime.entry(slot).or_default().status = SlotStatus::Crashed(message);
                 let name = self
-                    .chain
+                    .rig
                     .get(slot)
                     .map(|s| s.name.clone())
                     .unwrap_or_default();
@@ -939,7 +1137,7 @@ impl App {
                     }
                 }
             }
-            Event::ChainLoaded => {
+            Event::RigLoaded => {
                 self.refresh_slots();
             }
             Event::Meters(m) => self.on_meters(m),
@@ -967,6 +1165,28 @@ impl App {
             o.set_latency(ss(&latency));
             o.set_xruns(m.xruns as i32);
         }
+        let level = m
+            .tracks
+            .iter()
+            .find(|(t, _)| *t == self.view_track)
+            .map_or([0.0; 2], |(_, l)| *l);
+        ui.set_track_left(level[0]);
+        ui.set_track_right(level[1]);
+        // Level bars on the track tabs; only redraw tabs whose level moved.
+        for i in 0..self.tracks_model.row_count() {
+            let Some(mut item) = self.tracks_model.row_data(i) else {
+                continue;
+            };
+            let l = m
+                .tracks
+                .iter()
+                .find(|(t, _)| t.0 as i32 == item.id)
+                .map_or(0.0, |(_, l)| l[0].max(l[1]));
+            if (item.level - l).abs() > 0.02 {
+                item.level = l;
+                self.tracks_model.set_row_data(i, item);
+            }
+        }
         let mut changed = false;
         for (slot, lat) in &m.latencies {
             if let Some(r) = self.runtime.get_mut(slot) {
@@ -984,7 +1204,7 @@ impl App {
 
     // ================================================================ chain
 
-    fn slot_item(&self, s: &ChainSlot) -> SlotItem {
+    fn slot_item(&self, s: &ChainSlot, row: &Row) -> SlotItem {
         let r = self.runtime.get(&s.id);
         let (status, detail) = match r.map(|r| &r.status) {
             Some(SlotStatus::Ready) => ("", String::new()),
@@ -994,6 +1214,12 @@ impl App {
         };
         SlotItem {
             id: s.id.0 as i32,
+            kind: ss("plugin"),
+            depth: row.lane.is_some() as i32,
+            label: ss(""),
+            y: 0.0,
+            h: ROW_PLUGIN,
+            can_split: row.lane.is_none(),
             name: ss(&s.name),
             format: ss(if s.plugin.yabridge {
                 format!("{} · yabridge", s.plugin.format)
@@ -1009,8 +1235,70 @@ impl App {
         }
     }
 
+    fn structure_item(kind: &str, label: String, h: f32, depth: i32) -> SlotItem {
+        SlotItem {
+            id: -1,
+            kind: ss(kind),
+            depth,
+            label: ss(label),
+            h,
+            ..Default::default()
+        }
+    }
+
+    fn row_items(&self) -> Vec<SlotItem> {
+        let Some(track) = self.rig.track(self.view_track) else {
+            return Vec::new();
+        };
+        let mut y = 0.0;
+        self.rows
+            .iter()
+            .map(|row| {
+                let mut item = match row.kind {
+                    RowKind::Plugin => {
+                        let slot = row.slot.and_then(|id| self.rig.get(id));
+                        match slot {
+                            Some(s) => self.slot_item(s, row),
+                            None => Self::structure_item("dry", String::new(), ROW_DRY, 1),
+                        }
+                    }
+                    RowKind::Parallel => {
+                        let lanes = match track.blocks.get(row.block) {
+                            Some(rig::Block::Parallel(p)) => p.lanes.len(),
+                            _ => 0,
+                        };
+                        Self::structure_item(
+                            "parallel",
+                            format!("Parallel · {lanes} lanes, mixed"),
+                            ROW_PARALLEL,
+                            0,
+                        )
+                    }
+                    RowKind::Lane => Self::structure_item(
+                        "lane",
+                        format!("Lane {}", lane_name(row.lane.unwrap_or(0))),
+                        ROW_LANE,
+                        1,
+                    ),
+                    RowKind::Dry => Self::structure_item("dry", String::new(), ROW_DRY, 1),
+                };
+                item.y = y;
+                y += item.h;
+                item
+            })
+            .collect()
+    }
+
     fn refresh_slots(&mut self) {
-        let items: Vec<SlotItem> = self.chain.slots.iter().map(|s| self.slot_item(s)).collect();
+        if self.rig.track(self.view_track).is_none() {
+            self.view_track = self.rig.ensure_track();
+        }
+        self.rows = self
+            .rig
+            .track(self.view_track)
+            .map(rig::rows)
+            .unwrap_or_default();
+        let items = self.row_items();
         if items.len() == self.slots_model.row_count() {
             for (i, item) in items.into_iter().enumerate() {
                 if self.slots_model.row_data(i).as_ref() != Some(&item) {
@@ -1020,8 +1308,50 @@ impl App {
         } else {
             self.slots_model.set_vec(items);
         }
-        self.ui()
-            .set_preset_name(ss(self.settings.current_preset.clone().unwrap_or_default()));
+        let tracks: Vec<TrackItem> = self
+            .rig
+            .tracks
+            .iter()
+            .map(|t| TrackItem {
+                id: t.id.0 as i32,
+                name: ss(&t.name),
+                selected: t.id == self.view_track,
+                muted: t.muted,
+                level: self.track_level(t.id),
+            })
+            .collect();
+        if tracks.len() == self.tracks_model.row_count() {
+            for (i, item) in tracks.into_iter().enumerate() {
+                if self.tracks_model.row_data(i).as_ref() != Some(&item) {
+                    self.tracks_model.set_row_data(i, item);
+                }
+            }
+        } else {
+            self.tracks_model.set_vec(tracks);
+        }
+        let ui = self.ui();
+        if let Some(t) = self.rig.track(self.view_track) {
+            ui.set_track_name(ss(&t.name));
+            ui.set_track_input(ss(t.input.label()));
+            ui.set_track_muted(t.muted);
+            ui.set_track_volume(t.volume);
+            ui.set_track_volume_text(ss(volume_text(t.volume)));
+        }
+        ui.set_preset_name(ss(self.settings.current_preset.clone().unwrap_or_default()));
+    }
+
+    fn track_level(&self, id: TrackId) -> f32 {
+        self.meters
+            .tracks
+            .iter()
+            .find(|(t, _)| *t == id)
+            .map_or(0.0, |(_, l)| l[0].max(l[1]))
+    }
+
+    fn open_browser(&mut self, target: Option<Location>) {
+        self.add_target = target;
+        self.refresh_browser();
+        self.ui().set_browser_open(true);
     }
 
     fn add_plugin(&mut self, key: &str) {
@@ -1033,25 +1363,26 @@ impl App {
             self.toast("The audio engine is not running", true);
             return;
         }
-        let slot = self.chain.new_slot(desc);
-        let load = PluginLoad {
-            slot: slot.id,
-            plugin: slot.plugin.clone(),
-            name: slot.name.clone(),
-            bypassed: false,
-            state: None,
-        };
+        let slot = self.rig.new_slot(desc);
+        let load = load_of(&slot);
         self.runtime.insert(slot.id, SlotRuntime::default());
-        self.chain.push(slot);
-        self.engine.send(Command::AddPlugin { load, index: None });
-        self.refresh_slots();
+        match self.add_target.take() {
+            Some(loc) => {
+                self.rig.insert(loc, slot);
+            }
+            None => {
+                self.rig.push(self.view_track, slot);
+            }
+        }
+        self.engine.send(Command::AddPlugin { load });
+        self.rig_changed();
     }
 
     fn remove_slot(&mut self, id: SlotId) {
         if self.selected == Some(id) {
             self.select(None);
         }
-        let Some((index, slot)) = self.chain.remove(id) else {
+        let Some((location, slot)) = self.rig.take(id) else {
             return;
         };
         self.runtime.remove(&id);
@@ -1061,43 +1392,138 @@ impl App {
             .set_undo_text(ss(format!("Removed {}", slot.name)));
         self.undo = Some(Undo {
             slot,
-            index,
+            location,
             at: Instant::now(),
         });
-        self.refresh_slots();
+        self.rig_changed();
         self.refresh_midi_options();
     }
 
     fn undo_remove(&mut self) {
         let Some(u) = self.undo.take() else { return };
         self.ui().set_undo_text(ss(""));
-        let index = u.index.min(self.chain.len());
-        let load = PluginLoad {
-            slot: u.slot.id,
-            plugin: u.slot.plugin.clone(),
-            name: u.slot.name.clone(),
-            bypassed: u.slot.bypassed,
-            state: u.slot.state.clone(),
-        };
+        let load = load_of(&u.slot);
         self.runtime.insert(u.slot.id, SlotRuntime::default());
-        self.chain.slots.insert(index, u.slot);
-        self.engine.send(Command::AddPlugin {
-            load,
-            index: Some(index),
-        });
-        self.refresh_slots();
+        let loc = self.rig.insert(u.location, u.slot);
+        self.view_track = loc.track;
+        self.engine.send(Command::AddPlugin { load });
+        self.rig_changed();
     }
 
-    fn move_slot(&mut self, from: usize, to: usize) {
-        if self.chain.move_slot(from, to).is_empty() {
+    /// Row the dragged row's centre (at `y` in the list) is over.
+    fn row_at(&self, y: f32) -> usize {
+        let mut top = 0.0;
+        for (i, item) in self.row_items().iter().enumerate() {
+            if y < top + item.h {
+                return i;
+            }
+            top += item.h;
+        }
+        self.rows.len()
+    }
+
+    fn drag_hover(&mut self, from: usize, y: f32) {
+        let to = self.row_at(y);
+        let items = self.row_items();
+        let valid = self
+            .rig
+            .track(self.view_track)
+            .and_then(|t| rig::drop_spot(t, &self.rows, from, to))
+            .is_some();
+        self.drop_row = valid.then_some(to);
+        // The indicator sits at the edge of the target row that the plugin
+        // ends up next to.
+        let indicator = if !valid {
+            -1.0
+        } else if to >= items.len() {
+            items.last().map_or(0.0, |l| l.y + l.h)
+        } else if to > from {
+            items[to].y + items[to].h
+        } else {
+            items[to].y
+        };
+        self.ui().set_drop_y(indicator);
+    }
+
+    fn drag_drop(&mut self, from: usize) {
+        let to = self.drop_row.take();
+        self.ui().set_drop_y(-1.0);
+        let Some(to) = to else { return };
+        let Some(track) = self.rig.track(self.view_track) else {
+            return;
+        };
+        let Some(spot) = rig::drop_spot(track, &self.rows, from, to) else {
+            return;
+        };
+        let Some(id) = self.rows.get(from).and_then(|r| r.slot) else {
+            return;
+        };
+        if self.rig.move_slot(
+            id,
+            Location {
+                track: self.view_track,
+                spot,
+            },
+        ) {
+            self.rig_changed();
+        }
+    }
+
+    fn remove_lane(&mut self, row: usize) {
+        let Some(Row {
+            block,
+            lane: Some(lane),
+            ..
+        }) = self.rows.get(row).copied()
+        else {
+            return;
+        };
+        let Some(removed) = self.rig.remove_lane(self.view_track, block, lane) else {
+            return;
+        };
+        for s in &removed {
+            if self.selected == Some(s.id) {
+                self.select(None);
+            }
+            self.runtime.remove(&s.id);
+            self.mappings.retain(|m| m.slot != s.id);
+            self.engine.send(Command::RemovePlugin { slot: s.id });
+        }
+        if !removed.is_empty() {
+            self.toast(
+                format!(
+                    "Removed lane {} and {} plugin(s)",
+                    lane_name(lane),
+                    removed.len()
+                ),
+                false,
+            );
+        }
+        self.rig_changed();
+        self.refresh_midi_options();
+    }
+
+    fn delete_track(&mut self) {
+        let Some(t) = self.rig.track(self.view_track) else {
+            return;
+        };
+        if self.rig.tracks.len() == 1 && t.is_empty() {
             return;
         }
-        self.engine.send(Command::MovePlugin { from, to });
-        self.refresh_slots();
+        let text = if t.is_empty() {
+            format!("Delete the track \"{}\"?", t.name)
+        } else {
+            format!(
+                "Delete the track \"{}\" and its {} plugin(s)?",
+                t.name,
+                t.slots().count()
+            )
+        };
+        self.open_confirm(Confirm::DeleteTrack(t.id), text);
     }
 
     fn set_bypass(&mut self, id: SlotId, bypassed: bool) {
-        if let Some(s) = self.chain.get_mut(id) {
+        if let Some(s) = self.rig.get_mut(id) {
             s.bypassed = bypassed;
             self.engine.send(Command::SetBypass { slot: id, bypassed });
             self.refresh_slots();
@@ -1113,18 +1539,16 @@ impl App {
                 self.runtime.get(&id).map(|r| &r.status),
                 Some(SlotStatus::Crashed(_) | SlotStatus::Failed(_))
             ) {
-                if let Some(s) = self.chain.get(id) {
-                    let load = PluginLoad {
-                        slot: id,
-                        plugin: s.plugin.clone(),
-                        name: s.name.clone(),
-                        bypassed: s.bypassed,
-                        state: s.state.clone(),
-                    };
+                if let Some(s) = self.rig.get(id) {
+                    let load = load_of(s);
                     self.runtime.entry(id).or_default().status = SlotStatus::Loading;
                     self.engine.send(Command::ReloadPlugin { load });
                 }
             }
+        }
+        if let Some((id, t)) = slot.and_then(|id| Some((id, self.rig.track_of(id)?))) {
+            self.view_track = t;
+            self.track_selection.insert(t, id);
         }
         if self.selected != slot {
             self.hide_editor();
@@ -1142,7 +1566,7 @@ impl App {
     }
 
     fn show_editor(&mut self, slot: SlotId) {
-        let Some(s) = self.chain.get(slot) else {
+        let Some(s) = self.rig.get(slot) else {
             return;
         };
         let name = s.name.clone();
@@ -1213,7 +1637,7 @@ impl App {
     }
 
     fn scaling_for(&self, slot: SlotId) -> EditorScaling {
-        self.chain
+        self.rig
             .get(slot)
             .and_then(|s| s.scaling)
             .unwrap_or(self.settings.display.default_scaling)
@@ -1222,7 +1646,7 @@ impl App {
     fn update_editor_ui(&self) {
         let ui = self.ui();
         let o = ui.global::<Options>();
-        match self.selected.and_then(|s| self.chain.get(s)) {
+        match self.selected.and_then(|s| self.rig.get(s)) {
             Some(s) => {
                 o.set_selected_plugin(ss(&s.name));
                 o.set_plugin_scaling(s.scaling.map_or(-1, scaling_index));
@@ -1303,7 +1727,7 @@ impl App {
                 if self.editor.as_ref().is_some_and(|ed| ed.slot.0 == key) {
                     let slot = SlotId(key);
                     let name = self
-                        .chain
+                        .rig
                         .get(slot)
                         .map(|s| s.name.clone())
                         .unwrap_or_default();
@@ -1318,7 +1742,7 @@ impl App {
             HostEvent::Lost { key } => {
                 if self.editor.as_ref().is_some_and(|ed| ed.slot.0 == key) {
                     let name = self
-                        .chain
+                        .rig
                         .get(SlotId(key))
                         .map(|s| s.name.clone())
                         .unwrap_or_default();
@@ -1387,7 +1811,7 @@ impl App {
 
     fn save_preset(&mut self, name: &str) {
         self.capture_states();
-        let preset = Preset::new(name.trim(), self.chain.clone(), self.mappings.clone());
+        let preset = Preset::new(name.trim(), self.rig.clone(), self.mappings.clone());
         match self.presets.save(&preset) {
             Ok(()) => {
                 self.settings.current_preset = Some(preset.name.clone());
@@ -1412,20 +1836,18 @@ impl App {
         self.selected = None;
         self.undo = None;
         self.ui().set_undo_text(ss(""));
-        self.chain = preset.chain;
+        self.rig = preset.rig;
+        self.view_track = self.rig.ensure_track();
         self.mappings = preset.midi_mappings;
         self.runtime = self
-            .chain
-            .slots
-            .iter()
+            .rig
+            .slots()
             .map(|s| (s.id, SlotRuntime::default()))
             .collect();
         self.settings.current_preset = Some(preset.name.clone());
         self.save_settings();
         if self.engine_running {
-            self.engine.send(Command::LoadChain {
-                loads: self.loads(),
-            });
+            self.load_rig();
         } else {
             self.reload_chain_on_start = true;
         }
@@ -1481,6 +1903,13 @@ impl App {
                 ssid,
                 password: Some(text),
             }),
+            Prompt::RenameTrack(id) => {
+                let name = text.trim();
+                if let (Some(t), false) = (self.rig.track_mut(id), name.is_empty()) {
+                    t.name = name.to_string();
+                }
+                self.refresh_slots();
+            }
             Prompt::Search => {
                 self.ui().set_browser_search(ss(&text));
                 self.filter.text = text;
@@ -1515,6 +1944,23 @@ impl App {
                 self.save_settings();
                 self.refresh_presets();
                 self.refresh_slots();
+            }
+            Confirm::DeleteTrack(id) => {
+                let Some((index, track)) = self.rig.remove_track(id) else {
+                    return;
+                };
+                for s in track.slots() {
+                    if self.selected == Some(s.id) {
+                        self.select(None);
+                    }
+                    self.runtime.remove(&s.id);
+                    self.mappings.retain(|m| m.slot != s.id);
+                    self.engine.send(Command::RemovePlugin { slot: s.id });
+                }
+                self.rig.ensure_track();
+                self.view_track = self.rig.tracks[index.min(self.rig.tracks.len() - 1)].id;
+                self.rig_changed();
+                self.refresh_midi_options();
             }
             Confirm::Reboot => self.system.send(SysCmd::Reboot),
             Confirm::Shutdown => self.system.send(SysCmd::PowerOff),
@@ -1629,7 +2075,7 @@ impl App {
         o.set_learning(self.learning.is_some());
         o.set_learn_target(ss(self
             .learning
-            .and_then(|(s, _)| self.chain.get(s))
+            .and_then(|(s, _)| self.rig.get(s))
             .map(|s| s.name.clone())
             .unwrap_or_default()));
         let items: Vec<MappingItem> = self
@@ -1640,7 +2086,7 @@ impl App {
                 index: i as i32,
                 trigger: ss(m.trigger.label()),
                 plugin: ss(self
-                    .chain
+                    .rig
                     .get(m.slot)
                     .map(|s| s.name.clone())
                     .unwrap_or_else(|| "(removed)".into())),
@@ -1670,7 +2116,7 @@ impl App {
             });
             self.learning = None;
             let name = self
-                .chain
+                .rig
                 .get(slot)
                 .map(|s| s.name.clone())
                 .unwrap_or_default();
@@ -1682,7 +2128,7 @@ impl App {
         for change in midi::resolve(&self.mappings, &msg) {
             match change {
                 BypassChange::Toggle(slot) => {
-                    if let Some(b) = self.chain.get(slot).map(|s| !s.bypassed) {
+                    if let Some(b) = self.rig.get(slot).map(|s| !s.bypassed) {
                         self.set_bypass(slot, b);
                     }
                 }
@@ -1816,7 +2262,10 @@ impl App {
 
     fn remember_window_size(&mut self) {
         let ui = self.ui();
-        if self.settings.display.fullscreen || ui.window().is_fullscreen() {
+        if self.settings.display.fullscreen
+            || ui.window().is_fullscreen()
+            || ui.window().is_maximized()
+        {
             return;
         }
         let size = ui.window().size().to_logical(ui.window().scale_factor());

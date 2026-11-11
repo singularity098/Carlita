@@ -1,6 +1,7 @@
-// Left sidebar: the plugin chain.
+// Left sidebar: the chain of the selected track (tracks are picked in the
+// top bar).
 import { Theme } from "theme.slint";
-import { BigButton, StereoMeter } from "widgets.slint";
+import { BigButton, BigSlider, Chip, StereoMeter } from "widgets.slint";
 import { SlotItem } from "types.slint";
 
 component ChainRow inherits Rectangle {
@@ -14,17 +15,28 @@ component ChainRow inherits Rectangle {
     callback remove(int);
     callback drag-moved(int, length);
     callback drag-released(int, length);
+    callback split(int);
 
     height: root.row-height;
     clip: false;
+
+    // Lane guide line for plugins inside a parallel block.
+    if root.item.depth > 0: Rectangle {
+        x: 10px;
+        width: 3px;
+        height: root.height;
+        background: Theme.paint;
+        opacity: 0.5;
+    }
 
     property <length> swipe: 0;
     property <bool> swiping: false;
     property <bool> long-pressed: false;
 
+    property <length> indent: root.item.depth > 0 ? 24px : 0;
     card := Rectangle {
-        x: root.swipe;
-        width: root.width;
+        x: root.indent + root.swipe;
+        width: root.width - root.indent;
         height: root.height - 6px;
         y: 3px;
         border-radius: Theme.radius;
@@ -113,6 +125,25 @@ component ChainRow inherits Rectangle {
                 }
             }
 
+            // Run this plugin in parallel with a dry lane.
+            if root.item.can-split: Rectangle {
+                width: 44px;
+                height: Theme.touch;
+                y: (parent.height - self.height) / 2;
+                border-radius: Theme.radius;
+                background: split-touch.pressed ? Theme.surface-3 : transparent;
+                Text {
+                    text: "∥";
+                    font-size: 24px;
+                    color: Theme.text-dim;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                split-touch := TouchArea {
+                    clicked => { root.split(root.item.id); }
+                }
+            }
+
             // One-tap bypass.
             bypass := Rectangle {
                 width: Theme.touch;
@@ -137,6 +168,108 @@ component ChainRow inherits Rectangle {
     }
 }
 
+// Header of a parallel block, of one of its lanes, or the row of an empty
+// (dry) lane.
+component StructureRow inherits Rectangle {
+    in property <SlotItem> item;
+    callback add-lane;
+    callback add-plugin;
+    callback remove-lane;
+
+    if root.item.kind == "parallel": Rectangle {
+        y: 4px;
+        height: root.height - 4px;
+        border-radius: Theme.radius;
+        background: Theme.surface-2;
+        border-width: 1px;
+        border-color: Theme.paint;
+        HorizontalLayout {
+            padding-left: Theme.pad;
+            padding-right: 4px;
+            spacing: 6px;
+            Text {
+                text: "∥  " + root.item.label;
+                font-size: Theme.font-small;
+                font-weight: Theme.regular;
+                color: Theme.accent;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+            Chip {
+                y: (parent.height - self.height) / 2;
+                text: "+ Lane";
+                clicked => { root.add-lane(); }
+            }
+        }
+    }
+
+    if root.item.kind == "lane": HorizontalLayout {
+        padding-left: 24px;
+        spacing: 6px;
+        Text {
+            text: root.item.label;
+            font-size: Theme.font-small;
+            font-weight: Theme.regular;
+            color: Theme.text-dim;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Rectangle {
+            width: 44px;
+            Text {
+                text: "+";
+                font-size: 24px;
+                color: lane-add.pressed ? Theme.accent : Theme.text;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            lane-add := TouchArea {
+                clicked => { root.add-plugin(); }
+            }
+        }
+        Rectangle {
+            width: 44px;
+            Text {
+                text: "✕";
+                font-size: 18px;
+                color: lane-remove.pressed ? Theme.danger : Theme.text-faint;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            lane-remove := TouchArea {
+                clicked => { root.remove-lane(); }
+            }
+        }
+    }
+
+    if root.item.kind == "dry": Rectangle {
+        Rectangle {
+            x: 10px;
+            width: 3px;
+            height: root.height;
+            background: Theme.paint;
+            opacity: 0.5;
+        }
+        Rectangle {
+            x: 24px;
+            y: 3px;
+            width: root.width - 24px;
+            height: root.height - 6px;
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: Theme.border;
+            Text {
+                text: "Dry signal  ·  tap + to add a plugin";
+                font-size: Theme.font-small;
+                color: Theme.text-faint;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
 export component ChainPanel inherits Rectangle {
     in property <[SlotItem]> slots;
     in property <float> in-left;
@@ -147,13 +280,33 @@ export component ChainPanel inherits Rectangle {
     in property <string> latency;
     in property <string> preset-name;
     in property <string> undo-text;
+    in property <string> track-name;
+    in property <string> track-input;
+    in property <bool> track-muted;
+    in property <float> track-volume;
+    in property <string> track-volume-text;
+    in property <float> track-left;
+    in property <float> track-right;
+    // Where a dragged row would land (set by Rust while dragging).
+    in property <length> drop-y: -1px;
     callback select(int);
     callback toggle-bypass(int, bool);
     callback remove(int);
-    callback move(int, int);
+    // Row dragged, and the y of its centre in the list.
+    callback drag-hover(int, length);
+    callback drag-drop(int);
+    callback split(int);
+    callback add-lane(int);
+    callback remove-lane(int);
+    callback add-to-lane(int);
     callback add-plugin;
     callback undo;
     callback close;
+    callback rename-track;
+    callback delete-track;
+    callback cycle-input;
+    callback toggle-mute;
+    callback set-volume(float);
 
     background: Theme.popup;
     border-width: 1px;
@@ -161,8 +314,7 @@ export component ChainPanel inherits Rectangle {
 
     property <int> drag-index: -1;
     property <length> drag-offset: 0;
-    property <int> drop-index: root.drag-index < 0 ? -1
-        : max(0, min(root.slots.length - 1, root.drag-index + round(root.drag-offset / Theme.row)));
+    property <length> content-h: root.slots.length == 0 ? 0 : root.slots[root.slots.length - 1].y + root.slots[root.slots.length - 1].h;
 
     VerticalLayout {
         padding: Theme.pad;
@@ -171,14 +323,30 @@ export component ChainPanel inherits Rectangle {
         // Header: title, meters and load. Swiping it left closes the panel.
         header := Rectangle {
             height: 96px;
+            TouchArea {
+                // Swipe-back target under the title (so the title stays tappable),
+                // leaving the meters' area free.
+                width: parent.width - 80px;
+                x: 0;
+                moved => {
+                    if self.mouse-x - self.pressed-x < -60px {
+                        root.close();
+                    }
+                }
+            }
             HorizontalLayout {
                 spacing: 10px;
                 VerticalLayout {
                     alignment: center;
-                    Text {
-                        text: "Chain";
+                    // The track's name; tap to rename it.
+                    title := Text {
+                        text: root.track-name + "  ✎";
                         font-size: Theme.font-title;
-                        color: Theme.text;
+                        color: title-touch.pressed ? Theme.accent : Theme.text;
+                        overflow: elide;
+                        title-touch := TouchArea {
+                            clicked => { root.rename-track(); }
+                        }
                     }
                     Text {
                         text: root.preset-name == "" ? "Unsaved preset" : root.preset-name;
@@ -205,14 +373,55 @@ export component ChainPanel inherits Rectangle {
                     label: "OUT";
                 }
             }
-            TouchArea {
-                // Leave the meters' area free; this is a swipe-back target.
-                width: parent.width - 80px;
-                x: 0;
-                moved => {
-                    if self.mouse-x - self.pressed-x < -60px {
-                        root.close();
-                    }
+        }
+
+        // The selected track: input, mute, volume, level, delete.
+        HorizontalLayout {
+            height: Theme.touch;
+            spacing: 6px;
+            Chip {
+                y: (parent.height - self.height) / 2;
+                text: root.track-input;
+                clicked => { root.cycle-input(); }
+            }
+            Chip {
+                y: (parent.height - self.height) / 2;
+                text: "Mute";
+                selected: root.track-muted;
+                clicked => { root.toggle-mute(); }
+            }
+            BigSlider {
+                horizontal-stretch: 1;
+                minimum: 0;
+                maximum: 2;
+                value: root.track-volume;
+                changed(v) => { root.set-volume(v); }
+            }
+            Text {
+                width: 58px;
+                text: root.track-volume-text;
+                font-size: Theme.font-small;
+                color: Theme.text-dim;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+            }
+            StereoMeter {
+                width: 18px;
+                left: root.track-left;
+                right: root.track-right;
+                label: "";
+            }
+            Rectangle {
+                width: 40px;
+                Text {
+                    text: "✕";
+                    font-size: 18px;
+                    color: delete-touch.pressed ? Theme.danger : Theme.text-faint;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                delete-touch := TouchArea {
+                    clicked => { root.delete-track(); }
                 }
             }
         }
@@ -224,7 +433,7 @@ export component ChainPanel inherits Rectangle {
             if root.slots.length == 0: VerticalLayout {
                 alignment: center;
                 Text {
-                    text: "The chain is empty.\nAdd a plugin to get started.";
+                    text: "This track is empty.\nAdd a plugin to get started.";
                     horizontal-alignment: center;
                     font-size: Theme.font;
                     color: Theme.text-dim;
@@ -232,39 +441,55 @@ export component ChainPanel inherits Rectangle {
             }
 
             list := Flickable {
-                content-height: root.slots.length * Theme.row;
+                // Room below the last row to drop a plugin at the end.
+                content-height: root.content-h + Theme.row;
                 interactive: self.content-height > self.height && root.drag-index < 0;
-                for slot[i] in root.slots: ChainRow {
-                    y: i * Theme.row + (i == root.drag-index ? root.drag-offset : 0);
+                for slot[i] in root.slots: Rectangle {
+                    x: 0;
+                    y: slot.y + (i == root.drag-index ? root.drag-offset : 0);
                     z: i == root.drag-index ? 10 : 0;
                     width: list.width;
-                    item: slot;
-                    index: i;
-                    row-height: Theme.row;
-                    drag-index: root.drag-index;
-                    select(id) => { root.select(id); }
-                    toggle-bypass(id, b) => { root.toggle-bypass(id, b); }
-                    remove(id) => { root.remove(id); }
-                    drag-moved(idx, dy) => {
-                        root.drag-index = idx;
-                        root.drag-offset = dy;
-                    }
-                    drag-released(idx, dy) => {
-                        if root.drop-index >= 0 && root.drop-index != idx {
-                            root.move(idx, root.drop-index);
+                    height: slot.h;
+                    if slot.kind == "plugin": ChainRow {
+                        width: parent.width;
+                        item: slot;
+                        index: i;
+                        row-height: slot.h;
+                        drag-index: root.drag-index;
+                        select(id) => { root.select(id); }
+                        toggle-bypass(id, b) => { root.toggle-bypass(id, b); }
+                        remove(id) => { root.remove(id); }
+                        split(id) => { root.split(id); }
+                        drag-moved(idx, dy) => {
+                            root.drag-index = idx;
+                            root.drag-offset = dy;
+                            root.drag-hover(idx, slot.y + dy + slot.h / 2);
                         }
-                        root.drag-index = -1;
-                        root.drag-offset = 0;
+                        drag-released(idx, dy) => {
+                            if root.drag-index >= 0 {
+                                root.drag-drop(idx);
+                            }
+                            root.drag-index = -1;
+                            root.drag-offset = 0;
+                        }
+                    }
+                    if slot.kind != "plugin": StructureRow {
+                        width: parent.width;
+                        height: parent.height;
+                        item: slot;
+                        add-lane => { root.add-lane(i); }
+                        add-plugin => { root.add-to-lane(i); }
+                        remove-lane => { root.remove-lane(i); }
                     }
                 }
                 // Drop indicator.
-                if root.drag-index >= 0: Rectangle {
+                if root.drag-index >= 0 && root.drop-y >= 0: Rectangle {
                     x: 0;
                     width: list.width;
                     height: 4px;
                     border-radius: 2px;
                     background: Theme.paint;
-                    y: root.drop-index > root.drag-index ? (root.drop-index + 1) * Theme.row - 2px : root.drop-index * Theme.row - 2px;
+                    y: root.drop-y - 2px;
                 }
             }
         }

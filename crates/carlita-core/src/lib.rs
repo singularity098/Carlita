@@ -10,6 +10,7 @@ pub mod midi;
 pub mod paths;
 pub mod plugin;
 pub mod preset;
+pub mod rig;
 pub mod scaling;
 pub mod settings;
 
@@ -17,6 +18,7 @@ pub use catalog::{CatalogFilter, PluginCatalog};
 pub use chain::{Chain, ChainSlot, SlotId};
 pub use plugin::{BinaryArch, PluginCategory, PluginDescriptor, PluginFormat};
 pub use preset::{Preset, PresetStore};
+pub use rig::{Rig, Track, TrackId, TrackInput};
 pub use scaling::{EditorScaling, ScaleTransform};
 pub use settings::Settings;
 
