@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: System dependencies
+        run: |
+          echo "jackd2 jackd/tweak_rt_limits boolean false" | sudo debconf-set-selections
+          sudo apt-get update
+          sudo apt-get install -y carla carla-dev libclang-dev clang jackd2 xvfb \
+            libasound2-dev libxkbcommon-dev libfontconfig-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Start a dummy JACK server
+        run: |
+          jackd --no-realtime -d dummy -r 48000 -p 256 &
+          sleep 2
+      - name: Test
+        env:
+          CARLITA_REQUIRE_ENGINE: "1"
+        run: xvfb-run -a -s "-screen 0 1280x800x24 +extension Composite" cargo test --workspace
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+  appimage:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y carla carla-dev libclang-dev clang libasound2-dev \
+            libxkbcommon-dev libfontconfig-dev libfuse2 file
+      - uses: dtolnay/rust-toolchain@stable
+      - run: packaging/appimage/build-appimage.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Carlita-AppImage
+          path: dist/*.AppImage

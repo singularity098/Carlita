@@ -1,0 +1,301 @@
+// Left sidebar: the plugin chain.
+import { Theme } from "theme.slint";
+import { BigButton, StereoMeter } from "widgets.slint";
+import { SlotItem } from "types.slint";
+
+component ChainRow inherits Rectangle {
+    in property <SlotItem> item;
+    in property <int> index;
+    in property <length> row-height;
+    // Index currently being dragged (-1 when none) and its offset.
+    in property <int> drag-index: -1;
+    callback select(int);
+    callback toggle-bypass(int, bool);
+    callback remove(int);
+    callback drag-moved(int, length);
+    callback drag-released(int, length);
+
+    height: root.row-height;
+    clip: false;
+
+    property <length> swipe: 0;
+    property <bool> swiping: false;
+    property <bool> long-pressed: false;
+
+    card := Rectangle {
+        x: root.swipe;
+        width: root.width;
+        height: root.height - 6px;
+        y: 3px;
+        border-radius: Theme.radius;
+        background: root.item.selected ? Theme.surface-3 : Theme.surface-2;
+        border-width: root.item.selected ? 2px : 0px;
+        border-color: Theme.accent;
+        opacity: root.swiping ? max(0.3, 1 - abs(root.swipe) / root.width) : 1;
+        animate x { duration: root.swiping ? 0ms : 160ms; easing: ease-out; }
+
+        HorizontalLayout {
+            padding-right: 6px;
+            spacing: 4px;
+
+            // Drag handle for reordering.
+            handle := Rectangle {
+                width: Theme.touch;
+                Text {
+                    text: "≡";
+                    font-size: 26px;
+                    color: handle-touch.pressed ? Theme.accent : Theme.text-faint;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                handle-touch := TouchArea {
+                    moved => { root.drag-moved(root.index, self.mouse-y - self.pressed-y); }
+                    pointer-event(e) => {
+                        if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
+                            root.drag-released(root.index, self.mouse-y - self.pressed-y);
+                        }
+                    }
+                }
+            }
+
+            // Name; tap selects, swipe sideways or long-press removes.
+            body := Rectangle {
+                horizontal-stretch: 1;
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 2px;
+                    Text {
+                        text: root.item.name;
+                        font-size: Theme.font;
+                        font-weight: 600;
+                        color: root.item.bypassed ? Theme.text-faint : Theme.text;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.item.status == "loading" ? "Loading…"
+                            : root.item.status == "failed" ? "Failed to load · passing audio through"
+                            : root.item.status == "crashed" ? "Crashed · tap to reload"
+                            : root.item.format + "  ·  PDC " + root.item.latency + (root.item.midi-learned ? "  ·  MIDI" : "");
+                        font-size: Theme.font-small;
+                        color: root.item.status == "failed" || root.item.status == "crashed" ? Theme.danger : Theme.text-dim;
+                        overflow: elide;
+                    }
+                }
+                body-touch := TouchArea {
+                    moved => {
+                        if abs(self.mouse-x - self.pressed-x) > 12px {
+                            root.swiping = true;
+                        }
+                        if root.swiping {
+                            root.swipe = self.mouse-x - self.pressed-x;
+                        }
+                    }
+                    pointer-event(e) => {
+                        if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
+                            if root.swiping && abs(root.swipe) > root.width * 0.35 {
+                                root.remove(root.item.id);
+                            } else if !root.swiping && !root.long-pressed && e.kind == PointerEventKind.up {
+                                root.select(root.item.id);
+                            }
+                            root.swiping = false;
+                            root.swipe = 0;
+                            root.long-pressed = false;
+                        }
+                    }
+                }
+                Timer {
+                    interval: 650ms;
+                    running: body-touch.pressed && !root.swiping && !root.long-pressed;
+                    triggered => {
+                        root.long-pressed = true;
+                        root.remove(root.item.id);
+                    }
+                }
+            }
+
+            // One-tap bypass.
+            bypass := Rectangle {
+                width: Theme.touch;
+                height: Theme.touch;
+                y: (parent.height - self.height) / 2;
+                border-radius: self.width / 2;
+                background: root.item.bypassed ? Theme.surface-3 : Theme.accent;
+                Text {
+                    text: "⏻";
+                    font-size: 22px;
+                    color: root.item.bypassed ? Theme.text-faint : #000;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                TouchArea {
+                    clicked => { root.toggle-bypass(root.item.id, !root.item.bypassed); }
+                }
+            }
+        }
+    }
+}
+
+export component ChainPanel inherits Rectangle {
+    in property <[SlotItem]> slots;
+    in property <float> in-left;
+    in property <float> in-right;
+    in property <float> out-left;
+    in property <float> out-right;
+    in property <string> dsp-load;
+    in property <string> latency;
+    in property <string> preset-name;
+    in property <string> undo-text;
+    callback select(int);
+    callback toggle-bypass(int, bool);
+    callback remove(int);
+    callback move(int, int);
+    callback add-plugin;
+    callback undo;
+    callback close;
+
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: Theme.border;
+
+    property <int> drag-index: -1;
+    property <length> drag-offset: 0;
+    property <int> drop-index: root.drag-index < 0 ? -1
+        : max(0, min(root.slots.length - 1, root.drag-index + round(root.drag-offset / Theme.row)));
+
+    VerticalLayout {
+        padding: Theme.pad;
+        spacing: 10px;
+
+        // Header: title, meters and load. Swiping it left closes the panel.
+        header := Rectangle {
+            height: 96px;
+            HorizontalLayout {
+                spacing: 10px;
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: "Chain";
+                        font-size: Theme.font-title;
+                        font-weight: 700;
+                        color: Theme.text;
+                    }
+                    Text {
+                        text: root.preset-name == "" ? "Unsaved preset" : root.preset-name;
+                        font-size: Theme.font-small;
+                        color: Theme.accent;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: "DSP " + root.dsp-load + "   ·   " + root.latency;
+                        font-size: Theme.font-small;
+                        color: Theme.text-dim;
+                    }
+                }
+                StereoMeter {
+                    left: root.in-left;
+                    right: root.in-right;
+                    label: "IN";
+                }
+                StereoMeter {
+                    left: root.out-left;
+                    right: root.out-right;
+                    label: "OUT";
+                }
+            }
+            TouchArea {
+                // Leave the meters' area free; this is a swipe-back target.
+                width: parent.width - 80px;
+                x: 0;
+                moved => {
+                    if self.mouse-x - self.pressed-x < -60px {
+                        root.close();
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+
+            if root.slots.length == 0: VerticalLayout {
+                alignment: center;
+                Text {
+                    text: "The chain is empty.\nAdd a plugin to get started.";
+                    horizontal-alignment: center;
+                    font-size: Theme.font;
+                    color: Theme.text-dim;
+                }
+            }
+
+            list := Flickable {
+                content-height: root.slots.length * Theme.row;
+                interactive: self.content-height > self.height && root.drag-index < 0;
+                for slot[i] in root.slots: ChainRow {
+                    y: i * Theme.row + (i == root.drag-index ? root.drag-offset : 0);
+                    z: i == root.drag-index ? 10 : 0;
+                    width: list.width;
+                    item: slot;
+                    index: i;
+                    row-height: Theme.row;
+                    drag-index: root.drag-index;
+                    select(id) => { root.select(id); }
+                    toggle-bypass(id, b) => { root.toggle-bypass(id, b); }
+                    remove(id) => { root.remove(id); }
+                    drag-moved(idx, dy) => {
+                        root.drag-index = idx;
+                        root.drag-offset = dy;
+                    }
+                    drag-released(idx, dy) => {
+                        if root.drop-index >= 0 && root.drop-index != idx {
+                            root.move(idx, root.drop-index);
+                        }
+                        root.drag-index = -1;
+                        root.drag-offset = 0;
+                    }
+                }
+                // Drop indicator.
+                if root.drag-index >= 0: Rectangle {
+                    x: 0;
+                    width: list.width;
+                    height: 4px;
+                    border-radius: 2px;
+                    background: Theme.accent;
+                    y: root.drop-index > root.drag-index ? (root.drop-index + 1) * Theme.row - 2px : root.drop-index * Theme.row - 2px;
+                }
+            }
+        }
+
+        if root.undo-text != "": Rectangle {
+            height: Theme.touch + 8px;
+            border-radius: Theme.radius;
+            background: Theme.surface-3;
+            HorizontalLayout {
+                padding-left: Theme.pad;
+                padding-right: 6px;
+                spacing: 8px;
+                Text {
+                    text: root.undo-text;
+                    color: Theme.text;
+                    font-size: Theme.font;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                BigButton {
+                    text: "Undo";
+                    primary: true;
+                    clicked => { root.undo(); }
+                }
+            }
+        }
+
+        BigButton {
+            text: "Add plugin";
+            icon: "+";
+            primary: true;
+            height: 60px;
+            clicked => { root.add-plugin(); }
+        }
+    }
+}

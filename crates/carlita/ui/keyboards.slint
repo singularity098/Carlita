@@ -1,0 +1,256 @@
+// On-screen keyboards: a QWERTY keyboard for text entry and a piano.
+import { Theme } from "theme.slint";
+import { BigButton } from "widgets.slint";
+
+// String helpers implemented in Rust (Slint has no substring operations).
+export global TextUtil {
+    pure callback drop-last(string) -> string;
+    pure callback mask(string) -> string;
+}
+
+component Key inherits Rectangle {
+    in property <string> label;
+    in property <bool> wide: false;
+    in property <bool> active: false;
+    callback pressed;
+    min-height: 54px;
+    horizontal-stretch: root.wide ? 2 : 1;
+    border-radius: 8px;
+    background: touch.pressed || root.active ? Theme.accent : Theme.surface-3;
+    Text {
+        text: root.label;
+        font-size: Theme.font-large;
+        color: touch.pressed || root.active ? #000 : Theme.text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea {
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down {
+                root.pressed();
+            }
+        }
+    }
+}
+
+export component TextKeyboard inherits Rectangle {
+    in-out property <string> text;
+    property <bool> shift: false;
+    property <bool> symbols: false;
+    callback done;
+
+    background: Theme.surface;
+    property <[[string]]> letters: [
+        ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
+        ["a", "s", "d", "f", "g", "h", "j", "k", "l"],
+        ["z", "x", "c", "v", "b", "n", "m", "-", "_"],
+    ];
+    property <[[string]]> syms: [
+        ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
+        ["!", "@", "#", "$", "%", "&", "*", "(", ")"],
+        [".", ",", "?", "'", "\"", ":", ";", "/", "+"],
+    ];
+
+    function emit(k: string) {
+        root.text += root.shift && !root.symbols ? k.to-uppercase() : k;
+        if root.shift {
+            root.shift = false;
+        }
+    }
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+        for row in (root.symbols ? root.syms : root.letters): HorizontalLayout {
+            spacing: 6px;
+            for k in row: Key {
+                label: root.shift && !root.symbols ? k.to-uppercase() : k;
+                pressed => { root.emit(k); }
+            }
+        }
+        HorizontalLayout {
+            spacing: 6px;
+            Key {
+                label: "⇧";
+                active: root.shift;
+                pressed => { root.shift = !root.shift; }
+            }
+            Key {
+                label: root.symbols ? "abc" : "123";
+                pressed => { root.symbols = !root.symbols; }
+            }
+            Key {
+                label: "space";
+                wide: true;
+                horizontal-stretch: 4;
+                pressed => { root.emit(" "); }
+            }
+            Key {
+                label: "⌫";
+                pressed => { root.text = TextUtil.drop-last(root.text); }
+            }
+            Key {
+                label: "Done";
+                wide: true;
+                pressed => { root.done(); }
+            }
+        }
+    }
+
+}
+
+// Modal text prompt with an on-screen keyboard (WiFi password, preset names).
+export component TextPrompt inherits Rectangle {
+    in property <string> title;
+    in property <bool> secret;
+    in-out property <string> text;
+    callback accepted(string);
+    callback cancelled;
+
+    background: Theme.scrim;
+    TouchArea { }
+
+    VerticalLayout {
+        alignment: end;
+        Rectangle {
+            background: Theme.surface;
+            border-width: 1px;
+            border-color: Theme.border;
+            VerticalLayout {
+                padding: Theme.pad;
+                spacing: 10px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 6px;
+                        Text {
+                            text: root.title;
+                            font-size: Theme.font-large;
+                            font-weight: 700;
+                            color: Theme.text;
+                        }
+                        Rectangle {
+                            height: Theme.touch;
+                            border-radius: Theme.radius;
+                            background: Theme.bg;
+                            border-width: 2px;
+                            border-color: Theme.accent;
+                            Text {
+                                x: Theme.pad;
+                                width: parent.width - 2 * Theme.pad;
+                                text: (root.secret ? TextUtil.mask(root.text) : root.text) + "▏";
+                                font-size: Theme.font-large;
+                                color: Theme.text;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: end;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            BigButton {
+                                text: "Cancel";
+                                clicked => { root.cancelled(); }
+                            }
+                            BigButton {
+                                text: "OK";
+                                primary: true;
+                                clicked => { root.accepted(root.text); }
+                            }
+                        }
+                    }
+                }
+                TextKeyboard {
+                    text <=> root.text;
+                    height: 280px;
+                    done => { root.accepted(root.text); }
+                }
+            }
+        }
+    }
+}
+
+// Piano keyboard for sending notes to the plugins.
+export component Piano inherits Rectangle {
+    in property <int> base-note: 48;
+    in property <int> octaves: 3;
+    callback note(int, bool);
+    callback octave(int);
+
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: Theme.border;
+
+    // Semitone offsets of white keys and positions of black keys.
+    property <[int]> whites: [0, 2, 4, 5, 7, 9, 11];
+    property <[{offset: int, slot: int}]> blacks: [
+        { offset: 1, slot: 0 }, { offset: 3, slot: 1 }, { offset: 6, slot: 3 }, { offset: 8, slot: 4 }, { offset: 10, slot: 5 },
+    ];
+
+    HorizontalLayout {
+        padding: 6px;
+        spacing: 6px;
+        VerticalLayout {
+            width: 64px;
+            spacing: 6px;
+            BigButton {
+                text: "Oct +";
+                vertical-stretch: 1;
+                clicked => { root.octave(1); }
+            }
+            Text {
+                text: "C" + floor(root.base-note / 12 - 1);
+                color: Theme.text-dim;
+                horizontal-alignment: center;
+                font-size: Theme.font-small;
+            }
+            BigButton {
+                text: "Oct −";
+                vertical-stretch: 1;
+                clicked => { root.octave(-1); }
+            }
+        }
+        keys := Rectangle {
+            property <length> white-w: self.width / (root.octaves * 7);
+            for oct in root.octaves: Rectangle {
+                x: oct * 7 * keys.white-w;
+                width: 7 * keys.white-w;
+                for w[i] in root.whites: Rectangle {
+                    x: i * keys.white-w;
+                    width: keys.white-w - 2px;
+                    border-radius: 4px;
+                    background: wt.pressed ? Theme.accent : #e8e8ea;
+                    wt := TouchArea {
+                        pointer-event(e) => {
+                            if e.kind == PointerEventKind.down {
+                                root.note(root.base-note + oct * 12 + w, true);
+                            } else if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
+                                root.note(root.base-note + oct * 12 + w, false);
+                            }
+                        }
+                    }
+                }
+                for b in root.blacks: Rectangle {
+                    x: (b.slot + 1) * keys.white-w - self.width / 2;
+                    width: keys.white-w * 0.62;
+                    height: parent.height * 0.6;
+                    y: 0;
+                    border-radius: 4px;
+                    background: bt.pressed ? Theme.accent : #1a1a1d;
+                    bt := TouchArea {
+                        pointer-event(e) => {
+                            if e.kind == PointerEventKind.down {
+                                root.note(root.base-note + oct * 12 + b.offset, true);
+                            } else if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
+                                root.note(root.base-note + oct * 12 + b.offset, false);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

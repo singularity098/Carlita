@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/carla-sys",
+    "crates/carlita-core",
+    "crates/carlita-engine",
+    "crates/carlita-system",
+    "crates/carlita-x11",
+    "crates/carlita",
+]
+default-members = ["crates/carlita"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/singularity098/Carlita"
+rust-version = "1.80"
+
+[workspace.dependencies]
+carla-sys = { path = "crates/carla-sys" }
+carlita-core = { path = "crates/carlita-core" }
+carlita-engine = { path = "crates/carlita-engine" }
+carlita-system = { path = "crates/carlita-system" }
+carlita-x11 = { path = "crates/carlita-x11" }
+anyhow = "1"
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+crossbeam-channel = "0.5"
+directories = "6"
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true

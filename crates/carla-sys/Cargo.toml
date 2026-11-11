@@ -1,0 +1,11 @@
+[package]
+name = "carla-sys"
+description = "Raw FFI bindings to Carla's standalone host library (libcarla_standalone2), generated with bindgen"
+version.workspace = true
+edition.workspace = true
+license = "GPL-2.0-or-later"
+links = "carla_standalone2"
+
+[build-dependencies]
+bindgen = "0.72"
+pkg-config = "0.3"

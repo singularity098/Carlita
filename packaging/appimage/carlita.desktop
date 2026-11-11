@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Carlita
+GenericName=Plugin Chain Host
+Comment=Touch-first audio plugin chain host for a pedalboard
+Exec=carlita
+Icon=carlita
+Terminal=false
+Categories=AudioVideo;Audio;Music;

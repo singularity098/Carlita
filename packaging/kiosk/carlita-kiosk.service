@@ -1,0 +1,20 @@
+# Boot straight into Carlita (kiosk mode).
+#
+# Install as a *user* service for the stage user, with lingering enabled so it
+# starts at boot without a login:
+#   sudo loginctl enable-linger <user>
+#   cp carlita-kiosk.service ~/.config/systemd/user/
+#   systemctl --user enable carlita-kiosk.service
+# It starts a bare X server with a minimal window manager (needed for real
+# fullscreen) and restarts Carlita if it ever exits.
+[Unit]
+Description=Carlita pedalboard (kiosk)
+After=pipewire.service
+
+[Service]
+ExecStart=/usr/bin/xinit %h/.config/carlita/kiosk-session -- :0 vt1 -nolisten tcp -nocursor
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

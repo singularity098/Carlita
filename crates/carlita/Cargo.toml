@@ -1,0 +1,31 @@
+[package]
+name = "carlita"
+description = "Touch-first plugin chain host for a pedalboard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+default-run = "carlita"
+
+[dependencies]
+carla-sys.workspace = true
+carlita-core.workspace = true
+carlita-engine.workspace = true
+carlita-system.workspace = true
+carlita-x11.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+crossbeam-channel.workspace = true
+midir = "0.10"
+slint = { version = "1.14", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-winit-x11",
+    "renderer-femtovg",
+    "renderer-software",
+    "accessibility",
+] }
+
+[build-dependencies]
+slint-build = "1.14"

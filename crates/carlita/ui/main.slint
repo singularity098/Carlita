@@ -1,0 +1,519 @@
+// Carlita main window.
+//
+// Layout: a host-owned strip on each screen edge (always ours, so edge
+// swipes work even while a plugin editor fills the screen), the plugin
+// editor in between, and two sidebars that slide over everything.
+import { Theme } from "theme.slint";
+import { BigButton, BigSlider, Toggle, SectionTitle } from "widgets.slint";
+import { SlotItem, PluginItem, ParamItem, WifiItem, BtItem, MappingItem } from "types.slint";
+import { ChainPanel } from "chain.slint";
+import { PluginBrowser } from "browser.slint";
+import { OptionsPanel, Options } from "options.slint";
+import { TextPrompt, Piano, TextUtil } from "keyboards.slint";
+
+export { Theme, Options, TextUtil, SlotItem, PluginItem, ParamItem, WifiItem, BtItem, MappingItem }
+
+// A sidebar that follows the finger and snaps open or closed.
+component EdgeStrip inherits Rectangle {
+    in property <bool> right-side;
+    in property <length> panel-width;
+    in property <string> icon;
+    // Called continuously while dragging (0..1) and once on release.
+    callback drag(float);
+    callback release(float, bool);
+    callback tap;
+
+    property <float> amount: 0;
+
+    // Visible tab, only while the mouse hovers the edge (so editors can use
+    // the full screen otherwise).
+    tab := Rectangle {
+        visible: strip.has-hover || tab-touch.has-hover;
+        width: 44px;
+        height: 120px;
+        x: root.right-side ? root.width - self.width : 0;
+        y: (root.height - self.height) / 2;
+        border-radius: 10px;
+        background: tab-touch.pressed ? Theme.accent : Theme.surface-3;
+        opacity: 0.92;
+        Text {
+            text: root.icon;
+            font-size: 22px;
+            color: tab-touch.pressed ? #000 : Theme.text;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        tab-touch := TouchArea {
+            clicked => { root.tap(); }
+        }
+    }
+
+    strip := TouchArea {
+        width: root.width;
+        x: 0;
+        moved => {
+            root.amount = max(0, min(1, (root.right-side ? self.pressed-x - self.mouse-x : self.mouse-x - self.pressed-x) / root.panel-width));
+            root.drag(root.amount);
+        }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
+                // A tap on the strip with the mouse also opens it.
+                if abs(self.mouse-x - self.pressed-x) < 4px && e.kind == PointerEventKind.up && e.button == PointerEventButton.left {
+                    root.tap();
+                } else {
+                    root.release(root.amount, root.amount > 0.33);
+                }
+                root.amount = 0;
+            }
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "Carlita";
+    background: Theme.bg;
+    min-width: 800px;
+    min-height: 480px;
+    preferred-width: 1280px;
+    preferred-height: 800px;
+    default-font-size: Theme.font;
+
+    // ---------------------------------------------------------- properties
+    in property <length> strip-width: 18px;
+
+    // Sidebars: 0 = closed, 1 = open.
+    in-out property <float> left-pos: 0;
+    in-out property <float> right-pos: 0;
+    property <bool> left-dragging;
+    property <bool> right-dragging;
+    property <length> left-width: min(460px, root.width * 0.9);
+    property <length> right-width: min(720px, root.width * 0.92);
+
+    // Chain.
+    in property <[SlotItem]> slots;
+    in property <float> in-left;
+    in property <float> in-right;
+    in property <float> out-left;
+    in property <float> out-right;
+    in property <string> dsp-load: "–";
+    in property <string> latency: "–";
+    in property <string> preset-name;
+    in property <string> undo-text;
+
+    // Main area.
+    in property <string> editor-mode: "empty"; // empty | image | params | waiting | message
+    in property <string> editor-title;
+    in property <string> editor-message;
+    in property <image> editor-image;
+    in property <length> editor-x;
+    in property <length> editor-y;
+    in property <length> editor-w;
+    in property <length> editor-h;
+    out property <length> area-width: editor-area.width;
+    out property <length> area-height: editor-area.height;
+    in property <[ParamItem]> params;
+
+    // Browser.
+    in-out property <bool> browser-open;
+    in property <[PluginItem]> browser-plugins;
+    in property <[string]> browser-formats;
+    in property <[string]> browser-categories;
+    in-out property <string> browser-search;
+    in property <string> browser-format;
+    in property <string> browser-category;
+    in property <bool> browser-favorites;
+    in property <string> scan-status;
+    in property <bool> scanning;
+
+    // Prompt / confirm / toast.
+    in-out property <bool> prompt-open;
+    in-out property <string> prompt-title;
+    in-out property <string> prompt-text;
+    in-out property <bool> prompt-secret;
+    in-out property <string> confirm-text;
+    in-out property <string> toast;
+    in property <bool> toast-error;
+
+    // Keyboard.
+    in property <bool> keyboard-visible;
+    in property <int> keyboard-base: 48;
+    property <length> keyboard-height: root.keyboard-visible ? min(220px, root.height * 0.3) : 0;
+
+    // ----------------------------------------------------------- callbacks
+    callback select-slot(int);
+    callback toggle-bypass(int, bool);
+    callback remove-slot(int);
+    callback move-slot(int, int);
+    callback undo-remove;
+    callback open-browser;
+    callback browser-filter(string, string, string, bool);
+    callback browser-pick(string);
+    callback browser-favorite(string);
+    callback rescan;
+    callback browser-keyboard;
+    callback editor-pointer(string, length, length);
+    callback editor-scroll(length, length, length);
+    callback area-resized;
+    callback set-param(int, float);
+    callback prompt-done(bool, string);
+    callback confirm-done(bool);
+    callback piano-note(int, bool);
+    callback piano-octave(int);
+    callback toggle-fullscreen;
+    callback options-page(int);
+    callback sidebar-changed(bool, bool);
+
+    function open-left() { root.left-pos = 1; root.right-pos = 0; root.sidebar-changed(true, false); }
+    function close-left() { root.left-pos = 0; root.sidebar-changed(false, root.right-pos > 0); }
+    function open-right() { root.right-pos = 1; root.left-pos = 0; root.sidebar-changed(false, true); }
+    function close-right() { root.right-pos = 0; root.sidebar-changed(root.left-pos > 0, false); }
+
+    forward-focus: keys;
+    keys := FocusScope {
+        key-pressed(e) => {
+            if e.text == Key.F11 {
+                root.toggle-fullscreen();
+                return accept;
+            }
+            if e.text == Key.Escape {
+                if root.browser-open { root.browser-open = false; return accept; }
+                if root.left-pos > 0 { root.close-left(); return accept; }
+                if root.right-pos > 0 { root.close-right(); return accept; }
+            }
+            reject
+        }
+    }
+
+    // ------------------------------------------------------------ main area
+    editor-area := Rectangle {
+        x: root.strip-width;
+        y: 0;
+        width: root.width - 2 * root.strip-width;
+        height: root.height - root.keyboard-height;
+        clip: true;
+        changed width => { root.area-resized(); }
+        changed height => { root.area-resized(); }
+
+        if root.editor-mode == "image": Rectangle {
+            Image {
+                x: root.editor-x;
+                y: root.editor-y;
+                width: root.editor-w;
+                height: root.editor-h;
+                source: root.editor-image;
+                image-fit: fill;
+                image-rendering: smooth;
+            }
+            TouchArea {
+                pointer-event(e) => {
+                    if e.kind == PointerEventKind.down {
+                        root.editor-pointer("down", self.mouse-x, self.mouse-y);
+                    } else if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
+                        root.editor-pointer("up", self.mouse-x, self.mouse-y);
+                    } else if e.kind == PointerEventKind.move {
+                        root.editor-pointer("move", self.mouse-x, self.mouse-y);
+                    }
+                }
+                scroll-event(e) => {
+                    root.editor-scroll(self.mouse-x, self.mouse-y, e.delta-y);
+                    accept
+                }
+            }
+        }
+
+        if root.editor-mode == "params": Flickable {
+            content-height: params-col.preferred-height;
+            params-col := VerticalLayout {
+                padding: 24px;
+                spacing: 10px;
+                alignment: start;
+                Text {
+                    text: root.editor-title;
+                    font-size: Theme.font-title;
+                    font-weight: 700;
+                    color: Theme.text;
+                }
+                Text {
+                    text: root.params.length == 0 ? "This plugin has no adjustable parameters." : "This plugin has no editor of its own.";
+                    color: Theme.text-dim;
+                }
+                for p in root.params: Rectangle {
+                    height: 84px;
+                    border-radius: Theme.radius;
+                    background: Theme.surface;
+                    HorizontalLayout {
+                        padding-left: Theme.pad;
+                        padding-right: Theme.pad;
+                        spacing: Theme.pad;
+                        VerticalLayout {
+                            width: 220px;
+                            alignment: center;
+                            Text {
+                                text: p.name;
+                                font-size: Theme.font;
+                                color: Theme.text;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: p.text;
+                                font-size: Theme.font-small;
+                                color: Theme.accent;
+                            }
+                        }
+                        if p.is-bool: Toggle {
+                            checked: p.value > (p.minimum + p.maximum) / 2;
+                            toggled(v) => { root.set-param(p.index, v ? p.maximum : p.minimum); }
+                        }
+                        if !p.is-bool: BigSlider {
+                            y: (parent.height - self.height) / 2;
+                            minimum: p.minimum;
+                            maximum: p.maximum;
+                            value: p.value;
+                            changed(v) => { root.set-param(p.index, p.is-int ? round(v) : v); }
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.editor-mode == "empty" || root.editor-mode == "waiting" || root.editor-mode == "message": VerticalLayout {
+            alignment: center;
+            spacing: 18px;
+            Text {
+                text: root.editor-mode == "waiting" ? "Opening " + root.editor-title + "…"
+                    : root.editor-mode == "message" ? root.editor-title
+                    : "Carlita";
+                font-size: 34px;
+                font-weight: 700;
+                color: Theme.text;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: root.editor-mode == "empty" ? "Swipe in from the left edge for the chain,\nfrom the right edge for options." : root.editor-message;
+                font-size: Theme.font-large;
+                color: Theme.text-dim;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+            if root.editor-mode == "empty": HorizontalLayout {
+                alignment: center;
+                spacing: 12px;
+                BigButton {
+                    text: "Open chain";
+                    primary: true;
+                    clicked => { root.open-left(); }
+                }
+                BigButton {
+                    text: "Options";
+                    clicked => { root.open-right(); }
+                }
+            }
+        }
+    }
+
+    // On-screen piano.
+    if root.keyboard-visible: Piano {
+        x: root.strip-width;
+        width: root.width - 2 * root.strip-width;
+        y: root.height - root.keyboard-height;
+        height: root.keyboard-height;
+        base-note: root.keyboard-base;
+        octaves: root.width > 1100px ? 4 : root.width > 800px ? 3 : 2;
+        note(n, on) => { root.piano-note(n, on); }
+        octave(d) => { root.piano-octave(d); }
+    }
+
+    // -------------------------------------------------------- edge strips
+    EdgeStrip {
+        x: 0;
+        width: root.strip-width;
+        height: root.height;
+        icon: "☰";
+        panel-width: root.left-width;
+        drag(a) => {
+            root.left-dragging = true;
+            root.left-pos = a;
+        }
+        release(a, open) => {
+            root.left-dragging = false;
+            if open { root.open-left(); } else { root.close-left(); }
+        }
+        tap => { root.open-left(); }
+    }
+    EdgeStrip {
+        x: root.width - root.strip-width;
+        width: root.strip-width;
+        height: root.height;
+        right-side: true;
+        icon: "⚙";
+        panel-width: root.right-width;
+        drag(a) => {
+            root.right-dragging = true;
+            root.right-pos = a;
+        }
+        release(a, open) => {
+            root.right-dragging = false;
+            if open { root.open-right(); } else { root.close-right(); }
+        }
+        tap => { root.open-right(); }
+    }
+
+    // ------------------------------------------------------------ sidebars
+    // Scrim: tap outside, or swipe, to close.
+    if root.left-pos > 0 || root.right-pos > 0: Rectangle {
+        background: #000;
+        opacity: 0.55 * max(root.left-pos, root.right-pos);
+        TouchArea {
+            property <bool> swiped;
+            moved => {
+                if root.left-pos > 0 && self.mouse-x - self.pressed-x < -40px { self.swiped = true; }
+                if root.right-pos > 0 && self.mouse-x - self.pressed-x > 40px { self.swiped = true; }
+            }
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.up {
+                    root.close-left();
+                    root.close-right();
+                    self.swiped = false;
+                }
+            }
+        }
+    }
+
+    ChainPanel {
+        width: root.left-width;
+        height: root.height;
+        x: (root.left-pos - 1) * root.left-width;
+        visible: root.left-pos > 0;
+        animate x { duration: root.left-dragging ? 0ms : Theme.slide; easing: ease-out; }
+        slots: root.slots;
+        in-left: root.in-left;
+        in-right: root.in-right;
+        out-left: root.out-left;
+        out-right: root.out-right;
+        dsp-load: root.dsp-load;
+        latency: root.latency;
+        preset-name: root.preset-name;
+        undo-text: root.undo-text;
+        select(id) => {
+            root.select-slot(id);
+            root.close-left();
+        }
+        toggle-bypass(id, b) => { root.toggle-bypass(id, b); }
+        remove(id) => { root.remove-slot(id); }
+        move(a, b) => { root.move-slot(a, b); }
+        add-plugin => { root.open-browser(); }
+        undo => { root.undo-remove(); }
+        close => { root.close-left(); }
+    }
+
+    OptionsPanel {
+        width: root.right-width;
+        height: root.height;
+        x: root.width - root.right-pos * root.right-width;
+        visible: root.right-pos > 0;
+        animate x { duration: root.right-dragging ? 0ms : Theme.slide; easing: ease-out; }
+        close => { root.close-right(); }
+        page-opened(i) => { root.options-page(i); }
+    }
+
+    // ------------------------------------------------------------- overlays
+    if root.browser-open: PluginBrowser {
+        plugins: root.browser-plugins;
+        formats: root.browser-formats;
+        categories: root.browser-categories;
+        search <=> root.browser-search;
+        format-filter: root.browser-format;
+        category-filter: root.browser-category;
+        favorites-only: root.browser-favorites;
+        scan-status: root.scan-status;
+        scanning: root.scanning;
+        filter-changed(t, f, c, fav) => { root.browser-filter(t, f, c, fav); }
+        pick(k) => { root.browser-pick(k); }
+        toggle-favorite(k) => { root.browser-favorite(k); }
+        rescan => { root.rescan(); }
+        close => { root.browser-open = false; }
+        request-keyboard => { root.browser-keyboard(); }
+    }
+
+    if root.prompt-open: TextPrompt {
+        title: root.prompt-title;
+        secret: root.prompt-secret;
+        text <=> root.prompt-text;
+        accepted(t) => {
+            root.prompt-open = false;
+            root.prompt-done(true, t);
+        }
+        cancelled => {
+            root.prompt-open = false;
+            root.prompt-done(false, "");
+        }
+    }
+
+    if root.confirm-text != "": Rectangle {
+        background: Theme.scrim;
+        TouchArea { }
+        Rectangle {
+            width: min(520px, root.width - 40px);
+            height: 200px;
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            border-radius: Theme.radius * 1.5;
+            background: Theme.surface;
+            border-width: 1px;
+            border-color: Theme.border;
+            VerticalLayout {
+                padding: 24px;
+                spacing: 20px;
+                Text {
+                    text: root.confirm-text;
+                    font-size: Theme.font-large;
+                    color: Theme.text;
+                    wrap: word-wrap;
+                    vertical-stretch: 1;
+                }
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: end;
+                    BigButton {
+                        text: "Cancel";
+                        clicked => {
+                            root.confirm-text = "";
+                            root.confirm-done(false);
+                        }
+                    }
+                    BigButton {
+                        text: "Yes";
+                        danger: true;
+                        clicked => {
+                            root.confirm-text = "";
+                            root.confirm-done(true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.toast != "": Rectangle {
+        width: min(toast-text.preferred-width + 40px, root.width - 80px);
+        height: max(52px, toast-text.preferred-height + 24px);
+        x: (root.width - self.width) / 2;
+        y: root.height - root.keyboard-height - self.height - 24px;
+        border-radius: Theme.radius;
+        background: root.toast-error ? Theme.danger.darker(40%) : Theme.surface-3;
+        border-width: 1px;
+        border-color: root.toast-error ? Theme.danger : Theme.border;
+        toast-text := Text {
+            width: parent.width - 40px;
+            text: root.toast;
+            color: Theme.text;
+            font-size: Theme.font;
+            wrap: word-wrap;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        TouchArea {
+            clicked => { root.toast = ""; }
+        }
+    }
+}

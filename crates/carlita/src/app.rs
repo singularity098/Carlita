@@ -1,0 +1,1837 @@
+//! Application state and the glue between the UI, the engine, the editor
+//! host and the system workers.
+
+use crate::midi_in::MidiListener;
+use crate::scan::{self, ScanMsg};
+use crate::system::{SysCmd, SysEvent, SystemWorker};
+use crate::{
+    BtItem, MainWindow, MappingItem, Options, ParamItem, PluginItem, SlotItem, TextUtil, WifiItem,
+};
+use carlita_core::midi::{self, BypassChange, MidiAction, MidiMapping, MidiMessage};
+use carlita_core::paths::AppPaths;
+use carlita_core::{
+    CatalogFilter, Chain, ChainSlot, EditorScaling, PluginCatalog, PluginCategory, PluginFormat,
+    Preset, PresetStore, ScaleTransform, Settings, SlotId,
+};
+use carlita_engine::{
+    editor_window_title, Command, EngineConfig, EngineHandle, Event, Meters, PluginLoad,
+    PluginRuntimeInfo,
+};
+use carlita_x11::{EditorHost, HostCommand, HostEvent, InputMode, PointerKind};
+use crossbeam_channel::Receiver;
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+const UNDO_TIMEOUT: Duration = Duration::from_secs(6);
+const TOAST_TIMEOUT: Duration = Duration::from_secs(4);
+const SCALING_CHOICES: [EditorScaling; 6] = [
+    EditorScaling::Off,
+    EditorScaling::Fit,
+    EditorScaling::Fixed(1.0),
+    EditorScaling::Fixed(1.5),
+    EditorScaling::Fixed(2.0),
+    EditorScaling::Fixed(3.0),
+];
+
+#[derive(Default)]
+pub struct StartOptions {
+    pub fullscreen: Option<bool>,
+    pub skip_default_preset: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+enum SlotStatus {
+    #[default]
+    Loading,
+    Ready,
+    Failed(String),
+    Crashed(String),
+}
+
+#[derive(Default)]
+struct SlotRuntime {
+    status: SlotStatus,
+    info: Option<PluginRuntimeInfo>,
+    latency: u32,
+}
+
+enum Prompt {
+    SaveAs,
+    Rename(String),
+    WifiPassword(String),
+    Search,
+}
+
+enum Confirm {
+    DeletePreset(String),
+    Reboot,
+    Shutdown,
+    Restart,
+    Quit,
+}
+
+/// What the main area shows for the selected plugin.
+struct EditorView {
+    slot: SlotId,
+    /// Native editor size when captured.
+    size: Option<(u32, u32)>,
+    resizable: bool,
+    transform: Option<ScaleTransform>,
+    resize_requested: bool,
+}
+
+struct Undo {
+    slot: ChainSlot,
+    index: usize,
+    at: Instant,
+}
+
+pub struct App {
+    ui: slint::Weak<MainWindow>,
+    paths: AppPaths,
+    settings: Settings,
+    catalog: PluginCatalog,
+    filter: CatalogFilter,
+    presets: PresetStore,
+    chain: Chain,
+    runtime: HashMap<SlotId, SlotRuntime>,
+    mappings: Vec<MidiMapping>,
+    selected: Option<SlotId>,
+    editor: Option<EditorView>,
+    undo: Option<Undo>,
+    engine: EngineHandle,
+    engine_running: bool,
+    first_start: bool,
+    skip_default_preset: bool,
+    reload_chain_on_start: bool,
+    tried_fallback: bool,
+    editor_host: Option<EditorHost>,
+    capture_available: bool,
+    system: SystemWorker,
+    midi: MidiListener,
+    learning: Option<(SlotId, MidiAction)>,
+    scan: Option<Receiver<ScanMsg>>,
+    prompt: Option<Prompt>,
+    confirm: Option<Confirm>,
+    toast_at: Option<Instant>,
+    options_page: i32,
+    last_sys_refresh: Instant,
+    slots_model: Rc<VecModel<SlotItem>>,
+    meters: Meters,
+    restart_requested: bool,
+}
+
+/// Runs `f` on the app, deferring it if the app is already borrowed
+/// (a UI callback fired while Rust was updating the UI).
+fn with_app(app: &Rc<RefCell<App>>, f: impl FnOnce(&mut App) + 'static) {
+    match app.try_borrow_mut() {
+        Ok(mut a) => f(&mut a),
+        Err(_) => {
+            let app = app.clone();
+            slint::Timer::single_shot(Duration::ZERO, move || f(&mut app.borrow_mut()));
+        }
+    }
+}
+
+fn ss(s: impl AsRef<str>) -> SharedString {
+    SharedString::from(s.as_ref())
+}
+
+fn strings(v: impl IntoIterator<Item = impl AsRef<str>>) -> ModelRc<SharedString> {
+    ModelRc::new(VecModel::from(v.into_iter().map(ss).collect::<Vec<_>>()))
+}
+
+fn scaling_index(s: EditorScaling) -> i32 {
+    SCALING_CHOICES.iter().position(|c| *c == s).unwrap_or(1) as i32
+}
+
+impl App {
+    pub fn new(ui: &MainWindow, opts: StartOptions) -> anyhow::Result<Rc<RefCell<Self>>> {
+        let paths = AppPaths::resolve();
+        let mut settings = Settings::load(&paths.settings_file());
+        if let Some(fs) = opts.fullscreen {
+            settings.display.fullscreen = fs;
+        }
+        let catalog = PluginCatalog::load(&paths.plugin_cache_file()).unwrap_or_else(|e| {
+            log::warn!("plugin cache unreadable: {e}");
+            PluginCatalog::default()
+        });
+        let presets = PresetStore::new(paths.presets_dir());
+
+        let editor_host = if std::env::var_os("DISPLAY").is_some() {
+            Some(EditorHost::spawn())
+        } else {
+            None
+        };
+        if let Some(h) = &editor_host {
+            h.send(HostCommand::SetInputMode(if settings.display.xtest_input {
+                InputMode::XTest
+            } else {
+                InputMode::SendEvent
+            }));
+        }
+
+        let mut midi = MidiListener::new();
+        midi.listen(&settings.midi.learn_input);
+
+        let slots_model = Rc::new(VecModel::default());
+        ui.set_slots(ModelRc::from(slots_model.clone()));
+
+        let app = Rc::new(RefCell::new(App {
+            ui: ui.as_weak(),
+            paths,
+            settings,
+            catalog,
+            filter: CatalogFilter::default(),
+            presets,
+            chain: Chain::default(),
+            runtime: HashMap::new(),
+            mappings: Vec::new(),
+            selected: None,
+            editor: None,
+            undo: None,
+            engine: EngineHandle::spawn(),
+            engine_running: false,
+            first_start: true,
+            skip_default_preset: opts.skip_default_preset,
+            reload_chain_on_start: false,
+            tried_fallback: false,
+            capture_available: editor_host.is_some(),
+            editor_host,
+            system: SystemWorker::spawn(),
+            midi,
+            learning: None,
+            scan: None,
+            prompt: None,
+            confirm: None,
+            toast_at: None,
+            options_page: 0,
+            last_sys_refresh: Instant::now(),
+            slots_model,
+            meters: Meters::default(),
+            restart_requested: false,
+        }));
+
+        Self::wire(ui, &app);
+        {
+            let mut a = app.borrow_mut();
+            a.init_ui(ui);
+            a.engine.send(Command::QueryDrivers);
+            a.start_engine();
+            if a.catalog.plugins.is_empty() {
+                a.start_scan();
+            }
+            a.system.send(SysCmd::RefreshWifi);
+            a.system.send(SysCmd::RefreshBt);
+        }
+
+        // Poll engine/editor/system events at display rate.
+        let timer = slint::Timer::default();
+        let poll_app = app.clone();
+        timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(16),
+            move || {
+                if let Ok(mut a) = poll_app.try_borrow_mut() {
+                    a.poll();
+                }
+            },
+        );
+        // Keep the timer alive for the app's lifetime.
+        std::mem::forget(timer);
+        Ok(app)
+    }
+
+    fn ui(&self) -> MainWindow {
+        self.ui.upgrade().expect("main window alive")
+    }
+
+    fn init_ui(&mut self, ui: &MainWindow) {
+        let d = &self.settings.display;
+        if !d.fullscreen {
+            ui.window().set_size(slint::LogicalSize::new(
+                d.window_width as f32,
+                d.window_height as f32,
+            ));
+        }
+        ui.window().set_fullscreen(d.fullscreen);
+        ui.set_strip_width(d.edge_strip_width as f32);
+        ui.set_browser_formats(strings(PluginFormat::ALL.iter().map(|f| f.label())));
+        ui.set_browser_categories(strings(PluginCategory::ALL.iter().map(|c| c.label())));
+        ui.set_keyboard_visible(self.settings.show_keyboard);
+        ui.set_keyboard_base(48 + 12 * self.settings.midi.keyboard_octave as i32);
+
+        let o = ui.global::<Options>();
+        o.set_version(ss(env!("CARGO_PKG_VERSION")));
+        o.set_fullscreen(d.fullscreen);
+        o.set_default_scaling(scaling_index(d.default_scaling));
+        o.set_input_mode(d.xtest_input as i32);
+        o.set_keyboard_visible(self.settings.show_keyboard);
+        self.refresh_audio_options();
+        self.refresh_presets();
+        self.refresh_midi_options();
+        self.refresh_browser();
+        self.refresh_slots();
+        self.update_editor_ui();
+    }
+
+    // =============================================================== wiring
+
+    fn wire(ui: &MainWindow, app: &Rc<RefCell<App>>) {
+        macro_rules! on {
+            ($target:expr, $method:ident, |$a:ident $(, $arg:ident : $ty:ty)*| $body:expr) => {{
+                let app = app.clone();
+                $target.$method(move |$($arg: $ty),*| {
+                    with_app(&app, move |$a: &mut App| { $body; });
+                });
+            }};
+        }
+
+        let tu = ui.global::<TextUtil>();
+        tu.on_drop_last(|s| {
+            let mut s = s.to_string();
+            s.pop();
+            ss(s)
+        });
+        tu.on_mask(|s| ss("•".repeat(s.chars().count())));
+
+        // ---- chain
+        on!(ui, on_select_slot, |a, id: i32| a
+            .select(Some(SlotId(id as u64))));
+        on!(ui, on_toggle_bypass, |a, id: i32, b: bool| a
+            .set_bypass(SlotId(id as u64), b));
+        on!(ui, on_remove_slot, |a, id: i32| a
+            .remove_slot(SlotId(id as u64)));
+        on!(ui, on_move_slot, |a, from: i32, to: i32| a
+            .move_slot(from as usize, to as usize));
+        on!(ui, on_undo_remove, |a| a.undo_remove());
+        on!(ui, on_open_browser, |a| {
+            a.refresh_browser();
+            a.ui().set_browser_open(true);
+        });
+        on!(
+            ui,
+            on_browser_filter,
+            |a, text: SharedString, format: SharedString, category: SharedString, fav: bool| {
+                a.filter = CatalogFilter {
+                    text: text.to_string(),
+                    format: PluginFormat::from_label(&format),
+                    category: PluginCategory::from_label(&category),
+                    favorites_only: fav,
+                };
+                a.refresh_browser();
+            }
+        );
+        on!(ui, on_browser_pick, |a, key: SharedString| a
+            .add_plugin(&key));
+        on!(ui, on_browser_favorite, |a, key: SharedString| {
+            a.catalog.toggle_favorite(&key);
+            a.save_catalog();
+            a.refresh_browser();
+        });
+        on!(ui, on_rescan, |a| a.start_scan());
+        on!(ui, on_browser_keyboard, |a| {
+            let text = a.filter.text.clone();
+            a.open_prompt(Prompt::Search, "Search plugins", text, false);
+        });
+
+        // ---- main area
+        on!(
+            ui,
+            on_editor_pointer,
+            |a, kind: SharedString, x: f32, y: f32| a.editor_pointer(&kind, x, y)
+        );
+        on!(ui, on_editor_scroll, |a, x: f32, y: f32, dy: f32| {
+            a.editor_pointer(if dy > 0.0 { "scroll-up" } else { "scroll-down" }, x, y)
+        });
+        on!(ui, on_area_resized, |a| a.relayout_editor());
+        on!(ui, on_set_param, |a, index: i32, value: f32| {
+            if let Some(slot) = a.selected {
+                a.engine.send(Command::SetParameter {
+                    slot,
+                    index: index as u32,
+                    value,
+                });
+            }
+        });
+
+        // ---- overlays
+        on!(ui, on_prompt_done, |a, ok: bool, text: SharedString| a
+            .prompt_done(ok, text.to_string()));
+        on!(ui, on_confirm_done, |a, ok: bool| a.confirm_done(ok));
+        on!(ui, on_piano_note, |a, note: i32, on: bool| {
+            let slot = a.selected.filter(|s| {
+                a.runtime
+                    .get(s)
+                    .and_then(|r| r.info.as_ref())
+                    .is_some_and(|i| i.midi_ins > 0)
+            });
+            let channel = a.settings.midi.keyboard_channel;
+            a.engine.send(Command::SendNote {
+                slot,
+                channel,
+                note: note.clamp(0, 127) as u8,
+                velocity: if on { 100 } else { 0 },
+            });
+        });
+        on!(ui, on_piano_octave, |a, d: i32| {
+            let o = (a.settings.midi.keyboard_octave as i32 + d).clamp(-3, 4);
+            a.settings.midi.keyboard_octave = o as i8;
+            a.ui().set_keyboard_base(48 + 12 * o);
+            a.save_settings();
+        });
+        on!(ui, on_toggle_fullscreen, |a| {
+            let fs = !a.settings.display.fullscreen;
+            a.set_fullscreen(fs);
+        });
+        on!(ui, on_options_page, |a, page: i32| {
+            a.options_page = page;
+            match page {
+                0 => a.engine.send(Command::QueryDrivers),
+                2 => a.refresh_midi_options(),
+                3 => a.system.send(SysCmd::RefreshWifi),
+                4 => a.system.send(SysCmd::RefreshBt),
+                _ => {}
+            }
+        });
+        on!(ui, on_sidebar_changed, |a, _left: bool, _right: bool| a
+            .relayout_editor());
+
+        // ---- options: audio
+        let o = ui.global::<Options>();
+        on!(o, on_set_driver, |a, v: SharedString| {
+            a.settings.audio.driver = v.to_string();
+            a.settings.audio.device.clear();
+            a.restart_engine();
+        });
+        on!(o, on_set_device, |a, v: SharedString| {
+            a.settings.audio.device = v.to_string();
+            a.restart_engine();
+        });
+        on!(o, on_set_input, |a, v: SharedString| {
+            a.settings.audio.input_client = if v == "system" {
+                String::new()
+            } else {
+                v.to_string()
+            };
+            a.reconnect();
+        });
+        on!(o, on_set_output, |a, v: SharedString| {
+            a.settings.audio.output_client = if v == "system" {
+                String::new()
+            } else {
+                v.to_string()
+            };
+            a.reconnect();
+        });
+        on!(o, on_set_sample_rate, |a, v: SharedString| {
+            if let Ok(sr) = v.parse() {
+                a.settings.audio.sample_rate = sr;
+                a.restart_engine();
+            }
+        });
+        on!(o, on_set_buffer_size, |a, v: SharedString| {
+            if let Ok(bs) = v.parse() {
+                a.settings.audio.buffer_size = bs;
+                a.restart_engine();
+            }
+        });
+        on!(o, on_set_isolate, |a, v: bool| {
+            a.settings.audio.isolate_plugins = v;
+            a.restart_engine();
+        });
+        on!(o, on_restart_engine, |a| a.restart_engine());
+
+        // ---- options: presets
+        on!(o, on_save_preset, |a| {
+            if let Some(name) = a.settings.current_preset.clone() {
+                a.save_preset(&name);
+            }
+        });
+        on!(o, on_save_preset_as, |a| a.open_prompt(
+            Prompt::SaveAs,
+            "Save preset as",
+            a.settings.current_preset.clone().unwrap_or_default(),
+            false
+        ));
+        on!(o, on_load_preset, |a, name: SharedString| a
+            .load_preset(&name));
+        on!(o, on_rename_preset, |a, name: SharedString| a.open_prompt(
+            Prompt::Rename(name.to_string()),
+            "Rename preset",
+            name.to_string(),
+            false
+        ));
+        on!(o, on_delete_preset, |a, name: SharedString| a.open_confirm(
+            Confirm::DeletePreset(name.to_string()),
+            format!("Delete the preset \"{name}\"?")
+        ));
+        on!(o, on_set_default_preset, |a, name: SharedString| {
+            a.settings.default_preset = (!name.is_empty()).then(|| name.to_string());
+            a.save_settings();
+            a.refresh_presets();
+        });
+
+        // ---- options: midi
+        on!(o, on_set_midi_port, |a, v: SharedString| {
+            let port = if v == "All inputs" {
+                String::new()
+            } else {
+                v.to_string()
+            };
+            a.settings.midi.learn_input = port.clone();
+            a.midi.listen(&port);
+            a.save_settings();
+            a.refresh_midi_options();
+        });
+        on!(o, on_start_learn, |a, action: i32| {
+            if let Some(slot) = a.selected {
+                a.learning = Some((
+                    slot,
+                    if action == 1 {
+                        MidiAction::Follow
+                    } else {
+                        MidiAction::Toggle
+                    },
+                ));
+                a.refresh_midi_options();
+            }
+        });
+        on!(o, on_cancel_learn, |a| {
+            a.learning = None;
+            a.refresh_midi_options();
+        });
+        on!(o, on_delete_mapping, |a, index: i32| {
+            if (index as usize) < a.mappings.len() {
+                a.mappings.remove(index as usize);
+                a.refresh_midi_options();
+                a.refresh_slots();
+            }
+        });
+        on!(o, on_set_keyboard, |a, v: bool| {
+            a.settings.show_keyboard = v;
+            a.ui().set_keyboard_visible(v);
+            a.ui().global::<Options>().set_keyboard_visible(v);
+            a.save_settings();
+        });
+
+        // ---- options: wifi / bluetooth
+        on!(o, on_set_wifi, |a, v: bool| a
+            .system
+            .send(SysCmd::SetWifi(v)));
+        on!(o, on_scan_wifi, |a| a.system.send(SysCmd::ScanWifi));
+        on!(o, on_connect_wifi, |a, ssid: SharedString| a
+            .connect_wifi(ssid.to_string()));
+        on!(o, on_disconnect_wifi, |a| a
+            .system
+            .send(SysCmd::DisconnectWifi));
+        on!(o, on_set_bt, |a, v: bool| a.system.send(SysCmd::SetBt(v)));
+        on!(o, on_scan_bt, |a, v: bool| a.system.send(SysCmd::ScanBt(v)));
+        on!(o, on_connect_bt, |a, p: SharedString| a
+            .system
+            .send(SysCmd::ConnectBt(p.to_string())));
+        on!(o, on_disconnect_bt, |a, p: SharedString| a
+            .system
+            .send(SysCmd::DisconnectBt(p.to_string())));
+        on!(o, on_forget_bt, |a, p: SharedString| a
+            .system
+            .send(SysCmd::ForgetBt(p.to_string())));
+
+        // ---- options: display
+        on!(o, on_set_fullscreen, |a, v: bool| a.set_fullscreen(v));
+        on!(o, on_set_brightness, |a, v: f32| {
+            a.settings.display.brightness = Some(v.round() as u32);
+            a.system.send(SysCmd::SetBrightness(v.round() as u32));
+            a.ui().global::<Options>().set_brightness(v);
+            a.save_settings();
+        });
+        on!(o, on_set_default_scaling, |a, i: i32| {
+            a.settings.display.default_scaling = SCALING_CHOICES[i.clamp(0, 5) as usize];
+            a.ui().global::<Options>().set_default_scaling(i);
+            a.save_settings();
+            a.relayout_editor();
+        });
+        on!(o, on_set_plugin_scaling, |a, i: i32| {
+            if let Some(slot) = a.selected.and_then(|s| a.chain.get_mut(s)) {
+                slot.scaling = (i >= 0).then(|| SCALING_CHOICES[i.min(5) as usize]);
+            }
+            a.update_editor_ui();
+            a.relayout_editor();
+        });
+        on!(o, on_set_input_mode, |a, i: i32| {
+            a.settings.display.xtest_input = i == 1;
+            if let Some(h) = &a.editor_host {
+                h.send(HostCommand::SetInputMode(if i == 1 {
+                    InputMode::XTest
+                } else {
+                    InputMode::SendEvent
+                }));
+            }
+            a.ui().global::<Options>().set_input_mode(i);
+            a.save_settings();
+        });
+
+        // ---- options: system
+        on!(o, on_rescan_plugins, |a| a.start_scan());
+        on!(o, on_restart_app, |a| a.open_confirm(
+            Confirm::Restart,
+            "Restart Carlita? Audio stops for a few seconds.".into()
+        ));
+        on!(o, on_quit, |a| a
+            .open_confirm(Confirm::Quit, "Quit Carlita?".into()));
+        on!(o, on_reboot, |a| a.open_confirm(
+            Confirm::Reboot,
+            "Reboot the computer?".into()
+        ));
+        on!(o, on_shutdown, |a| a.open_confirm(
+            Confirm::Shutdown,
+            "Shut down the computer?".into()
+        ));
+    }
+
+    // ============================================================== polling
+
+    fn poll(&mut self) {
+        while let Ok(e) = self.engine.events().try_recv() {
+            self.on_engine_event(e);
+        }
+        let host_events: Vec<HostEvent> = self
+            .editor_host
+            .as_ref()
+            .map(|h| h.events().try_iter().collect())
+            .unwrap_or_default();
+        for e in host_events {
+            self.on_host_event(e);
+        }
+        while let Ok(e) = self.system.events.try_recv() {
+            self.on_system_event(e);
+        }
+        while let Ok(bytes) = self.midi.messages.try_recv() {
+            if let Some(msg) = MidiMessage::parse(&bytes) {
+                self.on_midi(msg);
+            }
+        }
+        if let Some(rx) = &self.scan {
+            let msgs: Vec<ScanMsg> = rx.try_iter().collect();
+            for m in msgs {
+                self.on_scan(m);
+            }
+        }
+        if self
+            .undo
+            .as_ref()
+            .is_some_and(|u| u.at.elapsed() > UNDO_TIMEOUT)
+        {
+            self.undo = None;
+            self.ui().set_undo_text(ss(""));
+        }
+        if self.toast_at.is_some_and(|t| t.elapsed() > TOAST_TIMEOUT) {
+            self.toast_at = None;
+            self.ui().set_toast(ss(""));
+        }
+        if (self.options_page == 3 || self.options_page == 4)
+            && self.last_sys_refresh.elapsed() > Duration::from_secs(4)
+        {
+            self.last_sys_refresh = Instant::now();
+            if self.ui().get_right_pos() > 0.0 {
+                self.system.send(if self.options_page == 3 {
+                    SysCmd::RefreshWifi
+                } else {
+                    SysCmd::RefreshBt
+                });
+            }
+        }
+    }
+
+    fn toast(&mut self, text: impl Into<String>, error: bool) {
+        let ui = self.ui();
+        ui.set_toast(ss(text.into()));
+        ui.set_toast_error(error);
+        self.toast_at = Some(Instant::now());
+    }
+
+    // =============================================================== engine
+
+    fn engine_config(&self) -> EngineConfig {
+        let a = &self.settings.audio;
+        EngineConfig {
+            driver: a.driver.clone(),
+            device: a.device.clone(),
+            sample_rate: a.sample_rate,
+            buffer_size: a.buffer_size,
+            isolate_plugins: a.isolate_plugins,
+            input_client: a.input_client.clone(),
+            output_client: a.output_client.clone(),
+            auto_connect: a.auto_connect,
+            client_name: "Carlita".into(),
+        }
+    }
+
+    fn start_engine(&mut self) {
+        let cfg = self.engine_config();
+        self.ui()
+            .global::<Options>()
+            .set_engine_status(ss(format!("Starting {}…", cfg.driver)));
+        self.engine.send(Command::Start(cfg));
+    }
+
+    /// Restarts the engine with new settings, keeping the chain and its state.
+    fn restart_engine(&mut self) {
+        self.save_settings();
+        self.capture_states();
+        self.hide_editor();
+        self.reload_chain_on_start = true;
+        for r in self.runtime.values_mut() {
+            r.status = SlotStatus::Loading;
+        }
+        self.refresh_slots();
+        self.start_engine();
+        self.refresh_audio_options();
+    }
+
+    fn reconnect(&mut self) {
+        self.save_settings();
+        self.engine.send(Command::Reconnect {
+            input_client: self.settings.audio.input_client.clone(),
+            output_client: self.settings.audio.output_client.clone(),
+        });
+        self.refresh_audio_options();
+    }
+
+    fn loads(&self) -> Vec<PluginLoad> {
+        self.chain
+            .slots
+            .iter()
+            .map(|s| PluginLoad {
+                slot: s.id,
+                plugin: s.plugin.clone(),
+                name: s.name.clone(),
+                bypassed: s.bypassed,
+                state: s.state.clone(),
+            })
+            .collect()
+    }
+
+    /// Pulls every plugin's current state into the chain (blocking, bounded).
+    fn capture_states(&mut self) {
+        if !self.engine_running || self.chain.is_empty() {
+            return;
+        }
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.engine.send(Command::CaptureStates { reply: tx });
+        match rx.recv_timeout(Duration::from_secs(8)) {
+            Ok(states) => {
+                for (id, state) in states {
+                    if let (Some(slot), Some(state)) = (self.chain.get_mut(id), state) {
+                        slot.state = Some(state);
+                    }
+                }
+            }
+            Err(_) => log::warn!("timed out capturing plugin states"),
+        }
+    }
+
+    fn on_engine_event(&mut self, e: Event) {
+        match e {
+            Event::Started {
+                driver,
+                sample_rate,
+                buffer_size,
+            } => {
+                self.engine_running = true;
+                let ui = self.ui();
+                let o = ui.global::<Options>();
+                o.set_engine_running(true);
+                o.set_engine_status(ss(format!(
+                    "{driver} · {sample_rate:.0} Hz · {buffer_size} frames"
+                )));
+                if self.first_start {
+                    self.first_start = false;
+                    let default = self
+                        .settings
+                        .default_preset
+                        .clone()
+                        .filter(|_| !self.skip_default_preset);
+                    match default {
+                        Some(name) if self.presets.exists(&name) => self.load_preset(&name),
+                        _ => {}
+                    }
+                } else if self.reload_chain_on_start {
+                    self.reload_chain_on_start = false;
+                    self.engine.send(Command::LoadChain {
+                        loads: self.loads(),
+                    });
+                }
+                self.engine.send(Command::QueryDrivers);
+            }
+            Event::StartFailed(err) => {
+                self.engine_running = false;
+                let ui = self.ui();
+                let o = ui.global::<Options>();
+                o.set_engine_running(false);
+                o.set_engine_status(ss(format!("Audio engine stopped: {err}")));
+                // On first launch, fall back from JACK to ALSA so the app is
+                // playable even without a JACK/PipeWire server.
+                if self.first_start
+                    && !self.tried_fallback
+                    && self.settings.audio.driver.eq_ignore_ascii_case("jack")
+                {
+                    self.tried_fallback = true;
+                    self.toast("JACK/PipeWire is not running – trying ALSA", true);
+                    let mut cfg = self.engine_config();
+                    cfg.driver = "ALSA".into();
+                    self.engine.send(Command::Start(cfg));
+                } else {
+                    self.toast(format!("Audio engine failed to start: {err}"), true);
+                    self.set_editor_message(
+                        "Audio engine is not running",
+                        &format!("{err}\n\nOpen options → Audio to pick another driver."),
+                    );
+                }
+            }
+            Event::Stopped => {
+                self.engine_running = false;
+                self.ui().global::<Options>().set_engine_running(false);
+            }
+            Event::Drivers(drivers) => {
+                let ui = self.ui();
+                let o = ui.global::<Options>();
+                o.set_drivers(strings(drivers.iter().map(|d| d.name.clone())));
+                let devices = drivers
+                    .iter()
+                    .find(|d| d.name == self.settings.audio.driver)
+                    .filter(|d| !d.name.to_lowercase().starts_with("jack"))
+                    .map(|d| d.devices.clone())
+                    .unwrap_or_default();
+                o.set_devices(strings(devices));
+            }
+            Event::Clients(clients) => {
+                let ui = self.ui();
+                let o = ui.global::<Options>();
+                let ins: Vec<String> = clients
+                    .iter()
+                    .filter(|c| c.audio_outs > 0)
+                    .map(|c| c.name.clone())
+                    .collect();
+                let outs: Vec<String> = clients
+                    .iter()
+                    .filter(|c| c.audio_ins > 0)
+                    .map(|c| c.name.clone())
+                    .collect();
+                o.set_inputs(strings(ins));
+                o.set_outputs(strings(outs));
+            }
+            Event::PluginLoaded { slot, info } => {
+                let has_ui = info.has_custom_ui;
+                let r = self.runtime.entry(slot).or_default();
+                r.status = SlotStatus::Ready;
+                r.info = Some(info);
+                self.refresh_slots();
+                if self.selected == Some(slot) {
+                    self.show_editor(slot);
+                } else if self.selected.is_none() && has_ui {
+                    // Show a freshly added plugin straight away.
+                    self.select(Some(slot));
+                }
+            }
+            Event::PluginFailed { slot, error } => {
+                self.runtime.entry(slot).or_default().status = SlotStatus::Failed(error.clone());
+                let name = self
+                    .chain
+                    .get(slot)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+                self.toast(format!("{name} failed to load: {error}"), true);
+                self.refresh_slots();
+            }
+            Event::PluginCrashed { slot, message } => {
+                self.runtime.entry(slot).or_default().status = SlotStatus::Crashed(message);
+                let name = self
+                    .chain
+                    .get(slot)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+                self.toast(
+                    format!(
+                        "{name} crashed. The rest of the chain keeps playing; tap it to reload."
+                    ),
+                    true,
+                );
+                if self.selected == Some(slot) {
+                    self.hide_editor();
+                    self.set_editor_message(
+                        &format!("{name} crashed"),
+                        "Tap it in the chain to reload it.",
+                    );
+                }
+                self.refresh_slots();
+            }
+            Event::PluginRemoved { slot, state } => {
+                if let Some(u) = self.undo.as_mut().filter(|u| u.slot.id == slot) {
+                    if state.is_some() {
+                        u.slot.state = state;
+                    }
+                }
+            }
+            Event::BypassChanged { .. } => {}
+            Event::EditorClosed { slot } | Event::EditorResized { slot, .. }
+                if self.selected != Some(slot) => {}
+            Event::EditorClosed { slot } => {
+                log::info!("editor of slot {} closed", slot.0);
+            }
+            Event::EditorResized { .. } => {}
+            Event::Parameters { slot, params } => {
+                if self.selected == Some(slot) {
+                    let items: Vec<ParamItem> = params
+                        .into_iter()
+                        .filter(|p| !p.is_output)
+                        .map(|p| ParamItem {
+                            index: p.index as i32,
+                            name: ss(&p.name),
+                            value: p.value,
+                            minimum: p.min,
+                            maximum: p.max,
+                            text: ss(if p.unit.is_empty() || p.text.ends_with(&p.unit) {
+                                p.text.clone()
+                            } else {
+                                format!("{} {}", p.text, p.unit)
+                            }),
+                            is_bool: p.is_boolean,
+                            is_int: p.is_integer,
+                        })
+                        .collect();
+                    self.ui().set_params(ModelRc::new(VecModel::from(items)));
+                }
+            }
+            Event::ParameterChanged { slot, index, value } => {
+                if self.selected == Some(slot) {
+                    let ui = self.ui();
+                    let params = ui.get_params();
+                    for i in 0..params.row_count() {
+                        if let Some(mut p) = params.row_data(i) {
+                            if p.index == index as i32 && (p.value - value).abs() > f32::EPSILON {
+                                p.value = value;
+                                params.set_row_data(i, p);
+                            }
+                        }
+                    }
+                }
+            }
+            Event::ChainLoaded => {
+                self.refresh_slots();
+            }
+            Event::Meters(m) => self.on_meters(m),
+            Event::Info(msg) => log::info!("engine: {msg}"),
+            Event::Error(msg) => self.toast(msg, true),
+        }
+    }
+
+    fn on_meters(&mut self, m: Meters) {
+        let ui = self.ui();
+        ui.set_in_left(m.input[0]);
+        ui.set_in_right(m.input[1]);
+        ui.set_out_left(m.output[0]);
+        ui.set_out_right(m.output[1]);
+        let load = format!("{:.0}%", m.dsp_load);
+        let latency = format!("{:.1} ms", m.total_latency_ms());
+        ui.set_dsp_load(ss(&load));
+        ui.set_latency(ss(&latency));
+        if m.xruns != self.meters.xruns
+            || (m.dsp_load - self.meters.dsp_load).abs() >= 1.0
+            || m.latencies != self.meters.latencies
+        {
+            let o = ui.global::<Options>();
+            o.set_dsp_load(ss(&load));
+            o.set_latency(ss(&latency));
+            o.set_xruns(m.xruns as i32);
+        }
+        let mut changed = false;
+        for (slot, lat) in &m.latencies {
+            if let Some(r) = self.runtime.get_mut(slot) {
+                if r.latency != *lat {
+                    r.latency = *lat;
+                    changed = true;
+                }
+            }
+        }
+        self.meters = m;
+        if changed {
+            self.refresh_slots();
+        }
+    }
+
+    // ================================================================ chain
+
+    fn slot_item(&self, s: &ChainSlot) -> SlotItem {
+        let r = self.runtime.get(&s.id);
+        let (status, detail) = match r.map(|r| &r.status) {
+            Some(SlotStatus::Ready) => ("", String::new()),
+            Some(SlotStatus::Failed(e)) => ("failed", e.clone()),
+            Some(SlotStatus::Crashed(e)) => ("crashed", e.clone()),
+            _ => ("loading", String::new()),
+        };
+        SlotItem {
+            id: s.id.0 as i32,
+            name: ss(&s.name),
+            format: ss(if s.plugin.yabridge {
+                format!("{} · yabridge", s.plugin.format)
+            } else {
+                s.plugin.format.to_string()
+            }),
+            bypassed: s.bypassed,
+            latency: ss(format!("{} smp", r.map_or(0, |r| r.latency))),
+            status: ss(status),
+            status_detail: ss(detail),
+            selected: self.selected == Some(s.id),
+            midi_learned: self.mappings.iter().any(|m| m.slot == s.id),
+        }
+    }
+
+    fn refresh_slots(&mut self) {
+        let items: Vec<SlotItem> = self.chain.slots.iter().map(|s| self.slot_item(s)).collect();
+        if items.len() == self.slots_model.row_count() {
+            for (i, item) in items.into_iter().enumerate() {
+                if self.slots_model.row_data(i).as_ref() != Some(&item) {
+                    self.slots_model.set_row_data(i, item);
+                }
+            }
+        } else {
+            self.slots_model.set_vec(items);
+        }
+        self.ui()
+            .set_preset_name(ss(self.settings.current_preset.clone().unwrap_or_default()));
+    }
+
+    fn add_plugin(&mut self, key: &str) {
+        let Some(desc) = self.catalog.find(key).cloned() else {
+            return;
+        };
+        self.ui().set_browser_open(false);
+        if !self.engine_running {
+            self.toast("The audio engine is not running", true);
+            return;
+        }
+        let slot = self.chain.new_slot(desc);
+        let load = PluginLoad {
+            slot: slot.id,
+            plugin: slot.plugin.clone(),
+            name: slot.name.clone(),
+            bypassed: false,
+            state: None,
+        };
+        self.runtime.insert(slot.id, SlotRuntime::default());
+        self.chain.push(slot);
+        self.engine.send(Command::AddPlugin { load, index: None });
+        self.refresh_slots();
+    }
+
+    fn remove_slot(&mut self, id: SlotId) {
+        if self.selected == Some(id) {
+            self.select(None);
+        }
+        let Some((index, slot)) = self.chain.remove(id) else {
+            return;
+        };
+        self.runtime.remove(&id);
+        self.mappings.retain(|m| m.slot != id);
+        self.engine.send(Command::RemovePlugin { slot: id });
+        self.ui()
+            .set_undo_text(ss(format!("Removed {}", slot.name)));
+        self.undo = Some(Undo {
+            slot,
+            index,
+            at: Instant::now(),
+        });
+        self.refresh_slots();
+        self.refresh_midi_options();
+    }
+
+    fn undo_remove(&mut self) {
+        let Some(u) = self.undo.take() else { return };
+        self.ui().set_undo_text(ss(""));
+        let index = u.index.min(self.chain.len());
+        let load = PluginLoad {
+            slot: u.slot.id,
+            plugin: u.slot.plugin.clone(),
+            name: u.slot.name.clone(),
+            bypassed: u.slot.bypassed,
+            state: u.slot.state.clone(),
+        };
+        self.runtime.insert(u.slot.id, SlotRuntime::default());
+        self.chain.slots.insert(index, u.slot);
+        self.engine.send(Command::AddPlugin {
+            load,
+            index: Some(index),
+        });
+        self.refresh_slots();
+    }
+
+    fn move_slot(&mut self, from: usize, to: usize) {
+        if self.chain.move_slot(from, to).is_empty() {
+            return;
+        }
+        self.engine.send(Command::MovePlugin { from, to });
+        self.refresh_slots();
+    }
+
+    fn set_bypass(&mut self, id: SlotId, bypassed: bool) {
+        if let Some(s) = self.chain.get_mut(id) {
+            s.bypassed = bypassed;
+            self.engine.send(Command::SetBypass { slot: id, bypassed });
+            self.refresh_slots();
+        }
+    }
+
+    // =============================================================== editor
+
+    fn select(&mut self, slot: Option<SlotId>) {
+        // Tapping a crashed or failed plugin reloads it.
+        if let Some(id) = slot {
+            if matches!(
+                self.runtime.get(&id).map(|r| &r.status),
+                Some(SlotStatus::Crashed(_) | SlotStatus::Failed(_))
+            ) {
+                if let Some(s) = self.chain.get(id) {
+                    let load = PluginLoad {
+                        slot: id,
+                        plugin: s.plugin.clone(),
+                        name: s.name.clone(),
+                        bypassed: s.bypassed,
+                        state: s.state.clone(),
+                    };
+                    self.runtime.entry(id).or_default().status = SlotStatus::Loading;
+                    self.engine.send(Command::ReloadPlugin { load });
+                }
+            }
+        }
+        if self.selected != slot {
+            self.hide_editor();
+            self.selected = slot;
+            if let Some(id) = slot {
+                self.show_editor(id);
+            }
+        }
+        if self.learning.is_some() {
+            self.learning = None;
+        }
+        self.refresh_slots();
+        self.refresh_midi_options();
+        self.update_editor_ui();
+    }
+
+    fn show_editor(&mut self, slot: SlotId) {
+        let Some(s) = self.chain.get(slot) else {
+            return;
+        };
+        let name = s.name.clone();
+        let rt = self.runtime.get(&slot);
+        let info = rt.and_then(|r| r.info.clone());
+        match (rt.map(|r| &r.status), info) {
+            (Some(SlotStatus::Ready), Some(info)) if info.has_custom_ui => {
+                self.engine.send(Command::ShowEditor { slot, show: true });
+                if self.capture_available {
+                    if let Some(h) = &self.editor_host {
+                        h.send(HostCommand::Attach {
+                            key: slot.0,
+                            title: editor_window_title(slot),
+                        });
+                    }
+                    self.editor = Some(EditorView {
+                        slot,
+                        size: None,
+                        resizable: false,
+                        transform: None,
+                        resize_requested: false,
+                    });
+                    let ui = self.ui();
+                    ui.set_editor_title(ss(&name));
+                    ui.set_editor_mode(ss("waiting"));
+                } else {
+                    self.set_editor_message(&name, "The editor opened in its own window.");
+                }
+            }
+            (Some(SlotStatus::Ready), Some(_)) => {
+                self.editor = None;
+                self.engine.send(Command::QueryParameters { slot });
+                let ui = self.ui();
+                ui.set_params(ModelRc::new(VecModel::<ParamItem>::default()));
+                ui.set_editor_title(ss(&name));
+                ui.set_editor_mode(ss("params"));
+            }
+            (Some(SlotStatus::Loading) | None, _) => {
+                let ui = self.ui();
+                ui.set_editor_title(ss(&name));
+                ui.set_editor_mode(ss("waiting"));
+            }
+            _ => self.set_editor_message(
+                &name,
+                "This plugin is not running. Tap it in the chain to reload it.",
+            ),
+        }
+    }
+
+    fn hide_editor(&mut self) {
+        if let Some(slot) = self.selected {
+            self.engine.send(Command::ShowEditor { slot, show: false });
+            if let Some(h) = &self.editor_host {
+                h.send(HostCommand::Detach { key: slot.0 });
+            }
+        }
+        self.editor = None;
+        let ui = self.ui();
+        ui.set_editor_mode(ss("empty"));
+        ui.set_editor_image(slint::Image::default());
+    }
+
+    fn set_editor_message(&self, title: &str, message: &str) {
+        let ui = self.ui();
+        ui.set_editor_title(ss(title));
+        ui.set_editor_message(ss(message));
+        ui.set_editor_mode(ss("message"));
+    }
+
+    fn scaling_for(&self, slot: SlotId) -> EditorScaling {
+        self.chain
+            .get(slot)
+            .and_then(|s| s.scaling)
+            .unwrap_or(self.settings.display.default_scaling)
+    }
+
+    fn update_editor_ui(&self) {
+        let ui = self.ui();
+        let o = ui.global::<Options>();
+        match self.selected.and_then(|s| self.chain.get(s)) {
+            Some(s) => {
+                o.set_selected_plugin(ss(&s.name));
+                o.set_plugin_scaling(s.scaling.map_or(-1, scaling_index));
+            }
+            None => {
+                o.set_selected_plugin(ss(""));
+                o.set_plugin_scaling(-1);
+            }
+        }
+    }
+
+    /// Recomputes where the captured editor is drawn.
+    fn relayout_editor(&mut self) {
+        let ui = self.ui();
+        let area = (ui.get_area_width(), ui.get_area_height());
+        let Some(ed) = self.editor.as_ref() else {
+            return;
+        };
+        let Some(size) = ed.size else { return };
+        let scaling = self.scaling_for(ed.slot);
+        // Editors that can resize themselves are given the space instead of
+        // being pixel-scaled.
+        if ed.resizable && scaling == EditorScaling::Fit && !ed.resize_requested {
+            if let Some(h) = &self.editor_host {
+                h.send(HostCommand::Resize {
+                    key: ed.slot.0,
+                    width: area.0 as u32,
+                    height: area.1 as u32,
+                });
+            }
+            if let Some(ed) = self.editor.as_mut() {
+                ed.resize_requested = true;
+            }
+        }
+        let t = ScaleTransform::compute((size.0 as f32, size.1 as f32), area, scaling);
+        ui.set_editor_x(t.offset_x);
+        ui.set_editor_y(t.offset_y);
+        ui.set_editor_w(t.width);
+        ui.set_editor_h(t.height);
+        if let Some(ed) = self.editor.as_mut() {
+            ed.transform = Some(t);
+        }
+    }
+
+    fn on_host_event(&mut self, e: HostEvent) {
+        match e {
+            HostEvent::Attached {
+                key,
+                width,
+                height,
+                resizable,
+            } => {
+                if let Some(ed) = self.editor.as_mut().filter(|ed| ed.slot.0 == key) {
+                    ed.size = Some((width, height));
+                    ed.resizable = resizable;
+                    self.relayout_editor();
+                }
+            }
+            HostEvent::Frame(f) => {
+                let Some(ed) = self.editor.as_mut().filter(|ed| ed.slot.0 == f.key) else {
+                    return;
+                };
+                let resized = ed.size != Some((f.width, f.height));
+                ed.size = Some((f.width, f.height));
+                let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                    &f.rgba, f.width, f.height,
+                );
+                let ui = self.ui();
+                ui.set_editor_image(slint::Image::from_rgba8(buf));
+                if ui.get_editor_mode() != "image" {
+                    ui.set_editor_mode(ss("image"));
+                }
+                if resized {
+                    self.relayout_editor();
+                }
+            }
+            HostEvent::NotFound { key } => {
+                if self.editor.as_ref().is_some_and(|ed| ed.slot.0 == key) {
+                    let slot = SlotId(key);
+                    let name = self
+                        .chain
+                        .get(slot)
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default();
+                    log::warn!("editor window for {name} not found; showing generic controls");
+                    self.editor = None;
+                    self.engine.send(Command::QueryParameters { slot });
+                    let ui = self.ui();
+                    ui.set_editor_title(ss(&name));
+                    ui.set_editor_mode(ss("params"));
+                }
+            }
+            HostEvent::Lost { key } => {
+                if self.editor.as_ref().is_some_and(|ed| ed.slot.0 == key) {
+                    let name = self
+                        .chain
+                        .get(SlotId(key))
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default();
+                    self.editor = None;
+                    self.set_editor_message(
+                        &format!("{name}: editor closed"),
+                        "Tap the plugin in the chain to open it again.",
+                    );
+                    // Allow re-selecting the same plugin to reopen it.
+                    self.selected = None;
+                    self.refresh_slots();
+                }
+            }
+            HostEvent::Unavailable(reason) => {
+                log::warn!("editor embedding unavailable: {reason}");
+                self.capture_available = false;
+            }
+        }
+    }
+
+    fn editor_pointer(&mut self, kind: &str, x: f32, y: f32) {
+        let Some(ed) = self.editor.as_ref() else {
+            return;
+        };
+        let Some(t) = ed.transform else { return };
+        let kind = match kind {
+            "down" => PointerKind::Down,
+            "up" => PointerKind::Up,
+            "move" => PointerKind::Move,
+            "scroll-up" => PointerKind::ScrollUp,
+            "scroll-down" => PointerKind::ScrollDown,
+            _ => return,
+        };
+        // Clamp so a drag that leaves the editor keeps tracking at its edge.
+        let (ex, ey) = match t.to_editor(x, y) {
+            Some(p) => p,
+            None if kind == PointerKind::Move || kind == PointerKind::Up => {
+                let cx = x.clamp(t.offset_x, t.offset_x + t.width - 1.0);
+                let cy = y.clamp(t.offset_y, t.offset_y + t.height - 1.0);
+                match t.to_editor(cx, cy) {
+                    Some(p) => p,
+                    None => return,
+                }
+            }
+            None => return,
+        };
+        if let Some(h) = &self.editor_host {
+            h.send(HostCommand::Pointer {
+                key: ed.slot.0,
+                kind,
+                x: ex,
+                y: ey,
+            });
+        }
+    }
+
+    // ============================================================== presets
+
+    fn refresh_presets(&self) {
+        let ui = self.ui();
+        let o = ui.global::<Options>();
+        o.set_presets(strings(self.presets.list()));
+        o.set_current_preset(ss(self.settings.current_preset.clone().unwrap_or_default()));
+        o.set_default_preset(ss(self.settings.default_preset.clone().unwrap_or_default()));
+    }
+
+    fn save_preset(&mut self, name: &str) {
+        self.capture_states();
+        let preset = Preset::new(name.trim(), self.chain.clone(), self.mappings.clone());
+        match self.presets.save(&preset) {
+            Ok(()) => {
+                self.settings.current_preset = Some(preset.name.clone());
+                self.save_settings();
+                self.toast(format!("Saved \"{}\"", preset.name), false);
+            }
+            Err(e) => self.toast(format!("Could not save preset: {e}"), true),
+        }
+        self.refresh_presets();
+        self.refresh_slots();
+    }
+
+    fn load_preset(&mut self, name: &str) {
+        let preset = match self.presets.load(name) {
+            Ok(p) => p,
+            Err(e) => {
+                self.toast(format!("Could not load preset: {e:#}"), true);
+                return;
+            }
+        };
+        self.hide_editor();
+        self.selected = None;
+        self.undo = None;
+        self.ui().set_undo_text(ss(""));
+        self.chain = preset.chain;
+        self.mappings = preset.midi_mappings;
+        self.runtime = self
+            .chain
+            .slots
+            .iter()
+            .map(|s| (s.id, SlotRuntime::default()))
+            .collect();
+        self.settings.current_preset = Some(preset.name.clone());
+        self.save_settings();
+        if self.engine_running {
+            self.engine.send(Command::LoadChain {
+                loads: self.loads(),
+            });
+        } else {
+            self.reload_chain_on_start = true;
+        }
+        self.refresh_slots();
+        self.refresh_presets();
+        self.refresh_midi_options();
+        self.update_editor_ui();
+        self.toast(format!("Loaded \"{}\"", preset.name), false);
+    }
+
+    // =========================================================== text input
+
+    fn open_prompt(&mut self, kind: Prompt, title: &str, text: String, secret: bool) {
+        self.prompt = Some(kind);
+        let ui = self.ui();
+        ui.set_prompt_title(ss(title));
+        ui.set_prompt_text(ss(text));
+        ui.set_prompt_secret(secret);
+        ui.set_prompt_open(true);
+    }
+
+    fn prompt_done(&mut self, ok: bool, text: String) {
+        let Some(kind) = self.prompt.take() else {
+            return;
+        };
+        if !ok {
+            return;
+        }
+        match kind {
+            Prompt::SaveAs => {
+                if text.trim().is_empty() {
+                    self.toast("Please enter a name", true);
+                } else {
+                    self.save_preset(&text);
+                }
+            }
+            Prompt::Rename(old) => match self.presets.rename(&old, &text) {
+                Ok(()) => {
+                    let new = text.trim().to_string();
+                    if self.settings.current_preset.as_deref() == Some(old.as_str()) {
+                        self.settings.current_preset = Some(new.clone());
+                    }
+                    if self.settings.default_preset.as_deref() == Some(old.as_str()) {
+                        self.settings.default_preset = Some(new);
+                    }
+                    self.save_settings();
+                    self.refresh_presets();
+                    self.refresh_slots();
+                }
+                Err(e) => self.toast(format!("Could not rename: {e}"), true),
+            },
+            Prompt::WifiPassword(ssid) => self.system.send(SysCmd::ConnectWifi {
+                ssid,
+                password: Some(text),
+            }),
+            Prompt::Search => {
+                self.ui().set_browser_search(ss(&text));
+                self.filter.text = text;
+                self.refresh_browser();
+            }
+        }
+    }
+
+    fn open_confirm(&mut self, kind: Confirm, text: String) {
+        self.confirm = Some(kind);
+        self.ui().set_confirm_text(ss(text));
+    }
+
+    fn confirm_done(&mut self, ok: bool) {
+        let Some(kind) = self.confirm.take() else {
+            return;
+        };
+        if !ok {
+            return;
+        }
+        match kind {
+            Confirm::DeletePreset(name) => {
+                if let Err(e) = self.presets.delete(&name) {
+                    self.toast(format!("Could not delete: {e}"), true);
+                }
+                if self.settings.current_preset.as_deref() == Some(name.as_str()) {
+                    self.settings.current_preset = None;
+                }
+                if self.settings.default_preset.as_deref() == Some(name.as_str()) {
+                    self.settings.default_preset = None;
+                }
+                self.save_settings();
+                self.refresh_presets();
+                self.refresh_slots();
+            }
+            Confirm::Reboot => self.system.send(SysCmd::Reboot),
+            Confirm::Shutdown => self.system.send(SysCmd::PowerOff),
+            Confirm::Restart => {
+                self.restart_requested = true;
+                let _ = slint::quit_event_loop();
+            }
+            Confirm::Quit => {
+                let _ = slint::quit_event_loop();
+            }
+        }
+    }
+
+    // ============================================================== browser
+
+    fn refresh_browser(&self) {
+        let items: Vec<PluginItem> = self
+            .catalog
+            .filtered(&self.filter)
+            .into_iter()
+            .take(600)
+            .map(|p| PluginItem {
+                key: ss(p.key()),
+                name: ss(&p.name),
+                maker: ss(&p.maker),
+                format: ss(p.format.label()),
+                category: ss(p.category.label()),
+                favorite: self.catalog.is_favorite(p),
+                bridged: p.yabridge,
+                synth: p.is_synth,
+            })
+            .collect();
+        let ui = self.ui();
+        ui.set_browser_plugins(ModelRc::new(VecModel::from(items)));
+        ui.set_browser_format(ss(self.filter.format.map(|f| f.label()).unwrap_or("")));
+        ui.set_browser_category(ss(self.filter.category.map(|c| c.label()).unwrap_or("")));
+        ui.set_browser_favorites(self.filter.favorites_only);
+        ui.global::<Options>().set_plugin_count(ss(format!(
+            "{} plugins in the library",
+            self.catalog.plugins.len()
+        )));
+    }
+
+    fn start_scan(&mut self) {
+        if self.scan.is_some() {
+            return;
+        }
+        let tool = EngineHandle::discovery_tool();
+        if !tool.exists() {
+            self.toast(
+                format!("Plugin scanner not found at {}", tool.display()),
+                true,
+            );
+            return;
+        }
+        self.scan = Some(scan::start(tool));
+        let ui = self.ui();
+        ui.set_scanning(true);
+        ui.set_scan_status(ss("Scanning for plugins…"));
+    }
+
+    fn on_scan(&mut self, m: ScanMsg) {
+        match m {
+            ScanMsg::Progress(p) => {
+                let name = std::path::Path::new(&p.current)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or(p.current);
+                self.ui()
+                    .set_scan_status(ss(format!("Scanning {}/{}  {name}", p.done, p.total)));
+            }
+            ScanMsg::Done(report) => {
+                self.scan = None;
+                let found = report.plugins.len();
+                self.catalog.replace_plugins(report.plugins);
+                self.save_catalog();
+                let ui = self.ui();
+                ui.set_scanning(false);
+                let failed = if report.failures.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {} could not be loaded", report.failures.len())
+                };
+                for (path, err) in &report.failures {
+                    log::info!("scan: {path}: {err}");
+                }
+                ui.set_scan_status(ss(format!("Found {found} plugins{failed}")));
+                self.refresh_browser();
+            }
+        }
+    }
+
+    fn save_catalog(&self) {
+        if let Err(e) = self.catalog.save(&self.paths.plugin_cache_file()) {
+            log::warn!("could not save plugin cache: {e}");
+        }
+    }
+
+    // ================================================================= midi
+
+    fn refresh_midi_options(&self) {
+        let ui = self.ui();
+        let o = ui.global::<Options>();
+        let mut ports = vec!["All inputs".to_string()];
+        ports.extend(MidiListener::ports());
+        o.set_midi_ports(strings(ports));
+        o.set_midi_port(ss(if self.settings.midi.learn_input.is_empty() {
+            "All inputs"
+        } else {
+            &self.settings.midi.learn_input
+        }));
+        o.set_learning(self.learning.is_some());
+        o.set_learn_target(ss(self
+            .learning
+            .and_then(|(s, _)| self.chain.get(s))
+            .map(|s| s.name.clone())
+            .unwrap_or_default()));
+        let items: Vec<MappingItem> = self
+            .mappings
+            .iter()
+            .enumerate()
+            .map(|(i, m)| MappingItem {
+                index: i as i32,
+                trigger: ss(m.trigger.label()),
+                plugin: ss(self
+                    .chain
+                    .get(m.slot)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|| "(removed)".into())),
+                action: ss(match m.action {
+                    MidiAction::Toggle => "Toggles bypass on each press",
+                    MidiAction::Follow => "Enabled while held",
+                }),
+            })
+            .collect();
+        o.set_mappings(ModelRc::new(VecModel::from(items)));
+    }
+
+    fn on_midi(&mut self, msg: MidiMessage) {
+        if let Some((slot, action)) = self.learning {
+            let Some((trigger, pressed)) = msg.trigger() else {
+                return;
+            };
+            if !pressed {
+                return;
+            }
+            self.mappings
+                .retain(|m| !(m.trigger == trigger && m.slot == slot));
+            self.mappings.push(MidiMapping {
+                trigger,
+                slot,
+                action,
+            });
+            self.learning = None;
+            let name = self
+                .chain
+                .get(slot)
+                .map(|s| s.name.clone())
+                .unwrap_or_default();
+            self.toast(format!("{} now controls {name}", trigger.label()), false);
+            self.refresh_midi_options();
+            self.refresh_slots();
+            return;
+        }
+        for change in midi::resolve(&self.mappings, &msg) {
+            match change {
+                BypassChange::Toggle(slot) => {
+                    if let Some(b) = self.chain.get(slot).map(|s| !s.bypassed) {
+                        self.set_bypass(slot, b);
+                    }
+                }
+                BypassChange::Set { slot, bypassed } => self.set_bypass(slot, bypassed),
+            }
+        }
+    }
+
+    // =============================================================== system
+
+    fn connect_wifi(&mut self, ssid: String) {
+        let ui = self.ui();
+        let nets = ui.global::<Options>().get_wifi_networks();
+        let net = (0..nets.row_count())
+            .filter_map(|i| nets.row_data(i))
+            .find(|n| n.ssid == ssid);
+        match net {
+            Some(n) if n.active => {}
+            Some(n) if n.secured && !n.known => self.open_prompt(
+                Prompt::WifiPassword(ssid.clone()),
+                &format!("Password for {ssid}"),
+                String::new(),
+                true,
+            ),
+            _ => self.system.send(SysCmd::ConnectWifi {
+                ssid,
+                password: None,
+            }),
+        }
+    }
+
+    fn on_system_event(&mut self, e: SysEvent) {
+        let ui = self.ui();
+        let o = ui.global::<Options>();
+        match e {
+            SysEvent::Wifi {
+                available,
+                enabled,
+                networks,
+                status,
+            } => {
+                o.set_wifi_available(available);
+                o.set_wifi_enabled(enabled);
+                o.set_wifi_status(ss(status));
+                let items: Vec<WifiItem> = networks
+                    .into_iter()
+                    .map(|n| WifiItem {
+                        ssid: ss(&n.ssid),
+                        strength: n.strength as i32,
+                        secured: n.secured,
+                        active: n.active,
+                        known: n.known,
+                    })
+                    .collect();
+                o.set_wifi_networks(ModelRc::new(VecModel::from(items)));
+            }
+            SysEvent::Bt {
+                available,
+                enabled,
+                devices,
+                scanning,
+                status,
+            } => {
+                o.set_bt_available(available);
+                o.set_bt_enabled(enabled);
+                o.set_bt_scanning(scanning);
+                o.set_bt_status(ss(status));
+                let items: Vec<BtItem> = devices
+                    .into_iter()
+                    .map(|d| BtItem {
+                        path: ss(&d.path),
+                        name: ss(&d.name),
+                        paired: d.paired,
+                        connected: d.connected,
+                        icon: ss(&d.icon),
+                    })
+                    .collect();
+                o.set_bt_devices(ModelRc::new(VecModel::from(items)));
+            }
+            SysEvent::Brightness(p) => {
+                o.set_brightness_available(p.is_some());
+                if let Some(p) = p {
+                    o.set_brightness(p as f32);
+                }
+            }
+            SysEvent::Info(msg) => self.toast(msg, false),
+            SysEvent::Error(msg) => self.toast(msg, true),
+        }
+    }
+
+    // ============================================================= settings
+
+    fn refresh_audio_options(&self) {
+        let ui = self.ui();
+        let o = ui.global::<Options>();
+        let a = &self.settings.audio;
+        o.set_driver(ss(&a.driver));
+        o.set_device(ss(&a.device));
+        o.set_input(ss(if a.input_client.is_empty() {
+            "system"
+        } else {
+            &a.input_client
+        }));
+        o.set_output(ss(if a.output_client.is_empty() {
+            "system"
+        } else {
+            &a.output_client
+        }));
+        o.set_sample_rate(ss(a.sample_rate.to_string()));
+        o.set_buffer_size(ss(a.buffer_size.to_string()));
+        o.set_isolate_plugins(a.isolate_plugins);
+    }
+
+    fn set_fullscreen(&mut self, fs: bool) {
+        let ui = self.ui();
+        if !fs {
+            ui.window().set_fullscreen(false);
+            let d = &self.settings.display;
+            ui.window().set_size(slint::LogicalSize::new(
+                d.window_width as f32,
+                d.window_height as f32,
+            ));
+        } else {
+            self.remember_window_size();
+            ui.window().set_fullscreen(true);
+        }
+        self.settings.display.fullscreen = fs;
+        ui.global::<Options>().set_fullscreen(fs);
+        self.save_settings();
+    }
+
+    fn remember_window_size(&mut self) {
+        let ui = self.ui();
+        if self.settings.display.fullscreen || ui.window().is_fullscreen() {
+            return;
+        }
+        let size = ui.window().size().to_logical(ui.window().scale_factor());
+        if size.width >= 400.0 && size.height >= 300.0 {
+            self.settings.display.window_width = size.width as u32;
+            self.settings.display.window_height = size.height as u32;
+        }
+    }
+
+    fn save_settings(&self) {
+        if let Err(e) = self.settings.save(&self.paths.settings_file()) {
+            log::warn!("could not save settings: {e}");
+        }
+    }
+
+    pub fn shutdown(&mut self) {
+        self.remember_window_size();
+        self.save_settings();
+        self.hide_editor();
+        self.engine.send(Command::Stop);
+        if self.restart_requested {
+            let exe = std::env::var_os("APPIMAGE")
+                .map(std::path::PathBuf::from)
+                .or_else(|| std::env::current_exe().ok());
+            if let Some(exe) = exe {
+                // Give the engine a moment to release the audio device.
+                std::thread::sleep(Duration::from_millis(300));
+                if let Err(e) = std::process::Command::new(exe)
+                    .args(std::env::args().skip(1))
+                    .spawn()
+                {
+                    log::error!("could not restart: {e}");
+                }
+            }
+        }
+    }
+}

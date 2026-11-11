@@ -1,0 +1,60 @@
+// Data exchanged between Rust and the UI.
+
+export struct SlotItem {
+    id: int,
+    name: string,
+    format: string,
+    bypassed: bool,
+    // Plugin delay compensation in samples, as text ("0 smp").
+    latency: string,
+    // "", "loading", "failed", "crashed"
+    status: string,
+    status-detail: string,
+    selected: bool,
+    midi-learned: bool,
+}
+
+export struct PluginItem {
+    key: string,
+    name: string,
+    maker: string,
+    format: string,
+    category: string,
+    favorite: bool,
+    bridged: bool,
+    synth: bool,
+}
+
+export struct ParamItem {
+    index: int,
+    name: string,
+    value: float,
+    minimum: float,
+    maximum: float,
+    text: string,
+    is-bool: bool,
+    is-int: bool,
+}
+
+export struct WifiItem {
+    ssid: string,
+    strength: int,
+    secured: bool,
+    active: bool,
+    known: bool,
+}
+
+export struct BtItem {
+    path: string,
+    name: string,
+    paired: bool,
+    connected: bool,
+    icon: string,
+}
+
+export struct MappingItem {
+    index: int,
+    trigger: string,
+    plugin: string,
+    action: string,
+}

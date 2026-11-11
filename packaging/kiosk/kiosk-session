@@ -1,0 +1,5 @@
+#!/bin/sh
+# X session for kiosk mode: copy to ~/.config/carlita/kiosk-session (chmod +x).
+xset s off -dpms                  # never blank the screen on stage
+matchbox-window-manager -use_titlebar no &
+exec "${CARLITA_BIN:-$HOME/Applications/Carlita.AppImage}" --kiosk

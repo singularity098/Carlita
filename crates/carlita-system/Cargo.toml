@@ -1,0 +1,11 @@
+[package]
+name = "carlita-system"
+description = "WiFi (NetworkManager), Bluetooth (BlueZ), power and brightness (logind) over D-Bus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+zbus = "5"

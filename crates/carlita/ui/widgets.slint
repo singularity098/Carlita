@@ -1,0 +1,232 @@
+// Large, touch-friendly building blocks.
+import { Theme } from "theme.slint";
+
+export component BigButton inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <bool> primary: false;
+    in property <bool> danger: false;
+    in property <bool> enabled: true;
+    callback clicked;
+
+    min-height: Theme.touch;
+    min-width: Theme.touch;
+    horizontal-stretch: 0;
+    border-radius: Theme.radius;
+    background: !root.enabled ? Theme.surface-2
+        : touch.pressed ? (root.primary ? Theme.accent-dim : Theme.surface-3.brighter(20%))
+        : root.primary ? Theme.accent
+        : root.danger ? Theme.danger.darker(45%)
+        : Theme.surface-3;
+    animate background { duration: 60ms; }
+
+    HorizontalLayout {
+        padding-left: Theme.pad;
+        padding-right: Theme.pad;
+        spacing: 8px;
+        alignment: center;
+        if root.icon != "": Text {
+            text: root.icon;
+            font-size: Theme.font-large;
+            vertical-alignment: center;
+            color: root.primary ? #000 : Theme.text;
+        }
+        if root.text != "": Text {
+            text: root.text;
+            font-size: Theme.font;
+            font-weight: 600;
+            vertical-alignment: center;
+            color: !root.enabled ? Theme.text-faint : root.primary ? #000 : Theme.text;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// An on/off switch with a large hit area.
+export component Toggle inherits Rectangle {
+    in-out property <bool> checked;
+    in property <bool> enabled: true;
+    callback toggled(bool);
+
+    width: 72px;
+    height: Theme.touch;
+
+    track := Rectangle {
+        width: 60px;
+        height: 32px;
+        border-radius: 16px;
+        background: root.checked ? Theme.accent : Theme.surface-3;
+        opacity: root.enabled ? 1 : 0.4;
+        animate background { duration: 120ms; }
+        knob := Rectangle {
+            width: 26px;
+            height: 26px;
+            y: 3px;
+            x: root.checked ? parent.width - self.width - 3px : 3px;
+            border-radius: 13px;
+            background: root.checked ? #000 : Theme.text;
+            animate x { duration: 120ms; easing: ease-out; }
+        }
+    }
+
+    TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+}
+
+export component Chip inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    callback clicked;
+
+    height: 44px;
+    min-width: label.preferred-width + 28px;
+    horizontal-stretch: 0;
+    border-radius: 22px;
+    background: root.selected ? Theme.accent : touch.pressed ? Theme.surface-3 : Theme.surface-2;
+    border-width: 1px;
+    border-color: root.selected ? Theme.accent : Theme.border;
+
+    label := Text {
+        text: root.text;
+        font-size: Theme.font-small;
+        font-weight: 600;
+        color: root.selected ? #000 : Theme.text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// A vertical stereo peak meter.
+export component StereoMeter inherits Rectangle {
+    in property <float> left;
+    in property <float> right;
+    in property <string> label;
+    width: 30px;
+
+    VerticalLayout {
+        spacing: 4px;
+        HorizontalLayout {
+            spacing: 3px;
+            for level in [root.left, root.right]: Rectangle {
+                background: Theme.surface-3;
+                border-radius: 3px;
+                clip: true;
+                Rectangle {
+                    y: parent.height - self.height;
+                    height: parent.height * min(1, level);
+                    background: level >= 0.99 ? Theme.danger : level > 0.7 ? Theme.warn : Theme.ok;
+                }
+            }
+        }
+        Text {
+            text: root.label;
+            font-size: 11px;
+            color: Theme.text-dim;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+export component SectionTitle inherits Text {
+    font-size: Theme.font-small;
+    font-weight: 700;
+    color: Theme.text-dim;
+    letter-spacing: 1px;
+}
+
+// A row with a label on the left and arbitrary content on the right.
+export component SettingRow inherits Rectangle {
+    in property <string> label;
+    in property <string> detail;
+    min-height: Theme.touch + 8px;
+
+    HorizontalLayout {
+        spacing: Theme.pad;
+        VerticalLayout {
+            alignment: center;
+            Text {
+                text: root.label;
+                font-size: Theme.font;
+                color: Theme.text;
+                wrap: word-wrap;
+            }
+            if root.detail != "": Text {
+                text: root.detail;
+                font-size: Theme.font-small;
+                color: Theme.text-dim;
+                wrap: word-wrap;
+            }
+        }
+        @children
+    }
+}
+
+// A segmented picker: one big button per option.
+export component Segmented inherits HorizontalLayout {
+    in property <[string]> options;
+    in property <int> selected;
+    callback picked(int);
+    spacing: 6px;
+    for opt[i] in root.options: Chip {
+        text: opt;
+        selected: i == root.selected;
+        clicked => { root.picked(i); }
+    }
+}
+
+// Horizontal slider with a large thumb, for the generic parameter page.
+export component BigSlider inherits Rectangle {
+    in property <float> minimum: 0;
+    in property <float> maximum: 1;
+    in-out property <float> value;
+    callback changed(float);
+    height: Theme.touch;
+
+    property <float> fraction: root.maximum > root.minimum ? (root.value - root.minimum) / (root.maximum - root.minimum) : 0;
+
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        height: 10px;
+        border-radius: 5px;
+        background: Theme.surface-3;
+        Rectangle {
+            x: 0;
+            width: parent.width * root.fraction;
+            border-radius: 5px;
+            background: Theme.accent;
+        }
+    }
+    Rectangle {
+        x: (root.width - self.width) * root.fraction;
+        y: (root.height - self.height) / 2;
+        width: 36px;
+        height: 36px;
+        border-radius: 18px;
+        background: touch.pressed ? Theme.accent : Theme.text;
+    }
+    touch := TouchArea {
+        function set-from(x: length) {
+            root.value = root.minimum + max(0, min(1, x / root.width)) * (root.maximum - root.minimum);
+            root.changed(root.value);
+        }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down {
+                self.set-from(self.mouse-x);
+            }
+        }
+        moved => { self.set-from(self.mouse-x); }
+    }
+}

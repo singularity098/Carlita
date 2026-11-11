@@ -1,0 +1,20 @@
+#!/bin/sh
+# Carlita AppImage entry point.
+HERE="$(dirname "$(readlink -f "$0")")"
+export CARLA_LIB_DIR="$HERE/usr/lib/carla"
+export CARLA_RESOURCES_DIR="$HERE/usr/share/carla/resources"
+export CARLA_DISCOVERY="$CARLA_LIB_DIR/carla-discovery-native"
+LIBS="$HERE/usr/lib/carla:$HERE/usr/lib"
+
+# Native PipeWire support: when PipeWire is running, use its JACK library so
+# Carla's JACK driver talks to PipeWire directly (no jackd needed).
+if [ -z "$CARLITA_NO_PIPEWIRE_JACK" ] && pgrep -x pipewire >/dev/null 2>&1; then
+    for d in /usr/lib/x86_64-linux-gnu/pipewire-0.3/jack /usr/lib64/pipewire-0.3/jack /usr/lib/pipewire-0.3/jack; do
+        if [ -e "$d/libjack.so.0" ]; then
+            LIBS="$d:$LIBS"
+            break
+        fi
+    done
+fi
+export LD_LIBRARY_PATH="$LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$HERE/usr/bin/carlita" "$@"

@@ -1,0 +1,201 @@
+// "Add plugin" browser: search, format and category filters, favorites.
+import { Theme } from "theme.slint";
+import { BigButton, Chip } from "widgets.slint";
+import { PluginItem } from "types.slint";
+import { LineEdit, ListView } from "std-widgets.slint";
+
+export component PluginBrowser inherits Rectangle {
+    in property <[PluginItem]> plugins;
+    in property <[string]> formats;
+    in property <[string]> categories;
+    in-out property <string> search;
+    in property <string> format-filter;
+    in property <string> category-filter;
+    in property <bool> favorites-only;
+    in property <string> scan-status;
+    in property <bool> scanning;
+    callback filter-changed(string, string, string, bool);
+    callback pick(string);
+    callback toggle-favorite(string);
+    callback rescan;
+    callback close;
+    callback request-keyboard;
+
+    background: Theme.scrim;
+    TouchArea {
+        clicked => { root.close(); }
+    }
+
+    panel := Rectangle {
+        width: min(root.width - 32px, 980px);
+        height: root.height - 48px;
+        x: (root.width - self.width) / 2;
+        y: 24px;
+        border-radius: Theme.radius * 1.5;
+        background: Theme.surface;
+        border-width: 1px;
+        border-color: Theme.border;
+        // Swallow clicks so they do not close the browser.
+        TouchArea { }
+
+        VerticalLayout {
+            padding: Theme.pad * 1.5;
+            spacing: 12px;
+
+            HorizontalLayout {
+                spacing: 10px;
+                Text {
+                    text: "Add plugin";
+                    font-size: Theme.font-title;
+                    font-weight: 700;
+                    color: Theme.text;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                BigButton {
+                    text: root.scanning ? "Scanning…" : "Rescan";
+                    enabled: !root.scanning;
+                    clicked => { root.rescan(); }
+                }
+                BigButton {
+                    icon: "✕";
+                    clicked => { root.close(); }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 10px;
+                search-box := LineEdit {
+                    height: Theme.touch;
+                    font-size: Theme.font;
+                    placeholder-text: "Search plugins";
+                    text <=> root.search;
+                    edited(t) => { root.filter-changed(t, root.format-filter, root.category-filter, root.favorites-only); }
+                }
+                BigButton {
+                    icon: "⌨";
+                    clicked => { root.request-keyboard(); }
+                }
+                Chip {
+                    text: "★ Favorites";
+                    selected: root.favorites-only;
+                    clicked => { root.filter-changed(root.search, root.format-filter, root.category-filter, !root.favorites-only); }
+                }
+            }
+
+            // Format chips.
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: start;
+                Chip {
+                    text: "All formats";
+                    selected: root.format-filter == "";
+                    clicked => { root.filter-changed(root.search, "", root.category-filter, root.favorites-only); }
+                }
+                for f in root.formats: Chip {
+                    text: f;
+                    selected: root.format-filter == f;
+                    clicked => { root.filter-changed(root.search, f, root.category-filter, root.favorites-only); }
+                }
+            }
+
+            // Category chips (scrollable when narrow).
+            Flickable {
+                height: 48px;
+                content-width: cats.preferred-width;
+                cats := HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+                    Chip {
+                        text: "All categories";
+                        selected: root.category-filter == "";
+                        clicked => { root.filter-changed(root.search, root.format-filter, "", root.favorites-only); }
+                    }
+                    for c in root.categories: Chip {
+                        text: c;
+                        selected: root.category-filter == c;
+                        clicked => { root.filter-changed(root.search, root.format-filter, c, root.favorites-only); }
+                    }
+                }
+            }
+
+            if root.scan-status != "": Text {
+                text: root.scan-status;
+                color: Theme.text-dim;
+                font-size: Theme.font-small;
+                overflow: elide;
+            }
+
+            Rectangle {
+                vertical-stretch: 1;
+                if root.plugins.length == 0: Text {
+                    text: root.scanning ? "Scanning for plugins…" : "No plugins match.\nTry another filter, or rescan.";
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    color: Theme.text-dim;
+                    font-size: Theme.font;
+                }
+                ListView {
+                    for p in root.plugins: Rectangle {
+                        height: Theme.row;
+                        Rectangle {
+                            y: 3px;
+                            height: parent.height - 6px;
+                            border-radius: Theme.radius;
+                            background: row-touch.pressed ? Theme.surface-3 : Theme.surface-2;
+                            row-touch := TouchArea {
+                                clicked => { root.pick(p.key); }
+                            }
+                            HorizontalLayout {
+                                padding-left: Theme.pad;
+                                padding-right: 6px;
+                                spacing: 10px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: p.name;
+                                        font-size: Theme.font;
+                                        font-weight: 600;
+                                        color: Theme.text;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: p.maker + (p.maker != "" ? "  ·  " : "") + p.category + (p.bridged ? "  ·  yabridge" : "");
+                                        font-size: Theme.font-small;
+                                        color: Theme.text-dim;
+                                        overflow: elide;
+                                    }
+                                }
+                                Rectangle {
+                                    width: 64px;
+                                    Text {
+                                        text: p.format;
+                                        font-size: Theme.font-small;
+                                        font-weight: 700;
+                                        color: Theme.accent;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                Rectangle {
+                                    width: Theme.touch;
+                                    Text {
+                                        text: p.favorite ? "★" : "☆";
+                                        font-size: 26px;
+                                        color: p.favorite ? Theme.warn : Theme.text-faint;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    TouchArea {
+                                        clicked => { root.toggle-favorite(p.key); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

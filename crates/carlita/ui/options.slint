@@ -1,0 +1,602 @@
+// Right sidebar: options. Every toggle applies immediately.
+import { Theme } from "theme.slint";
+import { BigButton, Toggle, Chip, SectionTitle, SettingRow, BigSlider } from "widgets.slint";
+import { WifiItem, BtItem, MappingItem } from "types.slint";
+
+export global Options {
+    // ---- audio
+    in property <string> engine-status;
+    in property <bool> engine-running;
+    in property <string> dsp-load;
+    in property <string> latency;
+    in property <int> xruns;
+    in property <[string]> drivers;
+    in property <string> driver;
+    in property <[string]> devices;
+    in property <string> device;
+    in property <[string]> inputs;
+    in property <string> input;
+    in property <[string]> outputs;
+    in property <string> output;
+    in property <[string]> sample-rates: ["44100", "48000", "88200", "96000"];
+    in property <string> sample-rate;
+    in property <[string]> buffer-sizes: ["32", "64", "128", "256", "512", "1024"];
+    in property <string> buffer-size;
+    in property <bool> isolate-plugins;
+    callback set-driver(string);
+    callback set-device(string);
+    callback set-input(string);
+    callback set-output(string);
+    callback set-sample-rate(string);
+    callback set-buffer-size(string);
+    callback set-isolate(bool);
+    callback restart-engine;
+
+    // ---- presets
+    in property <[string]> presets;
+    in property <string> current-preset;
+    in property <string> default-preset;
+    callback save-preset;
+    callback save-preset-as;
+    callback load-preset(string);
+    callback rename-preset(string);
+    callback delete-preset(string);
+    callback set-default-preset(string);
+
+    // ---- midi
+    in property <[string]> midi-ports;
+    in property <string> midi-port;
+    in property <bool> learning;
+    in property <string> learn-target;
+    in property <int> learn-action; // 0 toggle, 1 follow
+    in property <[MappingItem]> mappings;
+    callback set-midi-port(string);
+    callback start-learn(int);
+    callback cancel-learn;
+    callback delete-mapping(int);
+
+    // ---- wifi
+    in property <bool> wifi-available;
+    in property <bool> wifi-enabled;
+    in property <[WifiItem]> wifi-networks;
+    in property <string> wifi-status;
+    callback set-wifi(bool);
+    callback scan-wifi;
+    callback connect-wifi(string);
+    callback disconnect-wifi;
+
+    // ---- bluetooth
+    in property <bool> bt-available;
+    in property <bool> bt-enabled;
+    in property <[BtItem]> bt-devices;
+    in property <string> bt-status;
+    in property <bool> bt-scanning;
+    callback set-bt(bool);
+    callback scan-bt(bool);
+    callback connect-bt(string);
+    callback disconnect-bt(string);
+    callback forget-bt(string);
+
+    // ---- display
+    in property <bool> fullscreen;
+    in property <bool> brightness-available;
+    in property <float> brightness;
+    in property <int> default-scaling; // index into scaling-options
+    in property <int> plugin-scaling;  // -1 = use default
+    in property <string> selected-plugin;
+    in property <[string]> scaling-options: ["Off", "Fit", "100%", "150%", "200%", "300%"];
+    in property <int> input-mode; // 0 synthetic, 1 xtest
+    callback set-fullscreen(bool);
+    callback set-brightness(float);
+    callback set-default-scaling(int);
+    callback set-plugin-scaling(int);
+    callback set-input-mode(int);
+
+    // ---- keyboard
+    in property <bool> keyboard-visible;
+    callback set-keyboard(bool);
+
+    // ---- system
+    in property <string> version;
+    in property <string> plugin-count;
+    callback rescan-plugins;
+    callback restart-app;
+    callback reboot;
+    callback shutdown;
+    callback quit;
+}
+
+component ListRow inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> highlight;
+    callback clicked;
+    min-height: Theme.row - 8px;
+    border-radius: Theme.radius;
+    background: touch.pressed ? Theme.surface-3 : Theme.surface-2;
+    border-width: root.highlight ? 2px : 0px;
+    border-color: Theme.accent;
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: Theme.pad;
+        padding-right: 6px;
+        spacing: 8px;
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: root.title;
+                font-size: Theme.font;
+                color: Theme.text;
+                overflow: elide;
+            }
+            if root.subtitle != "": Text {
+                text: root.subtitle;
+                font-size: Theme.font-small;
+                color: Theme.text-dim;
+                overflow: elide;
+            }
+        }
+        @children
+    }
+}
+
+component ChipGrid inherits Rectangle {
+    in property <[string]> options;
+    in property <string> selected;
+    in property <string> empty-text: "None available";
+    callback picked(string);
+    property <int> per-row: max(1, floor(self.width / 120px));
+    height: root.options.length == 0 ? 30px : ceil(root.options.length / root.per-row) * 50px;
+    if root.options.length == 0: Text {
+        text: root.empty-text;
+        color: Theme.text-faint;
+        font-size: Theme.font-small;
+        vertical-alignment: center;
+    }
+    for o[i] in root.options: Chip {
+        x: mod(i, root.per-row) * (root.width / root.per-row);
+        y: floor(i / root.per-row) * 50px;
+        width: root.width / root.per-row - 6px;
+        text: o;
+        selected: o == root.selected;
+        clicked => { root.picked(o); }
+    }
+}
+
+component AudioPage inherits VerticalLayout {
+    spacing: 12px;
+    Rectangle {
+        border-radius: Theme.radius;
+        background: Options.engine-running ? Theme.surface-2 : Theme.danger.darker(60%);
+        height: 86px;
+        VerticalLayout {
+            padding: Theme.pad;
+            Text {
+                text: Options.engine-status;
+                color: Theme.text;
+                font-size: Theme.font;
+                font-weight: 600;
+                wrap: word-wrap;
+            }
+            Text {
+                text: "DSP " + Options.dsp-load + "   ·   latency " + Options.latency + "   ·   xruns " + Options.xruns;
+                color: Theme.text-dim;
+                font-size: Theme.font-small;
+            }
+        }
+    }
+    SectionTitle { text: "DRIVER"; }
+    ChipGrid {
+        options: Options.drivers;
+        selected: Options.driver;
+        picked(v) => { Options.set-driver(v); }
+    }
+    if Options.devices.length > 0: SectionTitle { text: "DEVICE"; }
+    if Options.devices.length > 0: ChipGrid {
+        options: Options.devices;
+        selected: Options.device;
+        picked(v) => { Options.set-device(v); }
+    }
+    if Options.inputs.length > 0 || Options.outputs.length > 0: SectionTitle { text: "INPUT DEVICE"; }
+    if Options.inputs.length > 0 || Options.outputs.length > 0: ChipGrid {
+        options: Options.inputs;
+        selected: Options.input;
+        picked(v) => { Options.set-input(v); }
+    }
+    if Options.inputs.length > 0 || Options.outputs.length > 0: SectionTitle { text: "OUTPUT DEVICE"; }
+    if Options.inputs.length > 0 || Options.outputs.length > 0: ChipGrid {
+        options: Options.outputs;
+        selected: Options.output;
+        picked(v) => { Options.set-output(v); }
+    }
+    SectionTitle { text: "SAMPLE RATE"; }
+    ChipGrid {
+        options: Options.sample-rates;
+        selected: Options.sample-rate;
+        picked(v) => { Options.set-sample-rate(v); }
+    }
+    SectionTitle { text: "BUFFER SIZE"; }
+    ChipGrid {
+        options: Options.buffer-sizes;
+        selected: Options.buffer-size;
+        picked(v) => { Options.set-buffer-size(v); }
+    }
+    SettingRow {
+        label: "Isolate plugins";
+        detail: "Run each plugin in its own process so a crash cannot stop the audio";
+        Toggle {
+            checked: Options.isolate-plugins;
+            toggled(v) => { Options.set-isolate(v); }
+        }
+    }
+    BigButton {
+        text: "Restart audio engine";
+        clicked => { Options.restart-engine(); }
+    }
+}
+
+component PresetsPage inherits VerticalLayout {
+    spacing: 12px;
+    Text {
+        text: Options.current-preset == "" ? "Current chain is not saved" : "Current: " + Options.current-preset;
+        color: Theme.accent;
+        font-size: Theme.font;
+        font-weight: 600;
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        BigButton {
+            text: "Save";
+            primary: true;
+            horizontal-stretch: 1;
+            enabled: Options.current-preset != "";
+            clicked => { Options.save-preset(); }
+        }
+        BigButton {
+            text: "Save as…";
+            horizontal-stretch: 1;
+            clicked => { Options.save-preset-as(); }
+        }
+    }
+    SectionTitle { text: "PRESETS"; }
+    if Options.presets.length == 0: Text {
+        text: "No presets saved yet.";
+        color: Theme.text-faint;
+    }
+    for p in Options.presets: ListRow {
+        title: p;
+        subtitle: p == Options.default-preset ? "Loads at startup" : "";
+        highlight: p == Options.current-preset;
+        clicked => { Options.load-preset(p); }
+        Rectangle {
+            width: Theme.touch;
+            Text {
+                text: p == Options.default-preset ? "★" : "☆";
+                font-size: 24px;
+                color: p == Options.default-preset ? Theme.warn : Theme.text-faint;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            TouchArea {
+                clicked => { Options.set-default-preset(p == Options.default-preset ? "" : p); }
+            }
+        }
+        BigButton {
+            icon: "✎";
+            clicked => { Options.rename-preset(p); }
+        }
+        BigButton {
+            icon: "🗑";
+            danger: true;
+            clicked => { Options.delete-preset(p); }
+        }
+    }
+}
+
+component MidiPage inherits VerticalLayout {
+    spacing: 12px;
+    SettingRow {
+        label: "On-screen keyboard";
+        detail: "Play notes into the selected plugin";
+        Toggle {
+            checked: Options.keyboard-visible;
+            toggled(v) => { Options.set-keyboard(v); }
+        }
+    }
+    SectionTitle { text: "MIDI LEARN"; }
+    Text {
+        text: Options.selected-plugin == "" ? "Select a plugin in the chain first."
+            : Options.learning ? "Move a control or press a footswitch to map it to: " + Options.learn-target
+            : "Map a footswitch or controller to bypass \"" + Options.selected-plugin + "\".";
+        color: Options.learning ? Theme.accent : Theme.text-dim;
+        font-size: Theme.font;
+        wrap: word-wrap;
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        if !Options.learning: BigButton {
+            text: "Learn toggle";
+            primary: true;
+            horizontal-stretch: 1;
+            enabled: Options.selected-plugin != "";
+            clicked => { Options.start-learn(0); }
+        }
+        if !Options.learning: BigButton {
+            text: "Learn momentary";
+            horizontal-stretch: 1;
+            enabled: Options.selected-plugin != "";
+            clicked => { Options.start-learn(1); }
+        }
+        if Options.learning: BigButton {
+            text: "Cancel";
+            horizontal-stretch: 1;
+            clicked => { Options.cancel-learn(); }
+        }
+    }
+    for m in Options.mappings: ListRow {
+        title: m.trigger + "  →  " + m.plugin;
+        subtitle: m.action;
+        BigButton {
+            icon: "🗑";
+            danger: true;
+            clicked => { Options.delete-mapping(m.index); }
+        }
+    }
+    SectionTitle { text: "MIDI INPUT FOR LEARN"; }
+    ChipGrid {
+        options: Options.midi-ports;
+        selected: Options.midi-port;
+        empty-text: "No MIDI inputs found";
+        picked(v) => { Options.set-midi-port(v); }
+    }
+}
+
+component WifiPage inherits VerticalLayout {
+    spacing: 12px;
+    if !Options.wifi-available: Text {
+        text: "No WiFi device found (NetworkManager is required).";
+        color: Theme.text-dim;
+        wrap: word-wrap;
+    }
+    if Options.wifi-available: SettingRow {
+        label: "WiFi";
+        detail: Options.wifi-status;
+        Toggle {
+            checked: Options.wifi-enabled;
+            toggled(v) => { Options.set-wifi(v); }
+        }
+    }
+    if Options.wifi-available && Options.wifi-enabled: BigButton {
+        text: "Scan for networks";
+        clicked => { Options.scan-wifi(); }
+    }
+    if Options.wifi-enabled: VerticalLayout {
+        spacing: 6px;
+        for n in Options.wifi-networks: ListRow {
+            title: (n.secured ? "🔒 " : "") + n.ssid;
+            subtitle: n.active ? "Connected" : n.known ? "Saved" : "";
+            highlight: n.active;
+            clicked => { Options.connect-wifi(n.ssid); }
+            Text {
+                text: n.strength + "%";
+                color: Theme.text-dim;
+                vertical-alignment: center;
+                width: 48px;
+            }
+            if n.active: BigButton {
+                text: "Disconnect";
+                clicked => { Options.disconnect-wifi(); }
+            }
+        }
+    }
+}
+
+component BluetoothPage inherits VerticalLayout {
+    spacing: 12px;
+    if !Options.bt-available: Text {
+        text: "No Bluetooth adapter found (BlueZ is required).";
+        color: Theme.text-dim;
+        wrap: word-wrap;
+    }
+    if Options.bt-available: SettingRow {
+        label: "Bluetooth";
+        detail: Options.bt-status;
+        Toggle {
+            checked: Options.bt-enabled;
+            toggled(v) => { Options.set-bt(v); }
+        }
+    }
+    if Options.bt-available && Options.bt-enabled: BigButton {
+        text: Options.bt-scanning ? "Stop searching" : "Search for devices";
+        clicked => { Options.scan-bt(!Options.bt-scanning); }
+    }
+    if Options.bt-enabled: VerticalLayout {
+        spacing: 6px;
+        for d in Options.bt-devices: ListRow {
+            title: d.name;
+            subtitle: d.connected ? "Connected" : d.paired ? "Paired" : "Nearby · tap to pair";
+            highlight: d.connected;
+            clicked => {
+                if d.connected {
+                    Options.disconnect-bt(d.path);
+                } else {
+                    Options.connect-bt(d.path);
+                }
+            }
+            if d.paired: BigButton {
+                text: "Forget";
+                clicked => { Options.forget-bt(d.path); }
+            }
+        }
+    }
+}
+
+component DisplayPage inherits VerticalLayout {
+    spacing: 12px;
+    SettingRow {
+        label: "Fullscreen";
+        detail: "F11 toggles it too";
+        Toggle {
+            checked: Options.fullscreen;
+            toggled(v) => { Options.set-fullscreen(v); }
+        }
+    }
+    if Options.brightness-available: SectionTitle { text: "BRIGHTNESS"; }
+    if Options.brightness-available: BigSlider {
+        minimum: 5;
+        maximum: 100;
+        value: Options.brightness;
+        changed(v) => { Options.set-brightness(v); }
+    }
+    SectionTitle { text: "DEFAULT EDITOR SCALING"; }
+    ChipGrid {
+        options: Options.scaling-options;
+        selected: Options.scaling-options[Options.default-scaling];
+        picked(v) => {
+            Options.set-default-scaling(v == "Off" ? 0 : v == "Fit" ? 1 : v == "100%" ? 2 : v == "150%" ? 3 : v == "200%" ? 4 : 5);
+        }
+    }
+    if Options.selected-plugin != "": SectionTitle { text: "SCALING FOR \"" + Options.selected-plugin + "\""; }
+    if Options.selected-plugin != "": ChipGrid {
+        options: ["Default", "Off", "Fit", "100%", "150%", "200%", "300%"];
+        selected: Options.plugin-scaling < 0 ? "Default" : Options.scaling-options[Options.plugin-scaling];
+        picked(v) => {
+            Options.set-plugin-scaling(v == "Default" ? -1 : v == "Off" ? 0 : v == "Fit" ? 1 : v == "100%" ? 2 : v == "150%" ? 3 : v == "200%" ? 4 : 5);
+        }
+    }
+    SectionTitle { text: "TOUCH FORWARDING TO EDITORS"; }
+    ChipGrid {
+        options: ["Synthetic events", "XTest (compat)"];
+        selected: Options.input-mode == 0 ? "Synthetic events" : "XTest (compat)";
+        picked(v) => { Options.set-input-mode(v == "Synthetic events" ? 0 : 1); }
+    }
+}
+
+component SystemPage inherits VerticalLayout {
+    spacing: 12px;
+    SettingRow {
+        label: "Carlita " + Options.version;
+        detail: Options.plugin-count;
+    }
+    BigButton {
+        text: "Rescan plugins";
+        clicked => { Options.rescan-plugins(); }
+    }
+    BigButton {
+        text: "Restart app";
+        clicked => { Options.restart-app(); }
+    }
+    BigButton {
+        text: "Quit";
+        clicked => { Options.quit(); }
+    }
+    BigButton {
+        text: "Reboot PC";
+        danger: true;
+        clicked => { Options.reboot(); }
+    }
+    BigButton {
+        text: "Shut down PC";
+        danger: true;
+        clicked => { Options.shutdown(); }
+    }
+}
+
+export component OptionsPanel inherits Rectangle {
+    in-out property <int> page: 0;
+    callback close;
+    callback page-opened(int);
+
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: Theme.border;
+
+    property <[{icon: string, label: string}]> pages: [
+        { icon: "🔊", label: "Audio" },
+        { icon: "💾", label: "Presets" },
+        { icon: "🎹", label: "MIDI" },
+        { icon: "📶", label: "WiFi" },
+        { icon: "ᛒ", label: "Bluetooth" },
+        { icon: "🖥", label: "Display" },
+        { icon: "⚙", label: "System" },
+    ];
+
+    HorizontalLayout {
+        // Section rail.
+        Rectangle {
+            width: 92px;
+            background: Theme.bg;
+            VerticalLayout {
+                padding-top: 8px;
+                spacing: 2px;
+                alignment: start;
+                for p[i] in root.pages: Rectangle {
+                    height: 76px;
+                    background: i == root.page ? Theme.surface : transparent;
+                    Rectangle {
+                        x: 0;
+                        width: 4px;
+                        background: i == root.page ? Theme.accent : transparent;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 2px;
+                        Text {
+                            text: p.icon;
+                            font-size: 24px;
+                            horizontal-alignment: center;
+                            color: i == root.page ? Theme.accent : Theme.text-dim;
+                        }
+                        Text {
+                            text: p.label;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            color: i == root.page ? Theme.text : Theme.text-dim;
+                        }
+                    }
+                    TouchArea {
+                        clicked => {
+                            root.page = i;
+                            root.page-opened(i);
+                        }
+                    }
+                }
+            }
+            // Swipe right on the rail closes the panel.
+            TouchArea {
+                y: parent.height - 120px;
+                height: 120px;
+                moved => {
+                    if self.mouse-x - self.pressed-x > 60px {
+                        root.close();
+                    }
+                }
+            }
+        }
+
+        Flickable {
+            content-height: content.preferred-height;
+            content := VerticalLayout {
+                padding: Theme.pad * 1.5;
+                spacing: 14px;
+                alignment: start;
+                Text {
+                    text: root.pages[root.page].label;
+                    font-size: Theme.font-title;
+                    font-weight: 700;
+                    color: Theme.text;
+                }
+                if root.page == 0: AudioPage { }
+                if root.page == 1: PresetsPage { }
+                if root.page == 2: MidiPage { }
+                if root.page == 3: WifiPage { }
+                if root.page == 4: BluetoothPage { }
+                if root.page == 5: DisplayPage { }
+                if root.page == 6: SystemPage { }
+            }
+        }
+    }
+}
