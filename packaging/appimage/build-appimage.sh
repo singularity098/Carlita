@@ -25,7 +25,7 @@ cp -a "$PREFIX/lib/carla" "$APPDIR/usr/lib/carla"
 cp -a "$PREFIX/share/carla/resources" "$APPDIR/usr/share/carla/" 2>/dev/null || true
 install -m755 "$ROOT/packaging/appimage/AppRun" "$APPDIR/AppRun"
 install -m644 "$ROOT/packaging/appimage/carlita.desktop" "$APPDIR/carlita.desktop"
-install -m644 "$ROOT/packaging/appimage/carlita.svg" "$APPDIR/carlita.svg"
+install -m644 "$ROOT/assets/branding/carlita-app-icon.svg" "$APPDIR/carlita.svg"
 
 mkdir -p "$TOOLS"
 fetch() { [ -x "$TOOLS/$1" ] || { curl -fsSL -o "$TOOLS/$1" "$2"; chmod +x "$TOOLS/$1"; }; }

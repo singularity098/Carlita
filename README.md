@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/branding/carlita-logo.svg">
+    <img src="assets/branding/carlita-logo-light.svg" alt="Carlita" width="420">
+  </picture>
+</p>
+
 # Carlita
 
 A touch-first plugin chain host for a pedalboard: a Rust app built on the

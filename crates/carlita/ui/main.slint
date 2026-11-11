@@ -71,6 +71,7 @@ component EdgeStrip inherits Rectangle {
 
 export component MainWindow inherits Window {
     title: "Carlita";
+    icon: @image-url("../../../assets/branding/png/carlita-app-icon-256.png");
     background: Theme.bg;
     min-width: 800px;
     min-height: 480px;
@@ -279,10 +280,15 @@ export component MainWindow inherits Window {
         if root.editor-mode == "empty" || root.editor-mode == "waiting" || root.editor-mode == "message": VerticalLayout {
             alignment: center;
             spacing: 18px;
-            Text {
-                text: root.editor-mode == "waiting" ? "Opening " + root.editor-title + "…"
-                    : root.editor-mode == "message" ? root.editor-title
-                    : "Carlita";
+            if root.editor-mode == "empty": Image {
+                source: @image-url("../../../assets/branding/carlita-logo.svg");
+                height: 96px;
+                image-fit: contain;
+                accessible-role: image;
+                accessible-label: "Carlita";
+            }
+            if root.editor-mode != "empty": Text {
+                text: root.editor-mode == "waiting" ? "Opening " + root.editor-title + "…" : root.editor-title;
                 font-size: 34px;
                 font-weight: 700;
                 color: Theme.text;
