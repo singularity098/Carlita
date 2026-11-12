@@ -51,4 +51,9 @@ impl AppPaths {
     pub fn plugin_cache_file(&self) -> PathBuf {
         self.cache_dir.join("plugins.json")
     }
+
+    /// What the last plugin scan found, and why plugins failed.
+    pub fn scan_log_file(&self) -> PathBuf {
+        self.cache_dir.join("scan.log")
+    }
 }

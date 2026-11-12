@@ -42,8 +42,16 @@ impl Default for AudioSettings {
 #[serde(default)]
 pub struct DisplaySettings {
     pub fullscreen: bool,
+    /// Size of the window when it is neither fullscreen nor maximized
+    /// (logical pixels).
     pub window_width: u32,
     pub window_height: u32,
+    /// Where that window was on the desktop (physical pixels), if known.
+    pub window_x: Option<i32>,
+    pub window_y: Option<i32>,
+    /// Whether the window was maximized (kept while fullscreen, for when
+    /// fullscreen is left).
+    pub maximized: bool,
     /// Brightness 0..=100, if the hardware supports it.
     pub brightness: Option<u32>,
     /// Width of the invisible edge strips that open the sidebars, in pixels.
@@ -59,6 +67,9 @@ impl Default for DisplaySettings {
             fullscreen: true,
             window_width: 1280,
             window_height: 800,
+            window_x: None,
+            window_y: None,
+            maximized: false,
             brightness: None,
             edge_strip_width: 18,
             theme: "Iris".into(),

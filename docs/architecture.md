@@ -64,7 +64,12 @@
   As in Carla's own scanner, the probe only reads each plugin's description
   (`CARLA_DISCOVERY_NO_PROCESSING_CHECKS`) rather than running it. yabridge
   plugins get six times the timeout, since each one starts Wine, and a probe
-  that times out is killed with everything it started.
+  that times out is killed with everything it started. Each scan writes
+  `scan.log` next to `plugins.json`: the folders searched, how many plugins
+  each held, and every probe's result with the error output of failures
+  (where yabridge and Wine report). In the AppImage, Carlita gives the
+  programs it starts the desktop's own `LD_LIBRARY_PATH` back, so Wine does
+  not load the AppImage's bundled libraries.
 * **Audio I/O.** Under JACK or PipeWire, the "input device" and "output
   device" are the JACK clients the chain is auto-connected to. The default
   is the physical `system` ports. Hardware MIDI (`system`, PipeWire

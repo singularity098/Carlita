@@ -16,5 +16,9 @@ if [ -z "$CARLITA_NO_PIPEWIRE_JACK" ] && pgrep -x pipewire >/dev/null 2>&1; then
         fi
     done
 fi
+# Carlita puts the desktop's own value back once it has started (see
+# `restore_host_library_path`), so the programs it starts (the plugin
+# scanner, yabridge, Wine) do not pick up the bundled libraries.
+export CARLITA_HOST_LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
 export LD_LIBRARY_PATH="$LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 exec "$HERE/usr/bin/carlita" "$@"

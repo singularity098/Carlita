@@ -33,9 +33,10 @@ component Key inherits Rectangle {
 }
 
 export component TextKeyboard inherits Rectangle {
-    in-out property <string> text;
     property <bool> shift: false;
     property <bool> symbols: false;
+    // A key was typed (`backspace` for ⌫).
+    callback typed(text: string, backspace: bool);
     callback done;
 
     background: transparent;
@@ -51,7 +52,7 @@ export component TextKeyboard inherits Rectangle {
     ];
 
     function emit(k: string) {
-        root.text += root.shift && !root.symbols ? k.to-uppercase() : k;
+        root.typed(root.shift && !root.symbols ? k.to-uppercase() : k, false);
         if root.shift {
             root.shift = false;
         }
@@ -86,7 +87,7 @@ export component TextKeyboard inherits Rectangle {
             }
             Key {
                 label: "⌫";
-                pressed => { root.text = TextUtil.drop-last(root.text); }
+                pressed => { root.typed("", true); }
             }
             Key {
                 label: "Done";
@@ -105,6 +106,22 @@ export component TextPrompt inherits Rectangle {
     in-out property <string> text;
     callback accepted(string);
     callback cancelled;
+
+    // A hardware keyboard types into the field directly, with the usual
+    // editing keys (Ctrl+arrows, Ctrl+Backspace, Ctrl+A, Home/End, Shift to
+    // select, the clipboard); the on-screen keys type at its cursor.
+    init => {
+        input.focus();
+        input.select-all();
+    }
+    function type(t: string, backspace: bool) {
+        let anchor = input.anchor-position-byte-offset;
+        let cursor = input.cursor-position-byte-offset;
+        let at = TextUtil.edit-cursor(root.text, anchor, cursor, t, backspace);
+        root.text = TextUtil.edit(root.text, anchor, cursor, t, backspace);
+        input.set-selection-offsets(at, at);
+        input.focus();
+    }
 
     background: Theme.scrim;
     TouchArea { }
@@ -134,14 +151,25 @@ export component TextPrompt inherits Rectangle {
                             background: Theme.surface;
                             border-width: 2px;
                             border-color: Theme.paint;
-                            Text {
+                            input := TextInput {
                                 x: Theme.pad;
                                 width: parent.width - 2 * Theme.pad;
-                                text: (root.secret ? TextUtil.mask(root.text) : root.text) + "▏";
+                                text <=> root.text;
+                                input-type: root.secret ? InputType.password : InputType.text;
+                                single-line: true;
                                 font-size: Theme.font-large;
                                 color: Theme.text;
+                                selection-background-color: Theme.paint.transparentize(50%);
+                                selection-foreground-color: Theme.text;
                                 vertical-alignment: center;
-                                overflow: elide;
+                                accepted => { root.accepted(root.text); }
+                                key-pressed(e) => {
+                                    if e.text == Key.Escape {
+                                        root.cancelled();
+                                        return accept;
+                                    }
+                                    reject
+                                }
                             }
                         }
                     }
@@ -162,8 +190,8 @@ export component TextPrompt inherits Rectangle {
                     }
                 }
                 TextKeyboard {
-                    text <=> root.text;
                     height: 280px;
+                    typed(t, backspace) => { root.type(t, backspace); }
                     done => { root.accepted(root.text); }
                 }
             }

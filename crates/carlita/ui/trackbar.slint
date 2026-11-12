@@ -9,8 +9,51 @@ component TrackTab inherits Rectangle {
     in property <TrackItem> item;
     // Whether the tab offers to close its track (not the last, empty one).
     in property <bool> closable: true;
-    callback clicked;
+    // A tap on a tab that was not selected selects it at once.
+    callback pick;
+    // A single tap, once it is clear that no second tap follows (the second
+    // tap of a double tap renames the tab instead); `was-selected` tells
+    // whether the tab was already selected before the tap.
+    callback clicked(was-selected: bool);
     callback close;
+    // Double click (or double tap) on the name started renaming the tab.
+    callback rename-started;
+    callback renamed(string);
+    // Renaming ended, with or without a new name.
+    callback rename-ended;
+
+    // Renaming in place: the name turns into a text field.
+    property <bool> editing: false;
+    changed editing => {
+        if root.editing {
+            name-input.text = root.item.name;
+            name-input.focus();
+            name-input.select-all();
+        }
+    }
+    function start-editing() {
+        if root.editing { return; }
+        root.editing = true;
+        root.rename-started();
+    }
+    function finish-editing(accept: bool) {
+        if !root.editing { return; }
+        root.editing = false;
+        if accept && name-input.text != root.item.name {
+            root.renamed(name-input.text);
+        }
+        root.rename-ended();
+    }
+
+    property <bool> was-selected;
+    click-timer := Timer {
+        interval: 350ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            root.clicked(root.was-selected);
+        }
+    }
 
     // The close button keeps its room whether shown or not, so tabs do not
     // move when the mouse comes over one.
@@ -42,7 +85,16 @@ component TrackTab inherits Rectangle {
 
     // Under the row, so the close button gets its own taps.
     touch := TouchArea {
-        clicked => { root.clicked(); }
+        clicked => {
+            if root.editing || click-timer.running { return; }
+            root.was-selected = root.item.selected;
+            if !root.item.selected { root.pick(); }
+            click-timer.running = true;
+        }
+        double-clicked => {
+            click-timer.running = false;
+            root.start-editing();
+        }
     }
 
     row := HorizontalLayout {
@@ -50,7 +102,7 @@ component TrackTab inherits Rectangle {
         padding-right: root.closable ? 6px : 16px;
         spacing: 10px;
         alignment: center;
-        Text {
+        if !root.editing: Text {
             text: root.item.name;
             font-size: Theme.font;
             font-weight: Theme.regular;
@@ -58,6 +110,38 @@ component TrackTab inherits Rectangle {
             vertical-alignment: center;
             overflow: elide;
             max-width: 180px;
+        }
+        Rectangle {
+            visible: root.editing;
+            width: root.editing ? 180px : 0;
+            height: 30px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 6px;
+            background: Theme.surface;
+            border-width: root.editing ? 1px : 0;
+            border-color: Theme.paint;
+            name-input := TextInput {
+                x: 8px;
+                width: parent.width - 16px;
+                enabled: root.editing;
+                text: root.item.name;
+                font-size: Theme.font;
+                color: Theme.text;
+                vertical-alignment: center;
+                single-line: true;
+                accepted => { root.finish-editing(true); }
+                key-pressed(e) => {
+                    if e.text == Key.Escape {
+                        root.finish-editing(false);
+                        return accept;
+                    }
+                    reject
+                }
+                // Clicking elsewhere keeps the new name.
+                changed has-focus => {
+                    if !self.has-focus { root.finish-editing(true); }
+                }
+            }
         }
         if root.item.muted: Text {
             text: "M";
@@ -138,8 +222,13 @@ export component TrackBar inherits Rectangle {
     in property <[TrackItem]> tracks;
     in property <bool> fullscreen;
     in property <bool> maximized;
+    // A tab was tapped: `pick-track` at once for a tab that was not
+    // selected, `tab-clicked` (with whether it was selected before) a moment
+    // later unless a double tap made it a rename.
+    callback pick-track(int);
     callback tab-clicked(int, bool);
     callback close-track(int);
+    callback rename-track(int, string);
     callback add-track;
     // Windowed: start moving the window, or maximize on a double tap.
     callback start-drag;
@@ -149,6 +238,9 @@ export component TrackBar inherits Rectangle {
     callback toggle-fullscreen;
     // Fullscreen: swipe the bar back up.
     callback dismiss;
+    // A tab's name became a text field.
+    callback rename-started(int);
+    callback rename-ended;
 
     background: Theme.surface;
 
@@ -214,8 +306,12 @@ export component TrackBar inherits Rectangle {
                 for t in root.tracks: TrackTab {
                     item: t;
                     closable: root.tracks.length > 1;
-                    clicked => { root.tab-clicked(t.id, t.selected); }
+                    pick => { root.pick-track(t.id); }
+                    clicked(was-selected) => { root.tab-clicked(t.id, was-selected); }
                     close => { root.close-track(t.id); }
+                    rename-started => { root.rename-started(t.id); }
+                    renamed(name) => { root.rename-track(t.id, name); }
+                    rename-ended => { root.rename-ended(); }
                 }
                 Rectangle {
                     width: 48px;
@@ -240,35 +336,32 @@ export component TrackBar inherits Rectangle {
             }
         }
 
-        if !root.fullscreen: HorizontalLayout {
-            WindowButton {
-                icon: "M 2.5 5.5 L 2.5 2.5 L 5.5 2.5 M 8.5 2.5 L 11.5 2.5 L 11.5 5.5 M 11.5 8.5 L 11.5 11.5 L 8.5 11.5 M 5.5 11.5 L 2.5 11.5 L 2.5 8.5";
-                clicked => { root.toggle-fullscreen(); }
-            }
-            WindowButton {
-                icon: "M 3 7.5 L 11 7.5";
-                clicked => { root.minimize(); }
-            }
-            WindowButton {
-                icon: root.maximized ? "M 3 5 L 9 5 L 9 11 L 3 11 Z M 5 5 L 5 3 L 11 3 L 11 9 L 9 9" : "M 3 3 L 11 3 L 11 11 L 3 11 Z";
-                clicked => { root.toggle-maximize(); }
-            }
-            WindowButton {
-                icon: "M 3.5 3.5 L 10.5 10.5 M 10.5 3.5 L 3.5 10.5";
-                danger: true;
-                clicked => { root.close-window(); }
-            }
+        // The same window controls in a window and in fullscreen; in
+        // fullscreen there is also a button that hides the bar again.
+        if root.fullscreen: WindowButton {
+            icon: "M 3 9 L 7 5 L 11 9";
+            clicked => { root.dismiss(); }
         }
-        if root.fullscreen: HorizontalLayout {
-            WindowButton {
+        WindowButton {
+            icon: root.fullscreen
                 // Leave fullscreen: corners pointing inwards.
-                icon: "M 5.5 2.5 L 5.5 5.5 L 2.5 5.5 M 11.5 5.5 L 8.5 5.5 L 8.5 2.5 M 8.5 11.5 L 8.5 8.5 L 11.5 8.5 M 2.5 8.5 L 5.5 8.5 L 5.5 11.5";
-                clicked => { root.toggle-fullscreen(); }
-            }
-            WindowButton {
-                icon: "M 3 9 L 7 5 L 11 9";
-                clicked => { root.dismiss(); }
-            }
+                ? "M 5.5 2.5 L 5.5 5.5 L 2.5 5.5 M 11.5 5.5 L 8.5 5.5 L 8.5 2.5 M 8.5 11.5 L 8.5 8.5 L 11.5 8.5 M 2.5 8.5 L 5.5 8.5 L 5.5 11.5"
+                : "M 2.5 5.5 L 2.5 2.5 L 5.5 2.5 M 8.5 2.5 L 11.5 2.5 L 11.5 5.5 M 11.5 8.5 L 11.5 11.5 L 8.5 11.5 M 5.5 11.5 L 2.5 11.5 L 2.5 8.5";
+            clicked => { root.toggle-fullscreen(); }
+        }
+        WindowButton {
+            icon: "M 3 7.5 L 11 7.5";
+            clicked => { root.minimize(); }
+        }
+        WindowButton {
+            // In fullscreen this leaves fullscreen for a maximized window.
+            icon: root.maximized && !root.fullscreen ? "M 3 5 L 9 5 L 9 11 L 3 11 Z M 5 5 L 5 3 L 11 3 L 11 9 L 9 9" : "M 3 3 L 11 3 L 11 11 L 3 11 Z";
+            clicked => { root.toggle-maximize(); }
+        }
+        WindowButton {
+            icon: "M 3.5 3.5 L 10.5 10.5 M 10.5 3.5 L 3.5 10.5";
+            danger: true;
+            clicked => { root.close-window(); }
         }
     }
 }

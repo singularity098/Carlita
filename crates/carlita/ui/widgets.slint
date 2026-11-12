@@ -4,10 +4,12 @@ import { Icon } from "icons.slint";
 
 // String helpers implemented in Rust (Slint has no substring operations).
 export global TextUtil {
-    pure callback drop-last(string) -> string;
-    pure callback mask(string) -> string;
-    // Whether a key press is text to type (not Backspace, an arrow, ...).
-    pure callback is-text(string) -> bool;
+    // On-screen keyboard editing at a text field's cursor: the text after
+    // typing `insert` (or, with `backspace`, after deleting the selection or
+    // the character before the cursor), and the cursor's byte offset after
+    // it. `anchor` and `cursor` are the field's selection, as byte offsets.
+    pure callback edit(text: string, anchor: int, cursor: int, insert: string, backspace: bool) -> string;
+    pure callback edit-cursor(text: string, anchor: int, cursor: int, insert: string, backspace: bool) -> int;
     // A MIDI port's name without the repeated device name and the ALSA
     // client:port numbers ("Scarlett 18i20 USB:Scarlett 18i20 USB MIDI 1
     // 24:0" becomes "Scarlett 18i20 USB MIDI 1").
@@ -233,6 +235,9 @@ export component BigSlider inherits Rectangle {
     in property <float> minimum: 0;
     in property <float> maximum: 1;
     in-out property <float> value;
+    // A double click or double tap puts the slider back to this value.
+    in property <bool> has-default: false;
+    in property <float> default-value;
     callback changed(float);
     height: Theme.touch;
 
@@ -271,6 +276,12 @@ export component BigSlider inherits Rectangle {
             }
         }
         moved => { self.set-from(self.mouse-x); }
+        double-clicked => {
+            if root.has-default {
+                root.value = root.default-value;
+                root.changed(root.value);
+            }
+        }
     }
 }
 
