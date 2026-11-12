@@ -37,14 +37,20 @@ off-screen with XComposite and forwarded synthetic input) was dropped
 5. The editor draws itself and gets real pointer and touch input from the X
    server, so it works with every toolkit (Wine and yabridge included).
 6. An X11 child window is always above what Slint draws, so nothing can be
-   drawn over an editor. Instead, `ui/main.slint` works out the part of the
-   main area that nothing covers (`uncovered-x` and friends), following the
-   sidebars and the fullscreen track bar as they slide and stopping above
-   the toast. The holder is cut down to that part, with the editor moved
-   inside it so it stays where it is: the uncovered part of the editor stays
-   live and usable. Under the plugin browser and dialogs nothing is left
-   and the holder is unmapped. In fullscreen the area starts below the top
-   edge strip so the swipe that brings in the track bar still works.
+   drawn over an editor. The main area reaches the window's edges (below
+   the docked track bar, above the keyboard), and the editor may lie under
+   the edge strips. So the host keeps an invisible *input-only* window over
+   each strip (`HostCommand::SetEdges`), stacked above every holder. X
+   passes input on such a window to its parent, the main window, so
+   swipes and taps on a strip reach Carlita even over an editor, while the
+   editor still shows through. While the mouse hovers a strip, the holder is
+   cut back by the width of the strip's tab (`uncovered-x` and friends in
+   `ui/main.slint`), with the editor moved inside the holder so it stays
+   where it is, and the see-through tab is drawn over the editor's
+   snapshot. The holder also stops above the toast. While a sidebar, the
+   fullscreen track bar, the plugin browser or a dialog is open, the holder
+   is unmapped and the snapshot shows under them, so a tap outside a
+   sidebar closes it rather than reaching the plugin.
 7. Just before something starts to cover a fully shown editor, the host
    reads its pixels (`GetImage` on the editor window) and sends them as a
    `Snapshot`. The main area draws that picture where the editor is, so the
@@ -64,12 +70,17 @@ off-screen with XComposite and forwarded synthetic input) was dropped
   embed into, and editors open in their own windows. XWayland works.
 * **No scaling.** A small editor stays small; a larger one is cut off.
 * **Nothing draws over an editor.** Overlays cut it down or hide it, with
-  a still snapshot under them. The sidebars' and track bar's dimming does
-  not reach the uncovered part, and a tap there goes to the plugin rather
-  than closing the sidebar.
+  a still snapshot under them. The plugin is not usable while a sidebar is
+  open.
 * **Window not found** within 15 s: Carlita closes the editor (so it is not
   left behind as a window of its own) and shows the generic parameter page
   instead.
-* **Keyboard focus** is not handed to the editor. If the user clicked into
-  the editor and a dialog then hides it, the focus is given back to the
-  main window so typing reaches the dialog.
+* **Keyboard focus** is not handed to the editor; an editor takes it when
+  clicked (yabridge's when the mouse enters them). The host gives it back
+  to the main window when the pointer leaves the editor, when the editor is
+  hidden or closed, and whenever the focus would otherwise be lost, so
+  typing reaches Carlita's text fields again. winit drops every key while
+  the main window does not have the focus.
+* **F11** is taken from the main window with a passive key grab, so it
+  toggles fullscreen even while an editor has the keyboard focus (which
+  would otherwise keep it).

@@ -20,177 +20,197 @@ export component PluginBrowser inherits Rectangle {
     callback rescan;
     callback close;
     callback request-keyboard;
+    // The on-screen keyboard's prompt is open over the browser.
+    in property <bool> prompt-open;
+
+    // Typing on a hardware keyboard goes straight into the search box, and
+    // back there once the on-screen keyboard's prompt closes.
+    init => { search-box.focus(); }
+    changed prompt-open => {
+        if !root.prompt-open { search-box.focus(); }
+    }
 
     background: Theme.scrim;
     TouchArea {
         clicked => { root.close(); }
     }
 
-    panel := Rectangle {
-        width: min(root.width - 32px, 980px);
-        height: root.height - 48px;
-        x: (root.width - self.width) / 2;
-        y: 24px;
-        border-radius: Theme.radius * 1.5;
-        background: Theme.popup;
-        border-width: 1px;
-        border-color: Theme.border;
-        // Swallow clicks so they do not close the browser.
-        TouchArea { }
-
-        VerticalLayout {
-            padding: Theme.pad * 1.5;
-            spacing: 12px;
-
-            HorizontalLayout {
-                spacing: 10px;
-                Text {
-                    text: "Add plugin";
-                    font-size: Theme.font-title;
-                    color: Theme.text;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                }
-                BigButton {
-                    text: root.scanning ? "Scanning…" : "Rescan";
-                    enabled: !root.scanning;
-                    clicked => { root.rescan(); }
-                }
-                BigButton {
-                    icon: "✕";
-                    clicked => { root.close(); }
-                }
+    // Escape closes the browser (the search box passes it on).
+    FocusScope {
+        key-pressed(e) => {
+            if e.text == Key.Escape {
+                root.close();
+                return accept;
             }
+            reject
+        }
 
-            HorizontalLayout {
-                spacing: 10px;
-                search-box := LineEdit {
-                    height: Theme.touch;
-                    font-size: Theme.font;
-                    placeholder-text: "Search plugins";
-                    text <=> root.search;
-                    edited(t) => { root.filter-changed(t, root.format-filter, root.category-filter, root.favorites-only); }
-                }
-                BigButton {
-                    icon: "⌨";
-                    clicked => { root.request-keyboard(); }
-                }
-                Chip {
-                    text: "★ Favorites";
-                    selected: root.favorites-only;
-                    clicked => { root.filter-changed(root.search, root.format-filter, root.category-filter, !root.favorites-only); }
-                }
-            }
+        panel := Rectangle {
+            width: min(root.width - 32px, 980px);
+            height: root.height - 48px;
+            x: (root.width - self.width) / 2;
+            y: 24px;
+            border-radius: Theme.radius * 1.5;
+            background: Theme.popup;
+            border-width: 1px;
+            border-color: Theme.border;
+            // Swallow clicks so they do not close the browser.
+            TouchArea { }
 
-            // Format chips.
-            HorizontalLayout {
-                spacing: 6px;
-                alignment: start;
-                Chip {
-                    text: "All formats";
-                    selected: root.format-filter == "";
-                    clicked => { root.filter-changed(root.search, "", root.category-filter, root.favorites-only); }
-                }
-                for f in root.formats: Chip {
-                    text: f;
-                    selected: root.format-filter == f;
-                    clicked => { root.filter-changed(root.search, f, root.category-filter, root.favorites-only); }
-                }
-            }
+            VerticalLayout {
+                padding: Theme.pad * 1.5;
+                spacing: 12px;
 
-            // Category chips (scrollable when narrow).
-            Flickable {
-                height: 48px;
-                content-width: cats.preferred-width;
-                cats := HorizontalLayout {
+                HorizontalLayout {
+                    spacing: 10px;
+                    Text {
+                        text: "Add plugin";
+                        font-size: Theme.font-title;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    BigButton {
+                        text: root.scanning ? "Scanning…" : "Rescan";
+                        enabled: !root.scanning;
+                        clicked => { root.rescan(); }
+                    }
+                    BigButton {
+                        icon: "✕";
+                        clicked => { root.close(); }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    search-box := LineEdit {
+                        height: Theme.touch;
+                        font-size: Theme.font;
+                        placeholder-text: "Search plugins";
+                        text <=> root.search;
+                        edited(t) => { root.filter-changed(t, root.format-filter, root.category-filter, root.favorites-only); }
+                    }
+                    BigButton {
+                        icon: "⌨";
+                        clicked => { root.request-keyboard(); }
+                    }
+                    Chip {
+                        text: "★ Favorites";
+                        selected: root.favorites-only;
+                        clicked => { root.filter-changed(root.search, root.format-filter, root.category-filter, !root.favorites-only); }
+                    }
+                }
+
+                // Format chips.
+                HorizontalLayout {
                     spacing: 6px;
                     alignment: start;
                     Chip {
-                        text: "All categories";
-                        selected: root.category-filter == "";
-                        clicked => { root.filter-changed(root.search, root.format-filter, "", root.favorites-only); }
+                        text: "All formats";
+                        selected: root.format-filter == "";
+                        clicked => { root.filter-changed(root.search, "", root.category-filter, root.favorites-only); }
                     }
-                    for c in root.categories: Chip {
-                        text: c;
-                        selected: root.category-filter == c;
-                        clicked => { root.filter-changed(root.search, root.format-filter, c, root.favorites-only); }
+                    for f in root.formats: Chip {
+                        text: f;
+                        selected: root.format-filter == f;
+                        clicked => { root.filter-changed(root.search, f, root.category-filter, root.favorites-only); }
                     }
                 }
-            }
 
-            if root.scan-status != "": Text {
-                text: root.scan-status;
-                color: Theme.text-dim;
-                font-size: Theme.font-small;
-                font-weight: Theme.regular;
-                overflow: elide;
-            }
+                // Category chips (scrollable when narrow).
+                Flickable {
+                    height: 48px;
+                    content-width: cats.preferred-width;
+                    cats := HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        Chip {
+                            text: "All categories";
+                            selected: root.category-filter == "";
+                            clicked => { root.filter-changed(root.search, root.format-filter, "", root.favorites-only); }
+                        }
+                        for c in root.categories: Chip {
+                            text: c;
+                            selected: root.category-filter == c;
+                            clicked => { root.filter-changed(root.search, root.format-filter, c, root.favorites-only); }
+                        }
+                    }
+                }
 
-            Rectangle {
-                vertical-stretch: 1;
-                if root.plugins.length == 0: Text {
-                    text: root.scanning ? "Scanning for plugins…" : "No plugins match.\nTry another filter, or rescan.";
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+                if root.scan-status != "": Text {
+                    text: root.scan-status;
                     color: Theme.text-dim;
-                    font-size: Theme.font;
+                    font-size: Theme.font-small;
+                    font-weight: Theme.regular;
+                    overflow: elide;
                 }
-                ListView {
-                    for p in root.plugins: Rectangle {
-                        height: Theme.row;
-                        Rectangle {
-                            y: 3px;
-                            height: parent.height - 6px;
-                            border-radius: Theme.radius;
-                            background: row-touch.pressed ? Theme.pressed : Theme.surface-2;
-                            border-width: 1px;
-                            border-color: row-touch.has-hover ? Theme.border-hover : Theme.border-strong;
-                            row-touch := TouchArea {
-                                clicked => { root.pick(p.key); }
-                            }
-                            HorizontalLayout {
-                                padding-left: Theme.pad;
-                                padding-right: 6px;
-                                spacing: 10px;
-                                VerticalLayout {
-                                    alignment: center;
-                                    horizontal-stretch: 1;
-                                    Text {
-                                        text: p.name;
-                                        font-size: Theme.font;
-                                        color: Theme.text;
-                                        overflow: elide;
-                                    }
-                                    Text {
-                                        text: p.maker + (p.maker != "" ? "  ·  " : "") + p.category + (p.bridged ? "  ·  yabridge" : "");
-                                        font-size: Theme.font-small;
-                                        font-weight: Theme.regular;
-                                        color: Theme.text-dim;
-                                        overflow: elide;
-                                    }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                    if root.plugins.length == 0: Text {
+                        text: root.scanning ? "Scanning for plugins…" : "No plugins match.\nTry another filter, or rescan.";
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        color: Theme.text-dim;
+                        font-size: Theme.font;
+                    }
+                    ListView {
+                        for p in root.plugins: Rectangle {
+                            height: Theme.row;
+                            Rectangle {
+                                y: 3px;
+                                height: parent.height - 6px;
+                                border-radius: Theme.radius;
+                                background: row-touch.pressed ? Theme.pressed : Theme.surface-2;
+                                border-width: 1px;
+                                border-color: row-touch.has-hover ? Theme.border-hover : Theme.border-strong;
+                                row-touch := TouchArea {
+                                    clicked => { root.pick(p.key); }
                                 }
-                                Rectangle {
-                                    width: 64px;
-                                    Text {
-                                        text: p.format;
-                                        font-size: Theme.font-small;
-                                        font-weight: Theme.regular;
-                                        color: Theme.accent;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
+                                HorizontalLayout {
+                                    padding-left: Theme.pad;
+                                    padding-right: 6px;
+                                    spacing: 10px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        horizontal-stretch: 1;
+                                        Text {
+                                            text: p.name;
+                                            font-size: Theme.font;
+                                            color: Theme.text;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: p.maker + (p.maker != "" ? "  ·  " : "") + p.category + (p.bridged ? "  ·  yabridge" : "");
+                                            font-size: Theme.font-small;
+                                            font-weight: Theme.regular;
+                                            color: Theme.text-dim;
+                                            overflow: elide;
+                                        }
                                     }
-                                }
-                                Rectangle {
-                                    width: Theme.touch;
-                                    Text {
-                                        text: p.favorite ? "★" : "☆";
-                                        font-size: 26px;
-                                        color: p.favorite ? Theme.warn : Theme.text-faint;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
+                                    Rectangle {
+                                        width: 64px;
+                                        Text {
+                                            text: p.format;
+                                            font-size: Theme.font-small;
+                                            font-weight: Theme.regular;
+                                            color: Theme.accent;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
                                     }
-                                    TouchArea {
-                                        clicked => { root.toggle-favorite(p.key); }
+                                    Rectangle {
+                                        width: Theme.touch;
+                                        Text {
+                                            text: p.favorite ? "★" : "☆";
+                                            font-size: 26px;
+                                            color: p.favorite ? Theme.warn : Theme.text-faint;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                        TouchArea {
+                                            clicked => { root.toggle-favorite(p.key); }
+                                        }
                                     }
                                 }
                             }

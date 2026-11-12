@@ -6,8 +6,8 @@ use x11rb::connection::Connection;
 use x11rb::properties::WmSizeHints;
 use x11rb::protocol::xproto::{
     AtomEnum, ChangeWindowAttributesAux, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux,
-    EventMask, ImageFormat, ImageOrder, InputFocus, MapState, UnmapNotifyEvent, Window,
-    WindowClass, UNMAP_NOTIFY_EVENT,
+    EventMask, GrabMode, ImageFormat, ImageOrder, InputFocus, MapState, ModMask, NotifyDetail,
+    NotifyMode, StackMode, UnmapNotifyEvent, Window, WindowClass, UNMAP_NOTIFY_EVENT,
 };
 use x11rb::protocol::Event as XEvent;
 use x11rb::rust_connection::RustConnection;
@@ -25,6 +25,10 @@ const WITHDRAW_TIMEOUT: Duration = Duration::from_secs(1);
 /// How often to put an editor back if something (a window manager) takes it
 /// out of Carlita's window again.
 const MAX_REEMBED: u32 = 5;
+/// The X keysym of F11.
+const KEYSYM_F11: u32 = 0xffc8;
+/// Presses of F11 closer together than this (key repeat) count once.
+const KEY_REPEAT: Duration = Duration::from_millis(350);
 
 /// The part of the main window an editor may use, in physical pixels
 /// relative to the main window.
@@ -80,6 +84,16 @@ pub enum HostCommand {
         area: Area,
         uncovered: Area,
     },
+    /// The main window (`parent`) and its edge strips. Invisible input-only
+    /// windows are kept over the strips, above every editor, so touches and
+    /// the mouse there reach the main window even where an editor lies
+    /// under them (X passes the input on to the parent, which is the main
+    /// window). F11 is also taken from the main window and everything in it,
+    /// editors included ([`HostEvent::ToggleFullscreen`]).
+    SetEdges {
+        parent: u32,
+        edges: Vec<Area>,
+    },
     Shutdown,
 }
 
@@ -109,6 +123,9 @@ pub enum HostEvent {
         height: u32,
         rgba: Vec<u8>,
     },
+    /// F11 was pressed in Carlita's window, wherever the keyboard focus was
+    /// (an editor that has the focus would otherwise keep the key).
+    ToggleFullscreen,
     Unavailable(String),
 }
 
@@ -182,6 +199,8 @@ struct Embedded {
     window: Window,
     /// Our child of the main window that holds (and clips) it.
     holder: Window,
+    /// The main window.
+    parent: Window,
     width: u32,
     height: u32,
     reembeds: u32,
@@ -207,6 +226,12 @@ struct Embedder {
     embedded: HashMap<u64, Embedded>,
     area: Area,
     uncovered: Area,
+    /// The main window the edge windows are in, and the edge windows.
+    edge_parent: Option<Window>,
+    edges: Vec<Window>,
+    /// The key code of F11 taken from `edge_parent`, if it could be.
+    f11: Option<u8>,
+    last_f11: Option<Instant>,
 }
 
 impl Embedder {
@@ -240,6 +265,10 @@ impl Embedder {
             embedded: HashMap::new(),
             area: Area::default(),
             uncovered: Area::default(),
+            edge_parent: None,
+            edges: Vec::new(),
+            f11: None,
+            last_f11: None,
         })
     }
 
@@ -309,6 +338,7 @@ impl Embedder {
                     self.place(key);
                 }
             }
+            HostCommand::SetEdges { parent, edges } => self.set_edges(parent, &edges)?,
             HostCommand::Shutdown => {}
         }
         self.conn.flush()?;
@@ -609,16 +639,22 @@ impl Embedder {
                 0,
                 WindowClass::INPUT_OUTPUT,
                 x11rb::COPY_FROM_PARENT,
-                &CreateWindowAux::new().background_pixel(0),
+                // Leaving the editor gives the keyboard back to Carlita.
+                &CreateWindowAux::new()
+                    .background_pixel(0)
+                    .event_mask(EventMask::LEAVE_WINDOW),
             )?
             .check()
             .context("cannot create the editor's holder window")?;
+        // The new holder is on top: keep the edge strips above it.
+        self.raise_edges();
         self.reembed(window, holder);
         self.embedded.insert(
             key,
             Embedded {
                 window,
                 holder,
+                parent,
                 width: geo.width as u32,
                 height: geo.height as u32,
                 reembeds: 0,
@@ -766,6 +802,26 @@ impl Embedder {
         }
     }
 
+    /// If the keyboard focus went nowhere (an editor that had it was closed,
+    /// and X let the focus go with it), gives it to the main window. The
+    /// main window would otherwise take no typing until it is focused anew,
+    /// which clicking into it does not do while the window manager thinks
+    /// it already has the focus.
+    fn keep_focus(&self, main: Window) {
+        let focus = self
+            .conn
+            .get_input_focus()
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .map(|f| f.focus);
+        // 0 is None (no focus at all).
+        if focus == Some(0) {
+            let _ = self
+                .conn
+                .set_input_focus(InputFocus::PARENT, main, x11rb::CURRENT_TIME);
+        }
+    }
+
     /// Reads what the editor shows (it is uncovered, see `place`) and sends
     /// it as RGBA.
     fn snapshot(&self, key: u64, at: Area) {
@@ -849,6 +905,7 @@ impl Embedder {
     /// is not destroyed with the main window) and removes the holder.
     fn release(&mut self, key: u64) {
         if let Some(e) = self.embedded.remove(&key) {
+            self.take_focus_from(e.holder);
             let _ = self.conn.change_window_attributes(
                 e.window,
                 &ChangeWindowAttributesAux::new().event_mask(EventMask::NO_EVENT),
@@ -856,6 +913,7 @@ impl Embedder {
             let _ = self.conn.unmap_window(e.window);
             let _ = self.conn.reparent_window(e.window, self.root, 0, 0);
             let _ = self.conn.destroy_window(e.holder);
+            self.keep_focus(e.parent);
             let _ = self.conn.flush();
         }
     }
@@ -863,9 +921,120 @@ impl Embedder {
     /// The editor window is gone or was closed: drop it without touching it.
     fn lost(&mut self, key: u64) {
         if let Some(e) = self.embedded.remove(&key) {
+            self.take_focus_from(e.holder);
             let _ = self.conn.destroy_window(e.holder);
+            self.keep_focus(e.parent);
             self.emit(HostEvent::Lost { key });
         }
+    }
+
+    // ---------------------------------------------------------- edge strips
+
+    fn set_edges(&mut self, parent: Window, areas: &[Area]) -> Result<()> {
+        if self.edge_parent != Some(parent) {
+            for w in self.edges.drain(..) {
+                let _ = self.conn.destroy_window(w);
+            }
+            self.edge_parent = Some(parent);
+            self.f11 = self.grab_f11(parent);
+        }
+        while self.edges.len() > areas.len() {
+            let w = self.edges.pop().unwrap();
+            let _ = self.conn.destroy_window(w);
+        }
+        while self.edges.len() < areas.len() {
+            let w = self.conn.generate_id()?;
+            self.conn
+                .create_window(
+                    0,
+                    w,
+                    parent,
+                    0,
+                    0,
+                    1,
+                    1,
+                    0,
+                    WindowClass::INPUT_ONLY,
+                    x11rb::COPY_FROM_PARENT,
+                    &CreateWindowAux::new(),
+                )?
+                .check()
+                .context("cannot create an edge window")?;
+            self.edges.push(w);
+        }
+        for (&w, a) in self.edges.iter().zip(areas) {
+            if a.is_empty() {
+                let _ = self.conn.unmap_window(w);
+                continue;
+            }
+            let _ = self.conn.configure_window(
+                w,
+                &ConfigureWindowAux::new()
+                    .x(a.x)
+                    .y(a.y)
+                    .width(a.width)
+                    .height(a.height)
+                    .stack_mode(StackMode::ABOVE),
+            );
+            let _ = self.conn.map_window(w);
+        }
+        Ok(())
+    }
+
+    fn raise_edges(&self) {
+        for &w in &self.edges {
+            let _ = self
+                .conn
+                .configure_window(w, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
+        }
+    }
+
+    /// Takes F11 from `parent` and everything in it, with any modifiers, so
+    /// it reaches Carlita even while an editor has the keyboard focus.
+    fn grab_f11(&self, parent: Window) -> Option<u8> {
+        let setup = self.conn.setup();
+        let (min, max) = (setup.min_keycode, setup.max_keycode);
+        let map = self
+            .conn
+            .get_keyboard_mapping(min, max - min + 1)
+            .ok()?
+            .reply()
+            .ok()?;
+        let per = map.keysyms_per_keycode.max(1) as usize;
+        let index = map
+            .keysyms
+            .chunks(per)
+            .position(|syms| syms.contains(&KEYSYM_F11))?;
+        let code = min + index as u8;
+        match self
+            .conn
+            .grab_key(
+                false,
+                parent,
+                ModMask::ANY,
+                code,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+            )
+            .map(|c| c.check())
+        {
+            Ok(Ok(())) => Some(code),
+            Ok(Err(e)) => {
+                log::info!("cannot take F11 from the main window: {e}");
+                None
+            }
+            Err(e) => {
+                log::info!("cannot take F11 from the main window: {e}");
+                None
+            }
+        }
+    }
+
+    fn holder_key(&self, w: Window) -> Option<u64> {
+        self.embedded
+            .iter()
+            .find(|(_, e)| e.holder == w)
+            .map(|(k, _)| *k)
     }
 
     fn key_for_window(&self, w: Window) -> Option<u64> {
@@ -881,6 +1050,25 @@ impl Embedder {
         while let Ok(Some(ev)) = self.conn.poll_for_event() {
             match ev {
                 XEvent::CreateNotify(_) | XEvent::MapNotify(_) => new_windows = true,
+                XEvent::KeyPress(k) if Some(k.detail) == self.f11 => {
+                    if self.last_f11.is_none_or(|t| t.elapsed() > KEY_REPEAT) {
+                        self.emit(HostEvent::ToggleFullscreen);
+                    }
+                    self.last_f11 = Some(Instant::now());
+                }
+                // The pointer left an editor for the rest of Carlita: give
+                // the keyboard back to the main window, so typing reaches
+                // Carlita's own text fields again (an editor that took the
+                // focus, as yabridge's do on hover, keeps it otherwise).
+                XEvent::LeaveNotify(l)
+                    if l.detail != NotifyDetail::INFERIOR
+                        && (l.mode == NotifyMode::NORMAL || l.mode == NotifyMode::UNGRAB) =>
+                {
+                    if self.holder_key(l.event).is_some() {
+                        self.take_focus_from(l.event);
+                        let _ = self.conn.flush();
+                    }
+                }
                 // Events about the editor itself (not the root's children).
                 XEvent::ConfigureNotify(c) if c.event == c.window => {
                     if let Some(k) = self.key_for_window(c.window) {

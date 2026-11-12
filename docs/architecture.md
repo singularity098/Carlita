@@ -61,6 +61,10 @@
   process with a timeout. The results are cached in `plugins.json`.
   yabridge's `~/.vst/yabridge` and `~/.vst3/yabridge` folders are part of the
   standard search paths, and plugins found there are marked "yabridge".
+  As in Carla's own scanner, the probe only reads each plugin's description
+  (`CARLA_DISCOVERY_NO_PROCESSING_CHECKS`) rather than running it. yabridge
+  plugins get six times the timeout, since each one starts Wine, and a probe
+  that times out is killed with everything it started.
 * **Audio I/O.** Under JACK or PipeWire, the "input device" and "output
   device" are the JACK clients the chain is auto-connected to. The default
   is the physical `system` ports. Hardware MIDI (`system`, PipeWire

@@ -126,6 +126,27 @@ component ChainRow inherits Rectangle {
                 }
             }
 
+            // Remove (swiping the row sideways or a long press do it too).
+            remove-button := Rectangle {
+                width: 44px;
+                height: Theme.touch;
+                y: (parent.height - self.height) / 2;
+                border-radius: Theme.radius;
+                background: remove-touch.pressed ? Theme.danger.transparentize(70%) : transparent;
+                Icon {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: 22px;
+                    height: 22px;
+                    line: Icons.trash-line;
+                    weight: 1.8;
+                    tint: remove-touch.pressed || remove-touch.has-hover ? Theme.danger : Theme.text-faint;
+                }
+                remove-touch := TouchArea {
+                    clicked => { root.remove(root.item.id); }
+                }
+            }
+
             // Run this plugin in parallel with a dry lane.
             if root.item.can-split: Rectangle {
                 width: 44px;

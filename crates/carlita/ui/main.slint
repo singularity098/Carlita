@@ -1,13 +1,18 @@
 // Carlita main window.
 //
 // Layout: the track bar on top (docked in a window; in fullscreen it slides
-// down from the top edge), a host-owned strip on each screen edge (always
-// ours, so edge swipes work even while a plugin editor fills the screen),
-// the plugin editor in between, and two sidebars that slide over it. A plugin
-// editor is a window of its own placed over the main area, which nothing
-// drawn here can cover: while a sidebar or the track bar slides over the
-// area, the editor is cut down to the part they leave (see `uncovered-x`),
-// and a snapshot of it is drawn under them; the browser and dialogs hide it.
+// down from the top edge), the plugin editor filling the rest of the window
+// up to its edges, a strip on each screen edge that brings in a sidebar (or
+// the track bar, or the keyboard), and two sidebars that slide over the
+// editor. A plugin editor is a window of its own placed over the main area,
+// which nothing drawn here can cover. So the editor host puts invisible
+// input-only windows over it along the edges (see `edge-top`), which pass
+// touches and the mouse on to this window, so the strips work over the
+// editor too. While the mouse hovers a strip, the editor is cut back by the
+// width of the strip's tab (see `uncovered-x`) and a snapshot of it is drawn
+// under the see-through tab. While a sidebar, the fullscreen track bar, the
+// browser or a dialog is open, the editor is hidden and its snapshot shows
+// under them, so a tap anywhere outside a sidebar closes it.
 import "../../../assets/fonts/Jost-Light.ttf";
 import "../../../assets/fonts/Jost-Regular.ttf";
 import { Theme, ThemeLook } from "theme.slint";
@@ -32,6 +37,9 @@ component EdgeStrip inherits Rectangle {
     callback drag(float);
     callback release(float, bool);
     callback tap;
+    // The mouse is over the strip (its tab shows).
+    out property <bool> hovered: self.visible && (strip.has-hover || tab-touch.has-hover);
+    out property <length> tab-width: tab.width;
 
     property <float> amount: 0;
 
@@ -88,6 +96,8 @@ component TopStrip inherits Rectangle {
     callback drag(float);
     callback release(bool);
     callback tap;
+    out property <bool> hovered: self.visible && (strip.has-hover || tab-touch.has-hover);
+    out property <length> tab-height: tab.height;
 
     property <float> amount: 0;
 
@@ -139,6 +149,8 @@ component TopStrip inherits Rectangle {
 // the keyboard in.
 component BottomStrip inherits Rectangle {
     callback open;
+    out property <bool> hovered: self.visible && (strip.has-hover || tab-touch.has-hover);
+    out property <length> tab-height: tab.height;
 
     tab := Rectangle {
         visible: strip.has-hover || tab-touch.has-hover;
@@ -264,19 +276,31 @@ export component MainWindow inherits Window {
     out property <length> area-y: editor-area.y;
     out property <length> area-width: editor-area.width;
     out property <length> area-height: editor-area.height;
-    property <bool> editor-hidden: root.browser-open || root.prompt-open || root.confirm-text != "";
+    property <bool> editor-hidden: root.browser-open || root.prompt-open || root.confirm-text != ""
+        || root.left-pos > 0 || root.right-pos > 0 || (!root.docked && root.top-pos > 0);
+    // While the mouse hovers an edge strip, its tab shows over the editor's
+    // snapshot.
     property <length> uncovered-left: max(editor-area.x,
-        root.left-pos > 0 ? chain-panel.x + root.left-width : 0);
+        left-strip.hovered ? left-strip.tab-width : 0);
     property <length> uncovered-right: min(editor-area.x + editor-area.width,
-        root.right-pos > 0 ? options-panel.x : root.width);
+        right-strip.hovered ? root.width - right-strip.tab-width : root.width);
     property <length> uncovered-top: max(editor-area.y,
-        !root.docked && root.top-pos > 0 ? root.top-shown : 0);
+        top-strip.hovered ? top-strip.tab-height : 0);
     property <length> uncovered-bottom: min(editor-area.y + editor-area.height,
-        root.toast != "" ? toast-box.y : root.height);
+        root.toast != "" ? toast-box.y : root.height,
+        bottom-strip.hovered ? root.height - bottom-strip.tab-height : root.height);
     out property <length> uncovered-x: root.uncovered-left;
     out property <length> uncovered-y: root.uncovered-top;
     out property <length> uncovered-width: root.editor-hidden ? 0 : max(0, root.uncovered-right - root.uncovered-left);
     out property <length> uncovered-height: root.editor-hidden ? 0 : max(0, root.uncovered-bottom - root.uncovered-top);
+    // Where the edge strips are, for the input-only windows the editor host
+    // puts over the editor: the side strips run from `edge-top` to
+    // `edge-bottom`, the top strip is there in fullscreen (`edge-top-strip`)
+    // and the bottom strip while the keyboard is hidden.
+    out property <length> edge-top: root.top-inset;
+    out property <length> edge-bottom: root.height - root.keyboard-height;
+    out property <bool> edge-top-strip: !root.docked;
+    out property <bool> edge-bottom-strip: !root.keyboard-visible;
     // A picture of the editor taken just before something started to cover
     // it, drawn where the editor is (window coordinates).
     in property <image> editor-snapshot;
@@ -364,6 +388,19 @@ export component MainWindow inherits Window {
     function open-right() { root.right-pos = 1; root.left-pos = 0; root.top-pos = 0; }
     function close-right() { root.right-pos = 0; }
 
+    // Typing goes back to the window's own key handling whenever the prompt
+    // opens (it reads the hardware keyboard through it) and when the browser
+    // (whose search box had the focus) closes.
+    changed prompt-open => {
+        if root.prompt-open { keys.focus(); }
+    }
+    changed browser-open => {
+        if !root.browser-open { keys.focus(); }
+    }
+    changed confirm-text => {
+        if root.confirm-text != "" { keys.focus(); }
+    }
+
     forward-focus: keys;
     keys := FocusScope {
         key-pressed(e) => {
@@ -390,6 +427,18 @@ export component MainWindow inherits Window {
                 }
                 return accept;
             }
+            if root.confirm-text != "" {
+                if e.text == Key.Return {
+                    root.confirm-text = "";
+                    root.confirm-done(true);
+                    return accept;
+                }
+                if e.text == Key.Escape {
+                    root.confirm-text = "";
+                    root.confirm-done(false);
+                    return accept;
+                }
+            }
             if e.text == Key.F11 {
                 root.toggle-fullscreen();
                 return accept;
@@ -405,13 +454,12 @@ export component MainWindow inherits Window {
     }
 
     // ------------------------------------------------------------ main area
-    // In fullscreen the area starts below the top edge strip, which a plugin
-    // editor would otherwise cover.
+    // The whole window below the docked track bar and above the keyboard.
     editor-area := Rectangle {
-        x: root.strip-width;
-        y: root.docked ? root.top-inset : root.strip-width;
-        width: root.width - 2 * root.strip-width;
-        height: root.height - self.y - root.bottom-inset;
+        x: 0;
+        y: root.top-inset;
+        width: root.width;
+        height: root.height - self.y - root.keyboard-height;
         clip: true;
         changed x => { root.area-changed(); }
         changed y => { root.area-changed(); }
@@ -545,66 +593,13 @@ export component MainWindow inherits Window {
         octave(d) => { root.piano-octave(d); }
         close => { Options.set-keyboard(false); }
     }
-    if !root.keyboard-visible: BottomStrip {
+    bottom-strip := BottomStrip {
+        visible: !root.keyboard-visible;
         x: root.strip-width;
         width: root.width - 2 * root.strip-width;
         y: root.height - root.strip-width;
         height: root.strip-width;
         open => { Options.set-keyboard(true); }
-    }
-
-    // -------------------------------------------------------- edge strips
-    EdgeStrip {
-        x: 0;
-        y: root.top-inset;
-        width: root.strip-width;
-        height: root.height - root.top-inset;
-        icon: Icons.menu-line;
-        panel-width: root.left-width;
-        drag(a) => {
-            root.left-dragging = true;
-            root.left-pos = a;
-        }
-        release(a, open) => {
-            root.left-dragging = false;
-            if open { root.open-left(); } else { root.close-left(); }
-        }
-        tap => { root.open-left(); }
-    }
-    EdgeStrip {
-        x: root.width - root.strip-width;
-        y: root.top-inset;
-        width: root.strip-width;
-        height: root.height - root.top-inset;
-        right-side: true;
-        icon: Icons.system-line;
-        panel-width: root.right-width;
-        drag(a) => {
-            root.right-dragging = true;
-            root.right-pos = a;
-        }
-        release(a, open) => {
-            root.right-dragging = false;
-            if open { root.open-right(); } else { root.close-right(); }
-        }
-        tap => { root.open-right(); }
-    }
-
-    if !root.docked: TopStrip {
-        x: root.strip-width;
-        y: 0;
-        width: root.width - 2 * root.strip-width;
-        height: root.strip-width;
-        bar-height: root.bar-height;
-        drag(a) => {
-            root.top-dragging = true;
-            root.top-pos = a;
-        }
-        release(open) => {
-            root.top-dragging = false;
-            if open { root.open-top(); } else { root.close-top(); }
-        }
-        tap => { root.open-top(); }
     }
 
     // Docked track bar (windowed).
@@ -747,6 +742,73 @@ export component MainWindow inherits Window {
         dismiss => { root.close-top(); }
     }
 
+    // -------------------------------------------------------- edge strips
+    // Above the sidebars' scrims, so one sidebar can be pulled out while the
+    // other (or the fullscreen track bar) is open: that one then closes. A
+    // strip is gone while its own panel is open.
+    left-strip := EdgeStrip {
+        visible: root.left-pos == 0 || root.left-dragging;
+        x: 0;
+        y: max(root.top-inset, !root.docked ? root.top-shown : 0);
+        width: root.strip-width;
+        height: root.height - self.y;
+        icon: Icons.menu-line;
+        panel-width: root.left-width;
+        drag(a) => {
+            root.left-dragging = true;
+            root.right-pos = 0;
+            root.top-pos = 0;
+            root.left-pos = a;
+        }
+        release(a, open) => {
+            root.left-dragging = false;
+            if open { root.open-left(); } else { root.close-left(); }
+        }
+        tap => { root.open-left(); }
+    }
+    right-strip := EdgeStrip {
+        visible: root.right-pos == 0 || root.right-dragging;
+        x: root.width - root.strip-width;
+        y: max(root.top-inset, !root.docked ? root.top-shown : 0);
+        width: root.strip-width;
+        height: root.height - self.y;
+        right-side: true;
+        icon: Icons.system-line;
+        panel-width: root.right-width;
+        drag(a) => {
+            root.right-dragging = true;
+            root.left-pos = 0;
+            root.top-pos = 0;
+            root.right-pos = a;
+        }
+        release(a, open) => {
+            root.right-dragging = false;
+            if open { root.open-right(); } else { root.close-right(); }
+        }
+        tap => { root.open-right(); }
+    }
+
+    // Clear of an open sidebar, so it does not cover the sidebar's top.
+    top-strip := TopStrip {
+        visible: !root.docked && (root.top-pos == 0 || root.top-dragging);
+        x: root.left-pos > 0 ? root.left-width : root.strip-width;
+        y: 0;
+        width: (root.right-pos > 0 ? root.width - root.right-width : root.width - root.strip-width) - self.x;
+        height: root.strip-width;
+        bar-height: root.bar-height;
+        drag(a) => {
+            root.top-dragging = true;
+            root.left-pos = 0;
+            root.right-pos = 0;
+            root.top-pos = a;
+        }
+        release(open) => {
+            root.top-dragging = false;
+            if open { root.open-top(); } else { root.close-top(); }
+        }
+        tap => { root.open-top(); }
+    }
+
     // ------------------------------------------------------------- overlays
     if root.browser-open: PluginBrowser {
         plugins: root.browser-plugins;
@@ -762,6 +824,7 @@ export component MainWindow inherits Window {
         pick(k) => { root.browser-pick(k); }
         toggle-favorite(k) => { root.browser-favorite(k); }
         rescan => { root.rescan(); }
+        prompt-open: root.prompt-open;
         close => { root.browser-open = false; }
         request-keyboard => { root.browser-keyboard(); }
     }

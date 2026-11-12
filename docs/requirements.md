@@ -78,7 +78,7 @@ The app runs fullscreen by default, and the selected plugin's editor is shown in
 - Starts fullscreen by default; can also run in a resizable window
 - Toggle between fullscreen and windowed from the options sidebar or a keyboard shortcut
 - Remember window size and mode between launches
-- The selected plugin's editor is shown in the main area between the two sidebar strips, never as a separate window
+- The selected plugin's editor is shown in the main area, which reaches the window's edges (the edge strips still work over it), never as a separate window
 - Editors are shown at their own size; editors that can resize fill the area
 - Plugins without an editor get a generic parameter page with large sliders
 

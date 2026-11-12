@@ -17,6 +17,9 @@ export global TextUtil {
 export component BigButton inherits Rectangle {
     in property <string> text;
     in property <string> icon;
+    // A drawn icon (paths from `Icons`), used instead of `icon`.
+    in property <string> icon-line;
+    in property <string> icon-solid;
     in property <bool> primary: false;
     in property <bool> danger: false;
     in property <bool> enabled: true;
@@ -42,6 +45,17 @@ export component BigButton inherits Rectangle {
         padding-right: Theme.pad;
         spacing: 8px;
         alignment: center;
+        if root.icon-line != "" || root.icon-solid != "": Icon {
+            y: (parent.height - self.height) / 2;
+            width: 22px;
+            height: 22px;
+            line: root.icon-line;
+            solid: root.icon-solid;
+            weight: 1.8;
+            tint: root.primary && root.enabled ? Theme.on-paint
+                : root.danger ? Theme.danger.brighter(30%)
+                : Theme.text;
+        }
         if root.icon != "": Text {
             text: root.icon;
             font-size: Theme.font-large;

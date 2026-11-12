@@ -121,6 +121,8 @@ pub struct App {
     /// What the editor host was last told: the main area, and the part of
     /// it nothing covers.
     editor_area: Option<(Area, Area)>,
+    /// The edge strips last sent to the editor host, with the main window.
+    edge_state: Option<(u32, Vec<Area>)>,
     system: SystemWorker,
     midi: MidiListener,
     learning: Option<(SlotId, MidiAction)>,
@@ -256,6 +258,7 @@ impl App {
             tried_fallback: false,
             embed_available: editor_host.is_some(),
             editor_area: None,
+            edge_state: None,
             editor_host,
             system: SystemWorker::spawn(),
             midi,
@@ -452,8 +455,11 @@ impl App {
             });
         }
         on!(ui, on_add_track, |a| {
-            a.view_track = a.rig.add_track(None);
+            let id = a.rig.add_track(None);
             a.rig_changed();
+            // Show the new (empty) track: the previous track's plugin editor
+            // goes away rather than look as if it were on the new track.
+            a.select_track(id);
         });
         on!(ui, on_rename_track, |a| {
             let name = a
@@ -758,6 +764,7 @@ impl App {
         if self.editor.is_some() {
             self.place_editor();
         }
+        self.place_edges();
         while let Ok(e) = self.system.events.try_recv() {
             self.on_system_event(e);
         }
@@ -1691,8 +1698,69 @@ impl App {
         }
     }
 
+    /// Tells the editor host where the edge strips are (see
+    /// `HostCommand::SetEdges`), so they work over an editor too.
+    fn place_edges(&mut self) {
+        if !self.embed_available || self.editor_host.is_none() {
+            return;
+        }
+        let Some(parent) = self
+            .edge_state
+            .as_ref()
+            .map(|e| e.0)
+            .or_else(|| self.main_x11_window())
+        else {
+            return;
+        };
+        let ui = self.ui();
+        let scale = ui.window().scale_factor();
+        let size = ui.window().size();
+        let (w, h) = (size.width as f32 / scale, size.height as f32 / scale);
+        let sw = ui.get_strip_width();
+        let (top, bottom) = (ui.get_edge_top(), ui.get_edge_bottom());
+        let rect = |x: f32, y: f32, rw: f32, rh: f32| {
+            let (x0, y0) = ((x * scale).round(), (y * scale).round());
+            let x1 = ((x + rw.max(0.0)) * scale).round();
+            let y1 = ((y + rh.max(0.0)) * scale).round();
+            Area {
+                x: x0 as i32,
+                y: y0 as i32,
+                width: (x1 - x0).max(0.0) as u32,
+                height: (y1 - y0).max(0.0) as u32,
+            }
+        };
+        let none = Area::default();
+        let edges = vec![
+            rect(0.0, top, sw, bottom - top),
+            rect(w - sw, top, sw, bottom - top),
+            if ui.get_edge_top_strip() {
+                rect(sw, 0.0, w - 2.0 * sw, sw)
+            } else {
+                none
+            },
+            if ui.get_edge_bottom_strip() {
+                rect(sw, h - sw, w - 2.0 * sw, sw)
+            } else {
+                none
+            },
+        ];
+        if self.edge_state.as_ref() != Some(&(parent, edges.clone())) {
+            if let Some(host) = &self.editor_host {
+                host.send(HostCommand::SetEdges {
+                    parent,
+                    edges: edges.clone(),
+                });
+            }
+            self.edge_state = Some((parent, edges));
+        }
+    }
+
     fn on_host_event(&mut self, e: HostEvent) {
         match e {
+            HostEvent::ToggleFullscreen => {
+                let fs = !self.settings.display.fullscreen;
+                self.set_fullscreen(fs);
+            }
             HostEvent::Attached { key, .. } => {
                 if self.editor.as_ref().is_some_and(|ed| ed.slot.0 == key) {
                     self.ui().set_editor_mode(ss("embedded"));

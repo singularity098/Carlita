@@ -7,7 +7,7 @@
 
 use carlita_x11::*;
 use std::time::{Duration, Instant};
-use x11rb::connection::Connection;
+use x11rb::connection::{Connection, RequestConnection as _};
 use x11rb::properties::WmSizeHints;
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
@@ -264,4 +264,163 @@ fn finds_an_editor_with_its_own_title() {
     assert_eq!(parent_of(&conn, other), root);
     host.send(HostCommand::Detach { key: 7 });
     until(|| parent_of(&conn, editor) == root);
+}
+
+/// The edge windows pass clicks over an editor on to the main window, F11
+/// is reported even while the editor has the keyboard focus, and the focus
+/// goes back to the main window when the pointer leaves the editor.
+#[test]
+fn edges_f11_and_focus() {
+    use x11rb::protocol::xtest::ConnectionExt as _;
+    if std::env::var_os("DISPLAY").is_none() {
+        eprintln!("no DISPLAY; skipping");
+        return;
+    }
+    let _x = X_SERVER.lock().unwrap_or_else(|e| e.into_inner());
+    let (conn, screen) = x11rb::connect(None).unwrap();
+    let root = conn.setup().roots[screen].root;
+    if conn
+        .extension_information(x11rb::protocol::xtest::X11_EXTENSION_NAME)
+        .unwrap()
+        .is_none()
+    {
+        eprintln!("no XTEST; skipping");
+        return;
+    }
+
+    let main = window(&conn, root, 800, 600, b"carlita-test-main-2");
+    conn.change_window_attributes(
+        main,
+        &ChangeWindowAttributesAux::new().event_mask(EventMask::BUTTON_PRESS),
+    )
+    .unwrap();
+    conn.map_window(main).unwrap();
+    let editor = window(&conn, root, 200, 100, b"carlita-editor-7");
+    let mut hints = WmSizeHints::new();
+    hints.min_size = Some((200, 100));
+    hints.max_size = Some((200, 100));
+    hints.set_normal_hints(&conn, editor).unwrap();
+    conn.change_window_attributes(
+        editor,
+        &ChangeWindowAttributesAux::new().event_mask(EventMask::BUTTON_PRESS),
+    )
+    .unwrap();
+    conn.map_window(editor).unwrap();
+    conn.flush().unwrap();
+
+    let host = EditorHost::spawn();
+    let area = Area {
+        x: 0,
+        y: 0,
+        width: 800,
+        height: 600,
+    };
+    host.send(HostCommand::SetArea {
+        area,
+        uncovered: area,
+    });
+    host.send(HostCommand::Attach {
+        key: 7,
+        title: "carlita-editor-7".into(),
+        parent: main,
+    });
+    wait(&host, |e| match e {
+        HostEvent::Attached { .. } => Some(()),
+        HostEvent::NotFound { .. } => panic!("window not found"),
+        _ => None,
+    });
+    // The editor is centred: x 300..500, y 250..350. An edge strip covers
+    // the left half of the window, and so the editor's left half.
+    host.send(HostCommand::SetEdges {
+        parent: main,
+        edges: vec![Area {
+            x: 0,
+            y: 0,
+            width: 400,
+            height: 600,
+        }],
+    });
+    let viewable = |w| {
+        conn.get_window_attributes(w)
+            .unwrap()
+            .reply()
+            .unwrap()
+            .map_state
+            == MapState::VIEWABLE
+    };
+    until(|| viewable(editor));
+    until(|| {
+        let children = conn.query_tree(main).unwrap().reply().unwrap().children;
+        children.len() == 2 && viewable(*children.last().unwrap())
+    });
+    let main_at = conn
+        .translate_coordinates(main, root, 0, 0)
+        .unwrap()
+        .reply()
+        .unwrap();
+    let (ox, oy) = (main_at.dst_x, main_at.dst_y);
+
+    // Drains this connection's events and returns the windows clicked.
+    let clicked = |conn: &RustConnection| {
+        conn.sync().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let mut out = Vec::new();
+        while let Some(ev) = conn.poll_for_event().unwrap() {
+            if let x11rb::protocol::Event::ButtonPress(b) = ev {
+                out.push(b.event);
+            }
+        }
+        out
+    };
+    let click = |x: i16, y: i16| {
+        conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, ox + x, oy + y, 0)
+            .unwrap();
+        conn.xtest_fake_input(BUTTON_PRESS_EVENT, 1, 0, root, 0, 0, 0)
+            .unwrap();
+        conn.xtest_fake_input(BUTTON_RELEASE_EVENT, 1, 0, root, 0, 0, 0)
+            .unwrap();
+    };
+    clicked(&conn);
+    // Over the editor and the strip: the main window gets the click.
+    click(350, 300);
+    assert_eq!(clicked(&conn), vec![main]);
+    // Over the editor alone: the editor does.
+    click(450, 300);
+    assert_eq!(clicked(&conn), vec![editor]);
+
+    // F11 while the editor has the keyboard focus.
+    conn.set_input_focus(InputFocus::PARENT, editor, x11rb::CURRENT_TIME)
+        .unwrap();
+    let setup = conn.setup();
+    let (min, max) = (setup.min_keycode, setup.max_keycode);
+    let map = conn
+        .get_keyboard_mapping(min, max - min + 1)
+        .unwrap()
+        .reply()
+        .unwrap();
+    let per = map.keysyms_per_keycode as usize;
+    let f11 = min
+        + map
+            .keysyms
+            .chunks(per)
+            .position(|s| s.contains(&0xffc8))
+            .unwrap() as u8;
+    conn.xtest_fake_input(KEY_PRESS_EVENT, f11, 0, root, 0, 0, 0)
+        .unwrap();
+    conn.xtest_fake_input(KEY_RELEASE_EVENT, f11, 0, root, 0, 0, 0)
+        .unwrap();
+    conn.flush().unwrap();
+    wait(&host, |e| {
+        matches!(e, HostEvent::ToggleFullscreen).then_some(())
+    });
+
+    // The pointer leaves the editor: the main window gets the focus back.
+    let focus = |conn: &RustConnection| conn.get_input_focus().unwrap().reply().unwrap().focus;
+    assert_eq!(focus(&conn), editor);
+    conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, ox + 700, oy + 50, 0)
+        .unwrap();
+    conn.flush().unwrap();
+    until(|| focus(&conn) == main);
+
+    drop(host);
 }
