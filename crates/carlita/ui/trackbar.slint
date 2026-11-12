@@ -3,11 +3,18 @@
 // top in windowed mode; in fullscreen it slides in from the top edge.
 import { Theme } from "theme.slint";
 import { TrackItem } from "types.slint";
+import { Icon, Icons } from "icons.slint";
 
 component TrackTab inherits Rectangle {
     in property <TrackItem> item;
+    // Whether the tab offers to close its track (not the last, empty one).
+    in property <bool> closable: true;
     callback clicked;
+    callback close;
 
+    // The close button keeps its room whether shown or not, so tabs do not
+    // move when the mouse comes over one.
+    property <bool> show-close: root.closable && (root.item.selected || touch.has-hover || close-touch.has-hover);
     height: 40px;
     min-width: max(96px, row.preferred-width);
     horizontal-stretch: 0;
@@ -33,9 +40,14 @@ component TrackTab inherits Rectangle {
         background: Theme.paint;
     }
 
+    // Under the row, so the close button gets its own taps.
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
     row := HorizontalLayout {
         padding-left: 16px;
-        padding-right: 16px;
+        padding-right: root.closable ? 6px : 16px;
         spacing: 10px;
         alignment: center;
         Text {
@@ -67,11 +79,30 @@ component TrackTab inherits Rectangle {
                 background: root.item.level >= 0.99 ? Theme.danger : root.item.level > 0.7 ? Theme.warn : Theme.ok;
             }
         }
+        // Close: on the selected tab, and on any tab the mouse is over.
+        Rectangle {
+            visible: root.closable;
+            opacity: root.show-close ? 1 : 0;
+            width: root.closable ? 28px : 0;
+            height: 28px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 14px;
+            background: close-touch.pressed ? Theme.danger : close-touch.has-hover ? Theme.pressed : transparent;
+            Icon {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 14px;
+                height: 14px;
+                line: Icons.close;
+                weight: 2.4;
+                tint: close-touch.pressed ? #fff : close-touch.has-hover ? Theme.text : Theme.text-dim;
+            }
+            close-touch := TouchArea {
+                clicked => { root.close(); }
+            }
+        }
     }
 
-    touch := TouchArea {
-        clicked => { root.clicked(); }
-    }
 }
 
 // A window control, its icon drawn as a path in a 14 × 14 box.
@@ -108,6 +139,7 @@ export component TrackBar inherits Rectangle {
     in property <bool> fullscreen;
     in property <bool> maximized;
     callback tab-clicked(int, bool);
+    callback close-track(int);
     callback add-track;
     // Windowed: start moving the window, or maximize on a double tap.
     callback start-drag;
@@ -181,7 +213,9 @@ export component TrackBar inherits Rectangle {
                 alignment: start;
                 for t in root.tracks: TrackTab {
                     item: t;
+                    closable: root.tracks.length > 1;
                     clicked => { root.tab-clicked(t.id, t.selected); }
+                    close => { root.close-track(t.id); }
                 }
                 Rectangle {
                     width: 48px;

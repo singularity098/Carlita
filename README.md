@@ -21,7 +21,10 @@ touchscreen.
   window manager's title bar. In fullscreen, swipe down from the **top** edge
   to bring it in.
 * Swipe in from the **left** edge for the chain and from the **right** edge
-  for options (audio, presets, MIDI learn, WiFi, Bluetooth, display, system).
+  for options (audio, presets, MIDI learn, WiFi, Bluetooth, display, system),
+  and up from the **bottom** edge for the on-screen piano. With a mouse, a
+  tab shows when the pointer is at an edge. Each panel has a button that
+  folds it away again.
 * The selected plugin's editor is shown inside Carlita's window, in the main
   area (editors that can resize fill it).
 * A flat dark look and a choice of themes (Display options).

@@ -18,6 +18,7 @@ import { PluginBrowser } from "browser.slint";
 import { OptionsPanel, Options } from "options.slint";
 import { TextPrompt, Piano, TextUtil } from "keyboards.slint";
 import { TrackBar } from "trackbar.slint";
+import { Icon, Icons } from "icons.slint";
 
 export { Theme, ThemeLook, Options, TextUtil, SlotItem, TrackItem, PluginItem, ParamItem, WifiItem, BtItem, MappingItem }
 
@@ -26,6 +27,7 @@ component EdgeStrip inherits Rectangle {
     in property <bool> right-side;
     in property <length> panel-width;
     in property <string> icon;
+    in property <string> icon-solid;
     // Called continuously while dragging (0..1) and once on release.
     callback drag(float);
     callback release(float, bool);
@@ -42,15 +44,16 @@ component EdgeStrip inherits Rectangle {
         x: root.right-side ? root.width - self.width : 0;
         y: (root.height - self.height) / 2;
         border-radius: 10px;
-        background: tab-touch.pressed ? Theme.paint : Theme.popup;
+        // See-through, so it does not hide what is under it.
+        background: tab-touch.pressed ? Theme.paint : #00000073;
         border-width: 1px;
-        border-color: tab-touch.pressed ? transparent : Theme.border-strong;
-        Text {
-            text: root.icon;
-            font-size: 22px;
-            color: tab-touch.pressed ? Theme.on-paint : Theme.text;
-            horizontal-alignment: center;
-            vertical-alignment: center;
+        border-color: tab-touch.pressed ? transparent : Theme.border-hover;
+        Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            line: root.icon;
+            solid: root.icon-solid;
+            tint: tab-touch.pressed ? Theme.on-paint : Theme.text;
         }
         tab-touch := TouchArea {
             clicked => { root.tap(); }
@@ -95,8 +98,9 @@ component TopStrip inherits Rectangle {
         x: (root.width - self.width) / 2;
         y: 0;
         border-radius: 10px;
-        background: tab-touch.pressed ? Theme.paint : Theme.popup;
-        opacity: 0.92;
+        background: tab-touch.pressed ? Theme.paint : #00000073;
+        border-width: 1px;
+        border-color: tab-touch.pressed ? transparent : Theme.border-hover;
         Text {
             text: "Tracks";
             font-size: Theme.font-small;
@@ -125,6 +129,50 @@ component TopStrip inherits Rectangle {
                     root.release(root.amount > 0.33);
                 }
                 root.amount = 0;
+            }
+        }
+    }
+}
+
+// The strip along the bottom edge while the on-screen keyboard is hidden:
+// swipe up (or tap the tab that shows while the mouse hovers it) to bring
+// the keyboard in.
+component BottomStrip inherits Rectangle {
+    callback open;
+
+    tab := Rectangle {
+        visible: strip.has-hover || tab-touch.has-hover;
+        width: 120px;
+        height: 36px;
+        x: (root.width - self.width) / 2;
+        y: root.height - self.height;
+        border-radius: 10px;
+        background: tab-touch.pressed ? Theme.paint : #00000073;
+        border-width: 1px;
+        border-color: tab-touch.pressed ? transparent : Theme.border-hover;
+        Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            line: Icons.keys-line;
+            solid: Icons.keys-solid;
+            weight: 1.6;
+            tint: tab-touch.pressed ? Theme.on-paint : Theme.text;
+        }
+        tab-touch := TouchArea {
+            clicked => { root.open(); }
+        }
+    }
+
+    strip := TouchArea {
+        moved => {
+            if self.pressed-y - self.mouse-y > 24px {
+                root.open();
+            }
+        }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.up && e.button == PointerEventButton.left
+                && abs(self.mouse-y - self.pressed-y) < 4px {
+                root.open();
             }
         }
     }
@@ -263,6 +311,8 @@ export component MainWindow inherits Window {
     in property <bool> keyboard-visible;
     in property <int> keyboard-base: 48;
     property <length> keyboard-height: root.keyboard-visible ? min(220px, root.height * 0.3) : 0;
+    // What the bottom edge takes: the keyboard, or the strip that brings it in.
+    property <length> bottom-inset: root.keyboard-visible ? root.keyboard-height : root.strip-width;
 
     // ----------------------------------------------------------- callbacks
     callback select-slot(int);
@@ -275,6 +325,7 @@ export component MainWindow inherits Window {
     callback remove-lane(int);
     callback add-to-lane(int);
     callback select-track(int);
+    callback close-track(int);
     callback start-drag;
     callback start-resize(string);
     callback minimize-window;
@@ -316,6 +367,29 @@ export component MainWindow inherits Window {
     forward-focus: keys;
     keys := FocusScope {
         key-pressed(e) => {
+            // The text prompt takes typing from a hardware keyboard too:
+            // Return accepts, Escape cancels.
+            if root.prompt-open {
+                if e.text == Key.Return {
+                    root.prompt-open = false;
+                    root.prompt-done(true, root.prompt-text);
+                    return accept;
+                }
+                if e.text == Key.Escape {
+                    root.prompt-open = false;
+                    root.prompt-done(false, "");
+                    return accept;
+                }
+                if e.text == Key.Backspace {
+                    root.prompt-text = TextUtil.drop-last(root.prompt-text);
+                    return accept;
+                }
+                if !e.modifiers.control && !e.modifiers.meta && TextUtil.is-text(e.text) {
+                    root.prompt-text += e.text;
+                    return accept;
+                }
+                return accept;
+            }
             if e.text == Key.F11 {
                 root.toggle-fullscreen();
                 return accept;
@@ -337,7 +411,7 @@ export component MainWindow inherits Window {
         x: root.strip-width;
         y: root.docked ? root.top-inset : root.strip-width;
         width: root.width - 2 * root.strip-width;
-        height: root.height - self.y - root.keyboard-height;
+        height: root.height - self.y - root.bottom-inset;
         clip: true;
         changed x => { root.area-changed(); }
         changed y => { root.area-changed(); }
@@ -469,6 +543,14 @@ export component MainWindow inherits Window {
         octaves: root.width > 1100px ? 4 : root.width > 800px ? 3 : 2;
         note(n, on) => { root.piano-note(n, on); }
         octave(d) => { root.piano-octave(d); }
+        close => { Options.set-keyboard(false); }
+    }
+    if !root.keyboard-visible: BottomStrip {
+        x: root.strip-width;
+        width: root.width - 2 * root.strip-width;
+        y: root.height - root.strip-width;
+        height: root.strip-width;
+        open => { Options.set-keyboard(true); }
     }
 
     // -------------------------------------------------------- edge strips
@@ -477,7 +559,7 @@ export component MainWindow inherits Window {
         y: root.top-inset;
         width: root.strip-width;
         height: root.height - root.top-inset;
-        icon: "☰";
+        icon: Icons.menu-line;
         panel-width: root.left-width;
         drag(a) => {
             root.left-dragging = true;
@@ -495,7 +577,7 @@ export component MainWindow inherits Window {
         width: root.strip-width;
         height: root.height - root.top-inset;
         right-side: true;
-        icon: "⚙";
+        icon: Icons.system-line;
         panel-width: root.right-width;
         drag(a) => {
             root.right-dragging = true;
@@ -537,6 +619,7 @@ export component MainWindow inherits Window {
         tab-clicked(id, selected) => {
             if selected { root.open-left(); } else { root.select-track(id); }
         }
+        close-track(id) => { root.close-track(id); }
         add-track => {
             root.add-track();
             root.open-left();
@@ -648,6 +731,10 @@ export component MainWindow inherits Window {
         tab-clicked(id, selected) => {
             root.close-top();
             if selected { root.open-left(); } else { root.select-track(id); }
+        }
+        close-track(id) => {
+            root.close-top();
+            root.close-track(id);
         }
         add-track => {
             root.add-track();

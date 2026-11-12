@@ -68,6 +68,8 @@ Swiping in from the right edge opens settings, including WiFi and Bluetooth.
 - **System:** app version, rescan plugins, restart app, shut down / reboot the PC
 - Toggles apply immediately; no separate Save step
 - Also has a button which can toggle on/off a virtual musical keyboard on the bottom of the screen, which may be used to send midi notes to the plugins
+  - While hidden, a strip on the bottom edge brings it in (swipe up, or the translucent tab that shows while the mouse hovers there); while shown, a button folds it away
+  - Holding the mouse button (or a finger) and sliding across the keys plays every key passed over
 
 ## Display and plugin editors
 

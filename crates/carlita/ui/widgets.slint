@@ -1,5 +1,18 @@
 // Large, touch-friendly building blocks.
 import { Theme } from "theme.slint";
+import { Icon } from "icons.slint";
+
+// String helpers implemented in Rust (Slint has no substring operations).
+export global TextUtil {
+    pure callback drop-last(string) -> string;
+    pure callback mask(string) -> string;
+    // Whether a key press is text to type (not Backspace, an arrow, ...).
+    pure callback is-text(string) -> bool;
+    // A MIDI port's name without the repeated device name and the ALSA
+    // client:port numbers ("Scarlett 18i20 USB:Scarlett 18i20 USB MIDI 1
+    // 24:0" becomes "Scarlett 18i20 USB MIDI 1").
+    pure callback port-label(string) -> string;
+}
 
 export component BigButton inherits Rectangle {
     in property <string> text;
@@ -40,6 +53,9 @@ export component BigButton inherits Rectangle {
             font-size: Theme.font;
             font-weight: root.primary ? Theme.regular : Theme.light;
             vertical-alignment: center;
+            // Long labels are cut short with "…" rather than drawn outside
+            // the button.
+            overflow: elide;
             color: root.primary && root.enabled ? Theme.on-paint : Theme.text;
         }
     }
@@ -93,7 +109,8 @@ export component Chip inherits Rectangle {
     callback clicked;
 
     height: 44px;
-    min-width: label.preferred-width + 28px;
+    preferred-width: label.preferred-width + 28px;
+    min-width: min(label.preferred-width + 28px, 72px);
     horizontal-stretch: 0;
     border-radius: 22px;
     background: root.selected ? Theme.paint : touch.pressed ? Theme.pressed : Theme.surface-2;
@@ -101,12 +118,15 @@ export component Chip inherits Rectangle {
     border-color: root.selected ? transparent : touch.has-hover ? Theme.border-hover : Theme.border-strong;
 
     label := Text {
+        x: 14px;
+        width: parent.width - 28px;
         text: root.text;
         font-size: Theme.font-small;
         font-weight: Theme.regular;
         color: root.selected ? Theme.on-paint : Theme.text;
         horizontal-alignment: center;
         vertical-alignment: center;
+        overflow: elide;
     }
 
     touch := TouchArea {
@@ -237,5 +257,66 @@ export component BigSlider inherits Rectangle {
             }
         }
         moved => { self.set-from(self.mouse-x); }
+    }
+}
+
+// A small round button that folds a panel (or the keyboard) away.
+export component CollapseButton inherits Rectangle {
+    in property <string> icon;
+    callback clicked;
+    width: 44px;
+    height: 44px;
+    border-radius: 22px;
+    background: touch.pressed ? Theme.pressed : transparent;
+    border-width: 1px;
+    border-color: touch.has-hover ? Theme.border-hover : Theme.border-strong;
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 22px;
+        height: 22px;
+        line: root.icon;
+        tint: touch.pressed || touch.has-hover ? Theme.text : Theme.text-dim;
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// A list to pick one option from, one full-width row each: for names that
+// are too long for chips (devices, MIDI ports).
+export component ChoiceList inherits VerticalLayout {
+    in property <[string]> options;
+    in property <string> selected;
+    in property <string> empty-text: "None available";
+    // Show MIDI port names shortened (TextUtil.port-label).
+    in property <bool> ports;
+    callback picked(string);
+    spacing: 6px;
+    if root.options.length == 0: Text {
+        text: root.empty-text;
+        color: Theme.text-faint;
+        font-size: Theme.font-small;
+        font-weight: Theme.regular;
+    }
+    for o in root.options: Rectangle {
+        height: 48px;
+        border-radius: Theme.radius;
+        background: o == root.selected ? Theme.paint : touch.pressed ? Theme.pressed : Theme.surface-2;
+        border-width: 1px;
+        border-color: o == root.selected ? transparent : touch.has-hover ? Theme.border-hover : Theme.border-strong;
+        Text {
+            x: Theme.pad;
+            width: parent.width - 2 * Theme.pad;
+            text: root.ports ? TextUtil.port-label(o) : o;
+            font-size: Theme.font-small;
+            font-weight: Theme.regular;
+            color: o == root.selected ? Theme.on-paint : Theme.text;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        touch := TouchArea {
+            clicked => { root.picked(o); }
+        }
     }
 }
