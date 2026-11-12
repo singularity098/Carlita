@@ -25,6 +25,7 @@ fn main() -> anyhow::Result<()> {
                     "Usage: carlita [--windowed|--fullscreen] [--no-preset]\n\n\
                      Environment:\n  CARLITA_HOME        keep all settings/presets/cache below this folder\n  \
                      CARLA_LIB_DIR       folder with libcarla_standalone2 and Carla's bridges\n  \
+                     CARLITA_WAYLAND=1   open as a Wayland window (editors then open in their own windows)\n  \
                      SLINT_BACKEND       e.g. winit-software when no OpenGL is available"
                 );
                 return Ok(());
@@ -33,9 +34,36 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    use_x11()?;
     let ui = MainWindow::new()?;
     let app = app::App::new(&ui, opts)?;
     ui.run()?;
     app.borrow_mut().shutdown();
+    Ok(())
+}
+
+/// Opens the main window as an X11 window (through XWayland on a Wayland
+/// desktop). Plugin editors are X11 windows and are shown inside Carlita's
+/// window by reparenting them into it, which needs an X11 parent; as a
+/// Wayland window Carlita could only leave them as windows of their own.
+/// `CARLITA_WAYLAND=1` keeps a native Wayland window, and `SLINT_BACKEND`
+/// naming another backend is left alone.
+fn use_x11() -> anyhow::Result<()> {
+    use slint::winit_030::winit::{event_loop::EventLoop, platform::x11::EventLoopBuilderExtX11};
+    use slint::winit_030::SlintEvent;
+
+    if std::env::var_os("DISPLAY").is_none() || std::env::var_os("CARLITA_WAYLAND").is_some() {
+        return Ok(());
+    }
+    if std::env::var("SLINT_BACKEND").is_ok_and(|b| !b.to_lowercase().starts_with("winit")) {
+        return Ok(());
+    }
+    let mut builder = EventLoop::<SlintEvent>::with_user_event();
+    builder.with_x11();
+    slint::BackendSelector::new()
+        .backend_name("winit".into())
+        .with_winit_event_loop_builder(builder)
+        .select()?;
+    log::info!("using X11 for the main window, so plugin editors can be shown inside it");
     Ok(())
 }
