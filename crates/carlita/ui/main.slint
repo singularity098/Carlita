@@ -4,8 +4,10 @@
 // down from the top edge), a host-owned strip on each screen edge (always
 // ours, so edge swipes work even while a plugin editor fills the screen),
 // the plugin editor in between, and two sidebars that slide over it. A plugin
-// editor is a window of its own placed over the main area, so it is hidden
-// while anything covers that area (see `editor-covered`).
+// editor is a window of its own placed over the main area, which nothing
+// drawn here can cover: while a sidebar or the track bar slides over the
+// area, the editor is cut down to the part they leave (see `uncovered-x`),
+// and a snapshot of it is drawn under them; the browser and dialogs hide it.
 import "../../../assets/fonts/Jost-Light.ttf";
 import "../../../assets/fonts/Jost-Regular.ttf";
 import { Theme, ThemeLook } from "theme.slint";
@@ -172,6 +174,9 @@ export component MainWindow inherits Window {
     in-out property <float> top-pos: 0;
     property <bool> top-dragging;
     property <length> bar-height: 52px;
+    // How far the fullscreen track bar reaches down, following the slide.
+    property <length> top-shown: root.top-pos * root.bar-height;
+    animate top-shown { duration: root.top-dragging ? 0ms : Theme.slide; easing: ease-out; }
     property <bool> docked: !Options.fullscreen;
     property <length> top-inset: root.docked ? root.bar-height : 0;
     property <length> right-width: min(720px, root.width * 0.92);
@@ -202,15 +207,35 @@ export component MainWindow inherits Window {
     in property <string> editor-mode: "empty"; // empty | embedded | params | waiting | message
     in property <string> editor-title;
     in property <string> editor-message;
-    // Where a plugin's own editor window is placed (it sits above everything
-    // drawn here, so it is hidden while something covers the main area).
+    // Where a plugin's own editor window is placed. It sits above everything
+    // drawn here, so it is cut down to the part of the area that the
+    // sidebars, the fullscreen track bar and the toast leave uncovered
+    // (following them as they slide), and hidden under the browser and
+    // dialogs.
     out property <length> area-x: editor-area.x;
     out property <length> area-y: editor-area.y;
     out property <length> area-width: editor-area.width;
     out property <length> area-height: editor-area.height;
-    out property <bool> editor-covered: root.left-pos > 0 || root.right-pos > 0
-        || (!root.docked && root.top-pos > 0) || root.browser-open || root.prompt-open
-        || root.confirm-text != "" || root.toast != "";
+    property <bool> editor-hidden: root.browser-open || root.prompt-open || root.confirm-text != "";
+    property <length> uncovered-left: max(editor-area.x,
+        root.left-pos > 0 ? chain-panel.x + root.left-width : 0);
+    property <length> uncovered-right: min(editor-area.x + editor-area.width,
+        root.right-pos > 0 ? options-panel.x : root.width);
+    property <length> uncovered-top: max(editor-area.y,
+        !root.docked && root.top-pos > 0 ? root.top-shown : 0);
+    property <length> uncovered-bottom: min(editor-area.y + editor-area.height,
+        root.toast != "" ? toast-box.y : root.height);
+    out property <length> uncovered-x: root.uncovered-left;
+    out property <length> uncovered-y: root.uncovered-top;
+    out property <length> uncovered-width: root.editor-hidden ? 0 : max(0, root.uncovered-right - root.uncovered-left);
+    out property <length> uncovered-height: root.editor-hidden ? 0 : max(0, root.uncovered-bottom - root.uncovered-top);
+    // A picture of the editor taken just before something started to cover
+    // it, drawn where the editor is (window coordinates).
+    in property <image> editor-snapshot;
+    in property <length> snapshot-x;
+    in property <length> snapshot-y;
+    in property <length> snapshot-width;
+    in property <length> snapshot-height;
     in property <[ParamItem]> params;
 
     // Browser.
@@ -276,7 +301,10 @@ export component MainWindow inherits Window {
     callback piano-octave(int);
     callback toggle-fullscreen;
     callback options-page(int);
-    changed editor-covered => { root.area-changed(); }
+    changed uncovered-x => { root.area-changed(); }
+    changed uncovered-y => { root.area-changed(); }
+    changed uncovered-width => { root.area-changed(); }
+    changed uncovered-height => { root.area-changed(); }
 
     function open-left() { root.left-pos = 1; root.right-pos = 0; root.top-pos = 0; }
     function open-top() { root.top-pos = 1; root.left-pos = 0; root.right-pos = 0; }
@@ -316,9 +344,18 @@ export component MainWindow inherits Window {
         changed width => { root.area-changed(); }
         changed height => { root.area-changed(); }
 
-        // The editor window covers this; it shows while the editor is
-        // hidden under a sidebar or dialog.
-        if root.editor-mode == "embedded": Text {
+        // The editor window covers this. Where something covers the editor,
+        // its snapshot shows through, or its name if there is none yet.
+        if root.editor-mode == "embedded" && root.snapshot-width > 0: Image {
+            x: root.snapshot-x - editor-area.x;
+            y: root.snapshot-y - editor-area.y;
+            width: root.snapshot-width;
+            height: root.snapshot-height;
+            source: root.editor-snapshot;
+            image-fit: fill;
+            accessible-role: none;
+        }
+        if root.editor-mode == "embedded" && root.snapshot-width == 0: Text {
             text: root.editor-title;
             font-size: Theme.font-title;
             color: Theme.text-faint;
@@ -534,7 +571,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    ChainPanel {
+    chain-panel := ChainPanel {
         y: root.top-inset;
         width: root.left-width;
         height: root.height - root.top-inset;
@@ -580,7 +617,7 @@ export component MainWindow inherits Window {
         close => { root.close-left(); }
     }
 
-    OptionsPanel {
+    options-panel := OptionsPanel {
         y: root.top-inset;
         width: root.right-width;
         height: root.height - root.top-inset;
@@ -602,11 +639,10 @@ export component MainWindow inherits Window {
     }
     if !root.docked: TrackBar {
         x: 0;
-        y: (root.top-pos - 1) * root.bar-height;
+        y: root.top-shown - root.bar-height;
         width: root.width;
         height: root.bar-height;
         visible: root.top-pos > 0;
-        animate y { duration: root.top-dragging ? 0ms : Theme.slide; easing: ease-out; }
         tracks: root.tracks;
         fullscreen: true;
         tab-clicked(id, selected) => {
@@ -702,7 +738,10 @@ export component MainWindow inherits Window {
         }
     }
 
-    if root.toast != "": Rectangle {
+    // Always there (only shown with a message) so the editor can make room
+    // above it.
+    toast-box := Rectangle {
+        visible: root.toast != "";
         width: min(toast-text.preferred-width + 40px, root.width - 80px);
         height: max(52px, toast-text.preferred-height + 24px);
         x: (root.width - self.width) / 2;

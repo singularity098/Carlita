@@ -1,6 +1,8 @@
 //! Creates a fake main window and fake "plugin editor" windows, then checks
 //! that the editor host finds an editor by title, moves it into the main
-//! window's area, hides and shows it, and hands it back.
+//! window's area, cuts it down to the part an overlay leaves uncovered (with
+//! a snapshot of it for the covered part), hides and shows it, and hands it
+//! back.
 //! Needs an X server (CI uses Xvfb); skipped when DISPLAY is not set.
 
 use carlita_x11::*;
@@ -97,7 +99,7 @@ fn embeds_hides_and_hands_back() {
     };
     host.send(HostCommand::SetArea {
         area,
-        visible: true,
+        uncovered: area,
     });
     host.send(HostCommand::Attach {
         key: 42,
@@ -130,17 +132,55 @@ fn embeds_hides_and_hands_back() {
     };
     until(|| viewable(editor));
 
-    // Covered: hidden, but still embedded.
+    let geometry = |w| {
+        let g = conn.get_geometry(w).unwrap().reply().unwrap();
+        (g.x, g.y, g.width, g.height)
+    };
+
+    // A sidebar slides over the left 350 px: the holder keeps the part to
+    // its right, and the editor stays where it was inside it. A snapshot of
+    // the whole editor (red) comes first.
+    let left = Area {
+        x: 350,
+        y: 0,
+        width: 450,
+        height: 600,
+    };
     host.send(HostCommand::SetArea {
         area,
-        visible: false,
+        uncovered: left,
+    });
+    let (x, y, w, h, rgba) = wait(&host, |e| match e {
+        HostEvent::Snapshot {
+            key: 42,
+            x,
+            y,
+            width,
+            height,
+            rgba,
+        } => Some((x, y, width, height, rgba)),
+        _ => None,
+    });
+    assert_eq!((x, y, w, h), (300, 250, 200, 100));
+    assert_eq!(rgba.len(), 200 * 100 * 4);
+    assert_eq!(&rgba[..4], &[255, 0, 0, 255]);
+    until(|| geometry(holder) == (350, 250, 150, 100));
+    until(|| geometry(editor) == (-50, 0, 200, 100));
+    assert!(viewable(editor));
+
+    // Covered entirely: hidden, but still embedded.
+    host.send(HostCommand::SetArea {
+        area,
+        uncovered: Area::default(),
     });
     until(|| !viewable(holder));
     host.send(HostCommand::SetArea {
         area,
-        visible: true,
+        uncovered: area,
     });
     until(|| viewable(editor));
+    until(|| geometry(holder) == (300, 250, 200, 100));
+    until(|| geometry(editor) == (0, 0, 200, 100));
 
     // Detached: back to an unmapped top-level window.
     host.send(HostCommand::Detach { key: 42 });

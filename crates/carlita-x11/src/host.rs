@@ -6,7 +6,8 @@ use x11rb::connection::Connection;
 use x11rb::properties::WmSizeHints;
 use x11rb::protocol::xproto::{
     AtomEnum, ChangeWindowAttributesAux, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux,
-    EventMask, MapState, UnmapNotifyEvent, Window, WindowClass, UNMAP_NOTIFY_EVENT,
+    EventMask, ImageFormat, ImageOrder, MapState, UnmapNotifyEvent, Window, WindowClass,
+    UNMAP_NOTIFY_EVENT,
 };
 use x11rb::protocol::Event as XEvent;
 use x11rb::rust_connection::RustConnection;
@@ -31,6 +32,29 @@ pub struct Area {
     pub height: u32,
 }
 
+impl Area {
+    pub fn is_empty(&self) -> bool {
+        self.width == 0 || self.height == 0
+    }
+
+    /// The part both areas share (empty if none).
+    pub fn intersect(&self, o: &Area) -> Area {
+        let x0 = self.x.max(o.x);
+        let y0 = self.y.max(o.y);
+        let x1 = (self.x + self.width as i32).min(o.x + o.width as i32);
+        let y1 = (self.y + self.height as i32).min(o.y + o.height as i32);
+        if x1 <= x0 || y1 <= y0 {
+            return Area::default();
+        }
+        Area {
+            x: x0,
+            y: y0,
+            width: (x1 - x0) as u32,
+            height: (y1 - y0) as u32,
+        }
+    }
+}
+
 pub enum HostCommand {
     /// Look for the window titled `title` and show it inside `parent` (the
     /// main window's X11 id).
@@ -43,11 +67,12 @@ pub enum HostCommand {
     Detach {
         key: u64,
     },
-    /// Where editors are shown, and whether they are shown at all (hidden
-    /// while something covers the main area).
+    /// Where editors are shown (`area`), and the part of it nothing covers
+    /// (`uncovered`): an editor is cut down to that part while a sidebar or
+    /// the track bar slides over the area, and hidden when it is empty.
     SetArea {
         area: Area,
-        visible: bool,
+        uncovered: Area,
     },
     Shutdown,
 }
@@ -65,6 +90,18 @@ pub enum HostEvent {
     /// The editor window went away (closed or crashed).
     Lost {
         key: u64,
+    },
+    /// A picture of the editor as it was just before something started to
+    /// cover it, to draw where the editor is while it is cut down or hidden.
+    /// `x` and `y` are in physical pixels relative to the main window;
+    /// `rgba` holds `width * height` pixels.
+    Snapshot {
+        key: u64,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
     },
     Unavailable(String),
 }
@@ -138,6 +175,9 @@ struct Embedded {
     width: u32,
     height: u32,
     reembeds: u32,
+    /// While the holder is mapped: where the whole editor is, and the part
+    /// of it the holder shows (the rest is under an overlay).
+    shown: Option<(Area, Area)>,
 }
 
 struct Atoms {
@@ -155,7 +195,7 @@ struct Embedder {
     withdrawing: HashMap<u64, Withdrawing>,
     embedded: HashMap<u64, Embedded>,
     area: Area,
-    visible: bool,
+    uncovered: Area,
 }
 
 impl Embedder {
@@ -187,7 +227,7 @@ impl Embedder {
             withdrawing: HashMap::new(),
             embedded: HashMap::new(),
             area: Area::default(),
-            visible: false,
+            uncovered: Area::default(),
         })
     }
 
@@ -244,10 +284,10 @@ impl Embedder {
                 self.withdrawing.remove(&key);
                 self.release(key);
             }
-            HostCommand::SetArea { area, visible } => {
+            HostCommand::SetArea { area, uncovered } => {
                 let resized = area.width != self.area.width || area.height != self.area.height;
                 self.area = area;
-                self.visible = visible;
+                self.uncovered = uncovered;
                 for key in self.embedded.keys().copied().collect::<Vec<_>>() {
                     if resized {
                         self.fit_resizable(key);
@@ -450,6 +490,7 @@ impl Embedder {
                 width: geo.width as u32,
                 height: geo.height as u32,
                 reembeds: 0,
+                shown: None,
             },
         );
         self.fit_resizable(key);
@@ -498,27 +539,139 @@ impl Embedder {
         }
     }
 
-    /// Puts the holder in the middle of the area, as large as the editor but
-    /// no larger than the area (a larger editor is cut off at the right and
-    /// bottom), or hides it.
-    fn place(&self, key: u64) {
+    /// Puts the editor in the middle of the area, as large as it is but no
+    /// larger than the area (a larger editor is cut off at the right and
+    /// bottom). The holder covers only the part of it nothing else covers,
+    /// with the editor moved inside it so it stays where it is; when nothing
+    /// is left, the holder is hidden. Just before an overlay starts to cover
+    /// the whole editor, a snapshot of it is sent to draw in its place.
+    fn place(&mut self, key: u64) {
         let Some(e) = self.embedded.get(&key) else {
             return;
         };
         let a = self.area;
-        if !self.visible || a.width == 0 || a.height == 0 {
-            let _ = self.conn.unmap_window(e.holder);
+        let full = if a.is_empty() {
+            Area::default()
+        } else {
+            let w = e.width.min(a.width).max(1);
+            let h = e.height.min(a.height).max(1);
+            Area {
+                x: a.x + (a.width - w) as i32 / 2,
+                y: a.y + (a.height - h) as i32 / 2,
+                width: w,
+                height: h,
+            }
+        };
+        let part = full.intersect(&self.uncovered);
+        if e.shown == Some((full, full)) && part != full {
+            self.snapshot(key, full);
+        }
+        let e = self.embedded.get_mut(&key).unwrap();
+        if part.is_empty() {
+            if e.shown.take().is_some() {
+                let _ = self.conn.unmap_window(e.holder);
+            }
             return;
         }
-        let w = e.width.min(a.width).max(1);
-        let h = e.height.min(a.height).max(1);
-        let x = a.x + (a.width - w) as i32 / 2;
-        let y = a.y + (a.height - h) as i32 / 2;
-        let _ = self.conn.configure_window(
-            e.holder,
-            &ConfigureWindowAux::new().x(x).y(y).width(w).height(h),
-        );
-        let _ = self.conn.map_window(e.holder);
+        if e.shown.map(|s| s.1) != Some(part) || e.shown.map(|s| s.0) != Some(full) {
+            let _ = self.conn.configure_window(
+                e.window,
+                &ConfigureWindowAux::new()
+                    .x(full.x - part.x)
+                    .y(full.y - part.y),
+            );
+            let _ = self.conn.configure_window(
+                e.holder,
+                &ConfigureWindowAux::new()
+                    .x(part.x)
+                    .y(part.y)
+                    .width(part.width)
+                    .height(part.height),
+            );
+        }
+        if e.shown.is_none() {
+            let _ = self.conn.map_window(e.holder);
+        }
+        e.shown = Some((full, part));
+    }
+
+    /// Reads what the editor shows (it is uncovered, see `place`) and sends
+    /// it as RGBA.
+    fn snapshot(&self, key: u64, at: Area) {
+        let Some(e) = self.embedded.get(&key) else {
+            return;
+        };
+        match self.read_window(e.window, at.width, at.height) {
+            Ok(rgba) => self.emit(HostEvent::Snapshot {
+                key,
+                x: at.x,
+                y: at.y,
+                width: at.width,
+                height: at.height,
+                rgba,
+            }),
+            Err(err) => log::debug!("no editor snapshot: {err:#}"),
+        }
+    }
+
+    fn read_window(&self, w: Window, width: u32, height: u32) -> Result<Vec<u8>> {
+        let attrs = self.conn.get_window_attributes(w)?.reply()?;
+        let img = self
+            .conn
+            .get_image(
+                ImageFormat::Z_PIXMAP,
+                w,
+                0,
+                0,
+                width as u16,
+                height as u16,
+                !0,
+            )?
+            .reply()?;
+        let setup = self.conn.setup();
+        let visual = setup
+            .roots
+            .iter()
+            .flat_map(|s| &s.allowed_depths)
+            .flat_map(|d| &d.visuals)
+            .find(|v| v.visual_id == attrs.visual)
+            .context("unknown visual")?;
+        let bpp = setup
+            .pixmap_formats
+            .iter()
+            .find(|f| f.depth == img.depth)
+            .map(|f| f.bits_per_pixel)
+            .context("unknown pixmap format")?;
+        if bpp != 32 || img.depth < 24 {
+            anyhow::bail!("unsupported pixel format (depth {}, {bpp} bpp)", img.depth);
+        }
+        let n = (width * height) as usize;
+        if img.data.len() < n * 4 {
+            anyhow::bail!("short image");
+        }
+        let lsb = setup.image_byte_order == ImageOrder::LSB_FIRST;
+        let channel = |p: u32, mask: u32| -> u8 {
+            if mask == 0 {
+                return 0;
+            }
+            ((p & mask) >> mask.trailing_zeros()) as u8
+        };
+        let mut out = Vec::with_capacity(n * 4);
+        for px in img.data[..n * 4].chunks_exact(4) {
+            let b = [px[0], px[1], px[2], px[3]];
+            let p = if lsb {
+                u32::from_le_bytes(b)
+            } else {
+                u32::from_be_bytes(b)
+            };
+            out.extend_from_slice(&[
+                channel(p, visual.red_mask),
+                channel(p, visual.green_mask),
+                channel(p, visual.blue_mask),
+                255,
+            ]);
+        }
+        Ok(out)
     }
 
     /// Hands the editor window back as an unmapped top-level window (so it
@@ -604,6 +757,13 @@ impl Embedder {
                             } else {
                                 let (w, h) = (e.window, e.holder);
                                 self.reembed(w, h);
+                                // The editor is back at the holder's corner:
+                                // move it to where it belongs.
+                                let e = self.embedded.get_mut(&k).unwrap();
+                                if let Some((full, _)) = e.shown {
+                                    e.shown = Some((full, Area::default()));
+                                }
+                                self.place(k);
                             }
                         }
                     }

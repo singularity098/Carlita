@@ -10,8 +10,10 @@
 //! that can resize are given the whole area).
 //!
 //! An X11 child window always sits above what Slint draws, so the editor is
-//! hidden while a sidebar, the browser or a dialog covers the main area
-//! ([`HostCommand::SetArea`] with `visible: false`).
+//! cut down to the part of the main area that a sidebar or the track bar
+//! leaves uncovered, and hidden under the browser or a dialog
+//! ([`HostCommand::SetArea`]). A [`HostEvent::Snapshot`] of the editor is
+//! drawn where it is covered.
 
 mod host;
 
