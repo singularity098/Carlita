@@ -231,6 +231,7 @@ export component Piano inherits Rectangle {
             spacing: 6px;
             BigButton {
                 text: "+";
+                tip: "One octave up";
                 vertical-stretch: 1;
                 clicked => { root.octave(1); }
             }
@@ -244,6 +245,7 @@ export component Piano inherits Rectangle {
             }
             BigButton {
                 text: "−";
+                tip: "One octave down";
                 vertical-stretch: 1;
                 clicked => { root.octave(-1); }
             }
@@ -329,6 +331,7 @@ export component Piano inherits Rectangle {
             alignment: start;
             CollapseButton {
                 icon: Icons.chevron-down;
+                tip: "Hide the keyboard";
                 clicked => { root.close(); }
             }
         }

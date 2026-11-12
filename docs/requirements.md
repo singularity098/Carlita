@@ -61,12 +61,13 @@ Swiping in from the right edge opens settings, including WiFi and Bluetooth.
 
 - Opens with a swipe from a host-owned strip on the right screen edge, or a visible button
 - **Audio:** device, sample rate, buffer size, current latency
-- **Presets:** save, save as, load, rename, delete
+- **Presets:** save, save as, load, rename, delete; a preset remembers which plugin was shown (and each track's last shown plugin) and shows it again when loaded
 - **WiFi:** on/off toggle, list of networks, connect with an on-screen keyboard (via NetworkManager over D-Bus)
 - **Bluetooth:** on/off toggle, list of paired and nearby devices, pair and connect (via BlueZ over D-Bus)
-- **Display:** theme, fullscreen / windowed, brightness if the hardware supports it
-- **System:** app version, rescan plugins, restart app, shut down / reboot the PC
+- **Display:** theme, fullscreen / windowed, plugin editor size (100–200% on top of the desktop's scale, for touchscreens), brightness if the hardware supports it
+- **System:** icon buttons at the top of the sidebar whatever the page (rescan plugins, restart app, reboot, shut down), with Quit in the top right corner, where windows have their close button; the app version under the page title (decided 2026-11-12: no System page)
 - Toggles apply immediately; no separate Save step
+- Almost everything that can be pressed has a short hover tip (shown after the mouse rests on it ~0.6 s); the edge-strip tabs and the sidebar's page tabs do not need one
 - Also has a button which can toggle on/off a virtual musical keyboard on the bottom of the screen, which may be used to send midi notes to the plugins
   - While hidden, a strip on the bottom edge brings it in (swipe up, or the translucent tab that shows while the mouse hovers there); while shown, a button folds it away
   - Holding the mouse button (or a finger) and sliding across the keys plays every key passed over

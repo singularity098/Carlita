@@ -1,6 +1,6 @@
 // "Add plugin" browser: search, format and category filters, favorites.
 import { Theme } from "theme.slint";
-import { BigButton, Chip } from "widgets.slint";
+import { BigButton, Chip, Tip } from "widgets.slint";
 import { PluginItem } from "types.slint";
 import { LineEdit, ListView } from "std-widgets.slint";
 
@@ -72,11 +72,13 @@ export component PluginBrowser inherits Rectangle {
                     }
                     BigButton {
                         text: root.scanning ? "Scanning…" : "Rescan";
+                        tip: "Look for newly installed plugins";
                         enabled: !root.scanning;
                         clicked => { root.rescan(); }
                     }
                     BigButton {
                         icon: "✕";
+                        tip: "Close (Escape)";
                         clicked => { root.close(); }
                     }
                 }
@@ -92,10 +94,12 @@ export component PluginBrowser inherits Rectangle {
                     }
                     BigButton {
                         icon: "⌨";
+                        tip: "Type the search on the on-screen keyboard";
                         clicked => { root.request-keyboard(); }
                     }
                     Chip {
                         text: "★ Favorites";
+                        tip: root.favorites-only ? "Showing favorites only: tap to show every plugin" : "Show only your favorite plugins";
                         selected: root.favorites-only;
                         clicked => { root.filter-changed(root.search, root.format-filter, root.category-filter, !root.favorites-only); }
                     }
@@ -107,11 +111,13 @@ export component PluginBrowser inherits Rectangle {
                     alignment: start;
                     Chip {
                         text: "All formats";
+                        tip: "Show plugins of every format";
                         selected: root.format-filter == "";
                         clicked => { root.filter-changed(root.search, "", root.category-filter, root.favorites-only); }
                     }
                     for f in root.formats: Chip {
                         text: f;
+                        tip: "Show only " + f + " plugins";
                         selected: root.format-filter == f;
                         clicked => { root.filter-changed(root.search, f, root.category-filter, root.favorites-only); }
                     }
@@ -126,11 +132,13 @@ export component PluginBrowser inherits Rectangle {
                         alignment: start;
                         Chip {
                             text: "All categories";
+                            tip: "Show plugins of every category";
                             selected: root.category-filter == "";
                             clicked => { root.filter-changed(root.search, root.format-filter, "", root.favorites-only); }
                         }
                         for c in root.categories: Chip {
                             text: c;
+                            tip: "Show only " + c + " plugins";
                             selected: root.category-filter == c;
                             clicked => { root.filter-changed(root.search, root.format-filter, c, root.favorites-only); }
                         }
@@ -166,6 +174,11 @@ export component PluginBrowser inherits Rectangle {
                                 border-color: row-touch.has-hover ? Theme.border-hover : Theme.border-strong;
                                 row-touch := TouchArea {
                                     clicked => { root.pick(p.key); }
+                                }
+                                Tip {
+                                    text: "Add " + p.name + " to the end of the track";
+                                    hover: row-touch.has-hover;
+                                    pressed: row-touch.pressed;
                                 }
                                 HorizontalLayout {
                                     padding-left: Theme.pad;
@@ -208,8 +221,13 @@ export component PluginBrowser inherits Rectangle {
                                             horizontal-alignment: center;
                                             vertical-alignment: center;
                                         }
-                                        TouchArea {
+                                        fav-touch := TouchArea {
                                             clicked => { root.toggle-favorite(p.key); }
+                                        }
+                                        Tip {
+                                            text: p.favorite ? "Remove from favorites" : "Add to favorites";
+                                            hover: fav-touch.has-hover;
+                                            pressed: fav-touch.pressed;
                                         }
                                     }
                                 }

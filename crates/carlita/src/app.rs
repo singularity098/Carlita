@@ -11,6 +11,7 @@ use crate::{
 use carlita_core::midi::{self, BypassChange, MidiAction, MidiMapping, MidiMessage};
 use carlita_core::paths::AppPaths;
 use carlita_core::rig::{self, Location, Row, RowKind, Spot};
+use carlita_core::settings::DisplaySettings;
 use carlita_core::{
     CatalogFilter, ChainSlot, PluginCatalog, PluginCategory, PluginFormat, Preset, PresetStore,
     Rig, Settings, SlotId, TrackId,
@@ -351,6 +352,12 @@ impl App {
         let o = ui.global::<Options>();
         o.set_version(ss(env!("CARGO_PKG_VERSION")));
         o.set_fullscreen(d.fullscreen);
+        o.set_editor_zooms(strings(
+            DisplaySettings::EDITOR_ZOOMS
+                .iter()
+                .map(|z| format!("{z}%")),
+        ));
+        o.set_editor_zoom(ss(format!("{}%", d.editor_zoom)));
         o.set_keyboard_visible(self.settings.show_keyboard);
         self.refresh_audio_options();
         self.refresh_presets();
@@ -758,6 +765,29 @@ impl App {
             a.settings.display.theme = apply_theme(&a.ui(), &name);
             a.save_settings();
         });
+        on!(o, on_set_editor_zoom, |a, v: SharedString| {
+            let Ok(zoom) = v.trim_end_matches('%').trim().parse::<u32>() else {
+                return;
+            };
+            if zoom == a.settings.display.editor_zoom {
+                return;
+            }
+            a.settings.display.editor_zoom = zoom;
+            a.ui()
+                .global::<Options>()
+                .set_editor_zoom(ss(format!("{zoom}%")));
+            // Plugins read their scale when they start (bridges from their
+            // environment), so they are started again.
+            if a.engine_running {
+                a.restart_engine();
+                a.toast(
+                    format!("Plugin editors at {zoom}%: restarting the audio engine"),
+                    false,
+                );
+            } else {
+                a.save_settings();
+            }
+        });
         on!(o, on_set_brightness, |a, v: f32| {
             a.settings.display.brightness = Some(v.round() as u32);
             a.system.send(SysCmd::SetBrightness(v.round() as u32));
@@ -928,7 +958,9 @@ impl App {
             output_client: a.output_client.clone(),
             auto_connect: a.auto_connect,
             client_name: "Carlita".into(),
-            ui_scale: self.ui_scale,
+            // The desktop's scale, times the editor size picked in Display
+            // options.
+            ui_scale: self.ui_scale * self.settings.display.editor_zoom_factor(),
         }
     }
 
@@ -1900,7 +1932,8 @@ impl App {
 
     fn save_preset(&mut self, name: &str) {
         self.capture_states();
-        let preset = Preset::new(name.trim(), self.rig.clone(), self.mappings.clone());
+        let preset = Preset::new(name.trim(), self.rig.clone(), self.mappings.clone())
+            .with_selection(self.selected, self.track_selection.values().copied());
         match self.presets.save(&preset) {
             Ok(()) => {
                 self.settings.current_preset = Some(preset.name.clone());
@@ -1928,6 +1961,12 @@ impl App {
         self.rig = preset.rig;
         self.view_track = self.rig.ensure_track();
         self.mappings = preset.midi_mappings;
+        // The plugins each track showed when the preset was saved.
+        self.track_selection = preset
+            .track_selections
+            .iter()
+            .filter_map(|&s| Some((self.rig.track_of(s)?, s)))
+            .collect();
         self.runtime = self
             .rig
             .slots()
@@ -1939,6 +1978,11 @@ impl App {
             self.load_rig();
         } else {
             self.reload_chain_on_start = true;
+        }
+        // Show the plugin that was shown when the preset was saved (its
+        // editor opens once it has loaded), not the first one to load.
+        if let Some(slot) = preset.selected.filter(|s| self.rig.get(*s).is_some()) {
+            self.select(Some(slot));
         }
         self.refresh_slots();
         self.refresh_presets();

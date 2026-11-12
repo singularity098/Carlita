@@ -1,7 +1,7 @@
 // Left sidebar: the chain of the selected track (tracks are picked in the
 // top bar).
 import { Theme } from "theme.slint";
-import { BigButton, BigSlider, Chip, StereoMeter, CollapseButton } from "widgets.slint";
+import { BigButton, BigSlider, Chip, StereoMeter, CollapseButton, Tip } from "widgets.slint";
 import { Icon, Icons } from "icons.slint";
 import { SlotItem } from "types.slint";
 
@@ -69,6 +69,11 @@ component ChainRow inherits Rectangle {
                         }
                     }
                 }
+                Tip {
+                    text: "Drag up or down to move this plugin (into a parallel lane too)";
+                    hover: handle-touch.has-hover;
+                    pressed: handle-touch.pressed;
+                }
             }
 
             // Name; tap selects, swipe sideways or long-press removes.
@@ -116,6 +121,14 @@ component ChainRow inherits Rectangle {
                         }
                     }
                 }
+                Tip {
+                    text: root.item.status == "crashed" || root.item.status == "failed"
+                        ? "Tap to load " + root.item.name + " again"
+                        : root.item.selected ? root.item.name + " is shown. Swipe sideways or hold to remove it."
+                        : "Show " + root.item.name + ". Swipe sideways or hold to remove it.";
+                    hover: body-touch.has-hover;
+                    pressed: body-touch.pressed;
+                }
                 Timer {
                     interval: 650ms;
                     running: body-touch.pressed && !root.swiping && !root.long-pressed;
@@ -145,6 +158,11 @@ component ChainRow inherits Rectangle {
                 remove-touch := TouchArea {
                     clicked => { root.remove(root.item.id); }
                 }
+                Tip {
+                    text: "Remove " + root.item.name + " (Undo brings it back)";
+                    hover: remove-touch.has-hover;
+                    pressed: remove-touch.pressed;
+                }
             }
 
             // Run this plugin in parallel with a dry lane.
@@ -163,6 +181,11 @@ component ChainRow inherits Rectangle {
                 }
                 split-touch := TouchArea {
                     clicked => { root.split(root.item.id); }
+                }
+                Tip {
+                    text: "Run in parallel: this plugin in one lane, the dry signal in another";
+                    hover: split-touch.has-hover;
+                    pressed: split-touch.pressed;
                 }
             }
 
@@ -194,8 +217,13 @@ component ChainRow inherits Rectangle {
                     weight: 2.2;
                     tint: root.item.bypassed ? Theme.text-faint : Theme.on-paint;
                 }
-                TouchArea {
+                bypass-touch := TouchArea {
                     clicked => { root.toggle-bypass(root.item.id, !root.item.bypassed); }
+                }
+                Tip {
+                    text: root.item.bypassed ? "Bypassed: tap to turn it on" : "On: tap to bypass it";
+                    hover: bypass-touch.has-hover;
+                    pressed: bypass-touch.pressed;
                 }
             }
         }
@@ -233,6 +261,7 @@ component StructureRow inherits Rectangle {
             Chip {
                 y: (parent.height - self.height) / 2;
                 text: "+ Lane";
+                tip: "Add another lane to this parallel block";
                 clicked => { root.add-lane(); }
             }
         }
@@ -261,6 +290,11 @@ component StructureRow inherits Rectangle {
             lane-add := TouchArea {
                 clicked => { root.add-plugin(); }
             }
+            Tip {
+                text: "Add a plugin to this lane";
+                hover: lane-add.has-hover;
+                pressed: lane-add.pressed;
+            }
         }
         Rectangle {
             width: 44px;
@@ -273,6 +307,11 @@ component StructureRow inherits Rectangle {
             }
             lane-remove := TouchArea {
                 clicked => { root.remove-lane(); }
+            }
+            Tip {
+                text: "Remove this lane and its plugins";
+                hover: lane-remove.has-hover;
+                pressed: lane-remove.pressed;
             }
         }
     }
@@ -381,6 +420,11 @@ export component ChainPanel inherits Rectangle {
                         title-touch := TouchArea {
                             clicked => { root.rename-track(); }
                         }
+                        Tip {
+                            text: "Rename this track";
+                            hover: title-touch.has-hover;
+                            pressed: title-touch.pressed;
+                        }
                     }
                     Text {
                         text: root.preset-name == "" ? "Unsaved preset" : root.preset-name;
@@ -400,16 +444,19 @@ export component ChainPanel inherits Rectangle {
                     left: root.in-left;
                     right: root.in-right;
                     label: "IN";
+                    tip: "Input level";
                 }
                 StereoMeter {
                     left: root.out-left;
                     right: root.out-right;
                     label: "OUT";
+                    tip: "Output level";
                 }
                 VerticalLayout {
                     alignment: start;
                     CollapseButton {
                         icon: Icons.chevron-left;
+                        tip: "Close the chain";
                         clicked => { root.close(); }
                     }
                 }
@@ -423,11 +470,13 @@ export component ChainPanel inherits Rectangle {
             Chip {
                 y: (parent.height - self.height) / 2;
                 text: root.track-input;
+                tip: "Which inputs feed this track: tap for the next choice";
                 clicked => { root.cycle-input(); }
             }
             Chip {
                 y: (parent.height - self.height) / 2;
                 text: "Mute";
+                tip: root.track-muted ? "Muted: tap to hear this track again" : "Silence this track";
                 selected: root.track-muted;
                 clicked => { root.toggle-mute(); }
             }
@@ -438,6 +487,7 @@ export component ChainPanel inherits Rectangle {
                 value: root.track-volume;
                 has-default: true;
                 default-value: 1;
+                tip: "Track volume.";
                 changed(v) => { root.set-volume(v); }
             }
             Text {
@@ -453,6 +503,7 @@ export component ChainPanel inherits Rectangle {
                 left: root.track-left;
                 right: root.track-right;
                 label: "";
+                tip: "Track level";
             }
             Rectangle {
                 width: 40px;
@@ -465,6 +516,11 @@ export component ChainPanel inherits Rectangle {
                 }
                 delete-touch := TouchArea {
                     clicked => { root.delete-track(); }
+                }
+                Tip {
+                    text: "Delete this track";
+                    hover: delete-touch.has-hover;
+                    pressed: delete-touch.pressed;
                 }
             }
         }
@@ -557,6 +613,7 @@ export component ChainPanel inherits Rectangle {
                 }
                 BigButton {
                     text: "Undo";
+                    tip: "Put the removed plugin back";
                     primary: true;
                     clicked => { root.undo(); }
                 }
@@ -565,6 +622,7 @@ export component ChainPanel inherits Rectangle {
 
         BigButton {
             text: "Add plugin";
+            tip: "Pick a plugin to add to the end of this track";
             icon: "+";
             primary: true;
             height: 60px;

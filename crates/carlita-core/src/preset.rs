@@ -1,7 +1,7 @@
 //! Named presets: the whole rig (every track and its chain) including each
 //! plugin's state.
 
-use crate::chain::Chain;
+use crate::chain::{Chain, SlotId};
 use crate::midi::MidiMapping;
 use crate::rig::Rig;
 use anyhow::{bail, Context};
@@ -23,6 +23,13 @@ pub struct Preset {
     chain: Option<Chain>,
     #[serde(default)]
     pub midi_mappings: Vec<MidiMapping>,
+    /// The plugin shown when the preset was saved; shown again on load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected: Option<SlotId>,
+    /// The plugin last shown on each track, so switching tracks after a
+    /// load shows what it did before the save.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub track_selections: Vec<SlotId>,
 }
 
 fn default_version() -> u32 {
@@ -37,7 +44,24 @@ impl Preset {
             rig,
             chain: None,
             midi_mappings,
+            selected: None,
+            track_selections: Vec::new(),
         }
+    }
+
+    /// Remembers which plugin is shown (and which each track last showed).
+    pub fn with_selection(
+        mut self,
+        selected: Option<SlotId>,
+        track_selections: impl IntoIterator<Item = SlotId>,
+    ) -> Self {
+        self.selected = selected.filter(|s| self.rig.get(*s).is_some());
+        self.track_selections = track_selections
+            .into_iter()
+            .filter(|s| self.rig.get(*s).is_some())
+            .collect();
+        self.track_selections.sort_by_key(|s| s.0);
+        self
     }
 
     /// Upgrades a version 1 preset and makes sure there is a track.
@@ -48,6 +72,12 @@ impl Preset {
             }
         }
         self.rig.ensure_track();
+        // Selections of plugins the preset does not have are dropped.
+        if self.selected.is_some_and(|s| self.rig.get(s).is_none()) {
+            self.selected = None;
+        }
+        let rig = &self.rig;
+        self.track_selections.retain(|s| rig.get(*s).is_some());
     }
 }
 
@@ -188,6 +218,35 @@ mod tests {
         store.save(&p).unwrap();
         let text = std::fs::read_to_string(dir.path().join("Old.json")).unwrap();
         assert!(text.contains("\"rig\"") && !text.contains("\"chain\""));
+    }
+
+    #[test]
+    fn remembers_the_shown_plugin() {
+        use crate::plugin::PluginDescriptor;
+        let dir = tempfile::tempdir().unwrap();
+        let store = PresetStore::new(dir.path());
+        let mut rig = Rig::new();
+        let track = rig.tracks[0].id;
+        let desc = |name: &str| -> PluginDescriptor {
+            serde_json::from_str(&format!(r#"{{"format":"internal","name":"{name}"}}"#)).unwrap()
+        };
+        let a = rig.new_slot(desc("A"));
+        let b = rig.new_slot(desc("B"));
+        let (a_id, b_id) = (a.id, b.id);
+        rig.push(track, a);
+        rig.push(track, b);
+        let p = Preset::new("Sel", rig, vec![]).with_selection(Some(b_id), [b_id, SlotId(999)]);
+        store.save(&p).unwrap();
+        let loaded = store.load("Sel").unwrap();
+        assert_eq!(loaded.selected, Some(b_id));
+        assert_eq!(loaded.track_selections, vec![b_id]);
+        assert_ne!(a_id, b_id);
+
+        // Older presets have no selection.
+        store.save(&Preset::new("Old", Rig::new(), vec![])).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("Old.json")).unwrap();
+        assert!(!text.contains("selected"));
+        assert_eq!(store.load("Old").unwrap().selected, None);
     }
 
     #[test]
