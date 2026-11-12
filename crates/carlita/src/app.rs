@@ -118,8 +118,9 @@ pub struct App {
     editor_host: Option<EditorHost>,
     /// Whether editors can be shown inside the main window (X11 only).
     embed_available: bool,
-    /// What the editor host was last told about the main area.
-    editor_area: Option<(Area, bool)>,
+    /// What the editor host was last told: the main area, and the part of
+    /// it nothing covers.
+    editor_area: Option<(Area, Area)>,
     system: SystemWorker,
     midi: MidiListener,
     learning: Option<(SlotId, MidiAction)>,
@@ -747,6 +748,11 @@ impl App {
             .unwrap_or_default();
         for e in host_events {
             self.on_host_event(e);
+        }
+        // Also from here, not only from `area-changed`: a sidebar or the
+        // track bar sliding in by itself may not report every step.
+        if self.editor.is_some() {
+            self.place_editor();
         }
         while let Ok(e) = self.system.events.try_recv() {
             self.on_system_event(e);
@@ -1556,6 +1562,7 @@ impl App {
                     None
                 };
                 if let (Some(parent), Some(h)) = (parent, &self.editor_host) {
+                    self.clear_editor_snapshot();
                     h.send(HostCommand::Attach {
                         key: slot.0,
                         title: editor_window_title(slot),
@@ -1598,7 +1605,15 @@ impl App {
             }
         }
         self.editor = None;
+        self.clear_editor_snapshot();
         self.ui().set_editor_mode(ss("empty"));
+    }
+
+    fn clear_editor_snapshot(&self) {
+        let ui = self.ui();
+        ui.set_editor_snapshot(slint::Image::default());
+        ui.set_snapshot_width(0.0);
+        ui.set_snapshot_height(0.0);
     }
 
     fn set_editor_message(&self, title: &str, message: &str) {
@@ -1631,27 +1646,41 @@ impl App {
         id
     }
 
-    /// Tells the editor host where the main area is, and whether the editor
-    /// may show: an X11 child window always covers what Slint draws, so the
-    /// editor hides while a sidebar, the browser or a dialog is over it.
+    /// Tells the editor host where the main area is, and which part of it
+    /// nothing covers: an X11 child window always covers what Slint draws,
+    /// so the editor is cut down to the part a sidebar or the track bar
+    /// leaves, and hides under the browser or a dialog.
     fn place_editor(&mut self) {
         let Some(h) = &self.editor_host else { return };
         let ui = self.ui();
         let scale = ui.window().scale_factor();
-        let px = |v: f32| (v * scale).round();
-        let area = Area {
-            x: px(ui.get_area_x()) as i32,
-            y: px(ui.get_area_y()) as i32,
-            width: px(ui.get_area_width()).max(0.0) as u32,
-            height: px(ui.get_area_height()).max(0.0) as u32,
+        let rect = |x: f32, y: f32, w: f32, h: f32| {
+            let (x0, y0) = ((x * scale).round(), (y * scale).round());
+            let x1 = ((x + w.max(0.0)) * scale).round();
+            let y1 = ((y + h.max(0.0)) * scale).round();
+            Area {
+                x: x0 as i32,
+                y: y0 as i32,
+                width: (x1 - x0).max(0.0) as u32,
+                height: (y1 - y0).max(0.0) as u32,
+            }
         };
-        let state = (area, !ui.get_editor_covered());
+        let area = rect(
+            ui.get_area_x(),
+            ui.get_area_y(),
+            ui.get_area_width(),
+            ui.get_area_height(),
+        );
+        let uncovered = rect(
+            ui.get_uncovered_x(),
+            ui.get_uncovered_y(),
+            ui.get_uncovered_width(),
+            ui.get_uncovered_height(),
+        );
+        let state = (area, uncovered);
         if self.editor_area != Some(state) {
             self.editor_area = Some(state);
-            h.send(HostCommand::SetArea {
-                area: state.0,
-                visible: state.1,
-            });
+            h.send(HostCommand::SetArea { area, uncovered });
         }
     }
 
@@ -1693,6 +1722,27 @@ impl App {
                     // Allow re-selecting the same plugin to reopen it.
                     self.selected = None;
                     self.refresh_slots();
+                }
+            }
+            HostEvent::Snapshot {
+                key,
+                x,
+                y,
+                width,
+                height,
+                rgba,
+            } => {
+                if self.editor.as_ref().is_some_and(|ed| ed.slot.0 == key) {
+                    let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                        &rgba, width, height,
+                    );
+                    let ui = self.ui();
+                    let scale = ui.window().scale_factor();
+                    ui.set_editor_snapshot(slint::Image::from_rgba8(buf));
+                    ui.set_snapshot_x(x as f32 / scale);
+                    ui.set_snapshot_y(y as f32 / scale);
+                    ui.set_snapshot_width(width as f32 / scale);
+                    ui.set_snapshot_height(height as f32 / scale);
                 }
             }
             HostEvent::Unavailable(reason) => {
