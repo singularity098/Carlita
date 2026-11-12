@@ -353,6 +353,8 @@ impl App {
             ss(s)
         });
         tu.on_mask(|s| ss("•".repeat(s.chars().count())));
+        tu.on_is_text(|s| is_typed_text(&s));
+        tu.on_port_label(|s| ss(port_label(&s)));
 
         // ---- chain
         on!(ui, on_select_slot, |a, id: i32| a
@@ -466,7 +468,9 @@ impl App {
                 false,
             );
         });
-        on!(ui, on_delete_track, |a| a.delete_track());
+        on!(ui, on_delete_track, |a| a.delete_track(a.view_track));
+        on!(ui, on_close_track, |a, id: i32| a
+            .delete_track(TrackId(id as u64)));
         on!(ui, on_cycle_input, |a| {
             if let Some(t) = a.rig.track_mut(a.view_track) {
                 t.input = t.input.next();
@@ -1484,8 +1488,8 @@ impl App {
         self.refresh_midi_options();
     }
 
-    fn delete_track(&mut self) {
-        let Some(t) = self.rig.track(self.view_track) else {
+    fn delete_track(&mut self, id: TrackId) {
+        let Some(t) = self.rig.track(id) else {
             return;
         };
         if self.rig.tracks.len() == 1 && t.is_empty() {
@@ -1555,7 +1559,6 @@ impl App {
         let info = rt.and_then(|r| r.info.clone());
         match (rt.map(|r| &r.status), info) {
             (Some(SlotStatus::Ready), Some(info)) if info.has_custom_ui => {
-                self.engine.send(Command::ShowEditor { slot, show: true });
                 let parent = if self.embed_available {
                     self.main_x11_window()
                 } else {
@@ -1563,17 +1566,21 @@ impl App {
                 };
                 if let (Some(parent), Some(h)) = (parent, &self.editor_host) {
                     self.clear_editor_snapshot();
+                    // The host notes the windows already shown before the
+                    // editor is opened (see HostCommand::Attach).
                     h.send(HostCommand::Attach {
                         key: slot.0,
                         title: editor_window_title(slot),
                         parent,
                     });
+                    self.engine.send(Command::ShowEditor { slot, show: true });
                     self.editor = Some(EditorView { slot });
                     self.place_editor();
                     let ui = self.ui();
                     ui.set_editor_title(ss(&name));
                     ui.set_editor_mode(ss("waiting"));
                 } else {
+                    self.engine.send(Command::ShowEditor { slot, show: true });
                     self.set_editor_message(&name, "The editor opened in its own window.");
                 }
             }
@@ -1700,6 +1707,9 @@ impl App {
                         .map(|s| s.name.clone())
                         .unwrap_or_default();
                     log::warn!("editor window for {name} not found; showing generic controls");
+                    // Close the editor if it did open somewhere, rather than
+                    // leave a window of its own behind.
+                    self.engine.send(Command::ShowEditor { slot, show: false });
                     self.editor = None;
                     self.engine.send(Command::QueryParameters { slot });
                     let ui = self.ui();
@@ -2268,5 +2278,72 @@ impl App {
                 }
             }
         }
+    }
+}
+
+/// Whether a key press from a hardware keyboard is text to type: not a
+/// control character (Backspace, Return, Escape, ...) and not one of the
+/// private-use characters Slint gives special keys (arrows, F-keys, ...).
+fn is_typed_text(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| !c.is_control() && !('\u{f700}'..='\u{f8ff}').contains(&c))
+}
+
+/// A MIDI port's name as shown in the options: without the ALSA
+/// "client:port" numbers at the end, and without the device's name when the
+/// port's name repeats it ("Scarlett 18i20 USB:Scarlett 18i20 USB MIDI 1
+/// 24:0" becomes "Scarlett 18i20 USB MIDI 1").
+fn port_label(name: &str) -> String {
+    let mut s = name.trim();
+    if let Some((head, tail)) = s.rsplit_once(' ') {
+        let is_id = tail.split_once(':').is_some_and(|(a, b)| {
+            !a.is_empty()
+                && !b.is_empty()
+                && (a.to_string() + b).chars().all(|c| c.is_ascii_digit())
+        });
+        if is_id {
+            s = head.trim_end();
+        }
+    }
+    match s.split_once(':') {
+        Some((client, port)) if port.trim().starts_with(client.trim()) => port.trim().to_string(),
+        Some((client, port)) if port.trim().is_empty() => client.trim().to_string(),
+        Some((client, port)) => format!("{}: {}", client.trim(), port.trim()),
+        None => s.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod text_tests {
+    use super::*;
+
+    #[test]
+    fn port_labels() {
+        assert_eq!(
+            port_label("Scarlett 18i20 USB:Scarlett 18i20 USB MIDI 1 24:0"),
+            "Scarlett 18i20 USB MIDI 1"
+        );
+        assert_eq!(
+            port_label("ControlPad:ControlPad MIDI 1 32:0"),
+            "ControlPad MIDI 1"
+        );
+        assert_eq!(
+            port_label("MPK mini 3:MPK mini 3 MIDI 1 28:0"),
+            "MPK mini 3 MIDI 1"
+        );
+        assert_eq!(port_label("Foo:Bar 20:1"), "Foo: Bar");
+        assert_eq!(port_label("All inputs"), "All inputs");
+    }
+
+    #[test]
+    fn typed_text() {
+        assert!(is_typed_text("a"));
+        assert!(is_typed_text("Ä"));
+        assert!(!is_typed_text("\u{8}"));
+        assert!(!is_typed_text("\n"));
+        assert!(!is_typed_text("\u{1b}"));
+        assert!(!is_typed_text("\u{f700}"));
+        assert!(!is_typed_text(""));
     }
 }

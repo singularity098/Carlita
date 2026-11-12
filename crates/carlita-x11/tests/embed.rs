@@ -40,6 +40,10 @@ fn window(conn: &RustConnection, parent: Window, w: u16, h: u16, title: &[u8]) -
     win
 }
 
+/// The tests share the X server, and one takes any new window as an
+/// editor: run them one at a time.
+static X_SERVER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn parent_of(conn: &RustConnection, w: Window) -> Window {
     conn.query_tree(w).unwrap().reply().unwrap().parent
 }
@@ -75,6 +79,7 @@ fn embeds_hides_and_hands_back() {
         eprintln!("no DISPLAY; skipping");
         return;
     }
+    let _x = X_SERVER.lock().unwrap_or_else(|e| e.into_inner());
     let (conn, screen) = x11rb::connect(None).unwrap();
     let root = conn.setup().roots[screen].root;
 
@@ -208,4 +213,55 @@ fn embeds_hides_and_hands_back() {
     wait(&host, |e| {
         matches!(e, HostEvent::Lost { key: 43 }).then_some(())
     });
+}
+
+/// An editor that does not use the title Carla gives it is still found: it
+/// is the one new window of this process that appears after the request.
+#[test]
+fn finds_an_editor_with_its_own_title() {
+    if std::env::var_os("DISPLAY").is_none() {
+        eprintln!("no DISPLAY; skipping");
+        return;
+    }
+    let _x = X_SERVER.lock().unwrap_or_else(|e| e.into_inner());
+    let (conn, screen) = x11rb::connect(None).unwrap();
+    let root = conn.setup().roots[screen].root;
+    let main = window(&conn, root, 800, 600, b"carlita-test-main-2");
+    conn.map_window(main).unwrap();
+    // Shown before the request: never taken.
+    let other = window(&conn, root, 120, 80, b"some other program");
+    conn.map_window(other).unwrap();
+    conn.flush().unwrap();
+
+    let host = EditorHost::spawn();
+    let area = Area {
+        x: 0,
+        y: 0,
+        width: 800,
+        height: 600,
+    };
+    host.send(HostCommand::SetArea {
+        area,
+        uncovered: area,
+    });
+    host.send(HostCommand::Attach {
+        key: 7,
+        title: "carlita-editor-7".into(),
+        parent: main,
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    let editor = window(&conn, root, 240, 160, b"Xythos");
+    conn.map_window(editor).unwrap();
+    conn.flush().unwrap();
+
+    wait(&host, |e| match e {
+        HostEvent::Attached { key: 7, .. } => Some(()),
+        HostEvent::NotFound { .. } => panic!("window not found"),
+        _ => None,
+    });
+    let holder = parent_of(&conn, editor);
+    assert_eq!(parent_of(&conn, holder), main);
+    assert_eq!(parent_of(&conn, other), root);
+    host.send(HostCommand::Detach { key: 7 });
+    until(|| parent_of(&conn, editor) == root);
 }

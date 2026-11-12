@@ -87,8 +87,8 @@
 | Top bar: track tabs with levels, app-drawn window controls (no WM decorations), docked when windowed, swipe-down from the top edge in fullscreen | Done. Moving and resizing go through winit's `drag_window` / `drag_resize_window`, so the window manager still snaps the window. |
 | Left sidebar: edge swipe, hover tab, list, drag reorder (into and out of lanes), swipe/long-press remove with undo, browser with search/format/category/favorites, bypass, close gestures, 48 px+ targets | Done |
 | Right sidebar: audio, presets, WiFi (NetworkManager), Bluetooth (BlueZ), display, system, on-screen keyboard toggle | Done. WiFi and Bluetooth are untested on real hardware. |
-| On-screen text keyboard (WiFi passwords, names) | Done |
-| Virtual piano → plugins | Done. Notes go to the selected plugin if it takes MIDI, otherwise to the first plugin that does. Single touch only. |
+| On-screen text keyboard (WiFi passwords, names) | Done. A hardware keyboard types into the same prompt (Return accepts, Escape cancels). |
+| Virtual piano → plugins | Done. Notes go to the selected plugin if it takes MIDI, otherwise to the first plugin that does. Sliding across the keys plays each key passed over. Opens from a strip on the bottom edge (hover tab), folds away with its own button. Single touch only. |
 | Fullscreen default, windowed, F11, size remembered | Done. Real fullscreen needs a window manager (kiosk setup uses matchbox). |
 | Editor shown in the main area, native resize | Done: editors are reparented into the main window, at their own size; resizable editors fill the area. Scaling was dropped. Sidebars and the track bar cut the editor down instead of hiding it, with a snapshot under them. See [editor-embedding.md](editor-embedding.md). |
 | Generic parameter page for plugins without editors | Done |

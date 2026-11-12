@@ -1,12 +1,9 @@
 // On-screen keyboards: a QWERTY keyboard for text entry and a piano.
 import { Theme } from "theme.slint";
-import { BigButton } from "widgets.slint";
+import { BigButton, CollapseButton, TextUtil } from "widgets.slint";
+import { Icons } from "icons.slint";
 
-// String helpers implemented in Rust (Slint has no substring operations).
-export global TextUtil {
-    pure callback drop-last(string) -> string;
-    pure callback mask(string) -> string;
-}
+export { TextUtil }
 
 component Key inherits Rectangle {
     in property <string> label;
@@ -174,12 +171,15 @@ export component TextPrompt inherits Rectangle {
     }
 }
 
-// Piano keyboard for sending notes to the plugins.
+// Piano keyboard for sending notes to the plugins. Sliding a finger (or the
+// held mouse) across the keys plays each key it passes over.
 export component Piano inherits Rectangle {
     in property <int> base-note: 48;
     in property <int> octaves: 3;
     callback note(int, bool);
     callback octave(int);
+    // Fold the keyboard away.
+    callback close;
 
     background: Theme.popup;
     border-width: 1px;
@@ -190,6 +190,10 @@ export component Piano inherits Rectangle {
     property <[{offset: int, slot: int}]> blacks: [
         { offset: 1, slot: 0 }, { offset: 3, slot: 1 }, { offset: 6, slot: 3 }, { offset: 8, slot: 4 }, { offset: 10, slot: 5 },
     ];
+    // Black key slot (0..6) of each white key's right edge, or -1.
+    property <[int]> black-after: [1, 3, -1, 6, 8, 10, -1];
+    // The note held down, or -1.
+    property <int> held: -1;
 
     HorizontalLayout {
         padding: 6px;
@@ -198,25 +202,51 @@ export component Piano inherits Rectangle {
             width: 64px;
             spacing: 6px;
             BigButton {
-                text: "Oct +";
+                text: "+";
                 vertical-stretch: 1;
                 clicked => { root.octave(1); }
             }
+            // The octave the keyboard starts at; + and − move it.
             Text {
-                text: "C" + floor(root.base-note / 12 - 1);
+                text: "Oct C" + floor(root.base-note / 12 - 1);
                 color: Theme.text-dim;
                 horizontal-alignment: center;
                 font-size: Theme.font-small;
                 font-weight: Theme.regular;
             }
             BigButton {
-                text: "Oct −";
+                text: "−";
                 vertical-stretch: 1;
                 clicked => { root.octave(-1); }
             }
         }
         keys := Rectangle {
             property <length> white-w: self.width / (root.octaves * 7);
+            property <length> black-w: self.white-w * 0.62;
+            property <length> black-h: self.height * 0.6;
+
+            // The note under a point of the keys, or -1.
+            pure function note-at(x: length, y: length) -> int {
+                if x < 0 || x >= self.width || y < 0 || y >= self.height {
+                    return -1;
+                }
+                // Which white key, and where in it.
+                let w = floor(x / self.white-w);
+                let oct = floor(w / 7);
+                let i = mod(w, 7);
+                let within = x - w * self.white-w;
+                if y < self.black-h {
+                    // A black key straddles the edge between two white keys.
+                    if within > self.white-w - self.black-w / 2 && root.black-after[i] >= 0 {
+                        return root.base-note + oct * 12 + root.black-after[i];
+                    }
+                    if within < self.black-w / 2 && i > 0 && root.black-after[i - 1] >= 0 {
+                        return root.base-note + oct * 12 + root.black-after[i - 1];
+                    }
+                }
+                return root.base-note + oct * 12 + root.whites[i];
+            }
+
             for oct in root.octaves: Rectangle {
                 x: oct * 7 * keys.white-w;
                 width: 7 * keys.white-w;
@@ -224,36 +254,54 @@ export component Piano inherits Rectangle {
                     x: i * keys.white-w;
                     width: keys.white-w - 2px;
                     border-radius: 4px;
-                    background: wt.pressed ? Theme.paint : #d4d4d8;
-                    wt := TouchArea {
-                        pointer-event(e) => {
-                            if e.kind == PointerEventKind.down {
-                                root.note(root.base-note + oct * 12 + w, true);
-                            } else if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
-                                root.note(root.base-note + oct * 12 + w, false);
-                            }
-                        }
-                    }
+                    background: root.held == root.base-note + oct * 12 + w ? Theme.paint : #d4d4d8;
                 }
                 for b in root.blacks: Rectangle {
                     x: (b.slot + 1) * keys.white-w - self.width / 2;
-                    width: keys.white-w * 0.62;
-                    height: parent.height * 0.6;
+                    width: keys.black-w;
+                    height: keys.black-h;
                     y: 0;
                     border-radius: 4px;
-                    background: bt.pressed ? Theme.paint : #0c0c0e;
+                    background: root.held == root.base-note + oct * 12 + b.offset ? Theme.paint : #0c0c0e;
                     border-width: 1px;
                     border-color: Theme.border-strong;
-                    bt := TouchArea {
-                        pointer-event(e) => {
-                            if e.kind == PointerEventKind.down {
-                                root.note(root.base-note + oct * 12 + b.offset, true);
-                            } else if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
-                                root.note(root.base-note + oct * 12 + b.offset, false);
-                            }
-                        }
+                }
+            }
+
+            // One touch area for all keys, so a slide moves from key to key.
+            touch := TouchArea {
+                function play(n: int) {
+                    if n == root.held {
+                        return;
+                    }
+                    if root.held >= 0 {
+                        root.note(root.held, false);
+                    }
+                    root.held = n;
+                    if n >= 0 {
+                        root.note(n, true);
                     }
                 }
+                pointer-event(e) => {
+                    if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                        self.play(keys.note-at(self.mouse-x, self.mouse-y));
+                    } else if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
+                        self.play(-1);
+                    }
+                }
+                moved => {
+                    if self.pressed {
+                        self.play(keys.note-at(self.mouse-x, self.mouse-y));
+                    }
+                }
+            }
+        }
+        VerticalLayout {
+            width: 44px;
+            alignment: start;
+            CollapseButton {
+                icon: Icons.chevron-down;
+                clicked => { root.close(); }
             }
         }
     }

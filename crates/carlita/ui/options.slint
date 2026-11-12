@@ -1,7 +1,8 @@
 // Right sidebar: options. Every toggle applies immediately.
 import { Theme } from "theme.slint";
-import { BigButton, Toggle, Chip, SectionTitle, SettingRow, BigSlider } from "widgets.slint";
+import { BigButton, Toggle, Chip, SectionTitle, SettingRow, BigSlider, CollapseButton, ChoiceList } from "widgets.slint";
 import { WifiItem, BtItem, MappingItem } from "types.slint";
+import { Icon, Icons } from "icons.slint";
 
 export global Options {
     // ---- audio
@@ -194,19 +195,19 @@ component AudioPage inherits VerticalLayout {
         picked(v) => { Options.set-driver(v); }
     }
     if Options.devices.length > 0: SectionTitle { text: "DEVICE"; }
-    if Options.devices.length > 0: ChipGrid {
+    if Options.devices.length > 0: ChoiceList {
         options: Options.devices;
         selected: Options.device;
         picked(v) => { Options.set-device(v); }
     }
     if Options.inputs.length > 0 || Options.outputs.length > 0: SectionTitle { text: "INPUT DEVICE"; }
-    if Options.inputs.length > 0 || Options.outputs.length > 0: ChipGrid {
+    if Options.inputs.length > 0 || Options.outputs.length > 0: ChoiceList {
         options: Options.inputs;
         selected: Options.input;
         picked(v) => { Options.set-input(v); }
     }
     if Options.inputs.length > 0 || Options.outputs.length > 0: SectionTitle { text: "OUTPUT DEVICE"; }
-    if Options.inputs.length > 0 || Options.outputs.length > 0: ChipGrid {
+    if Options.inputs.length > 0 || Options.outputs.length > 0: ChoiceList {
         options: Options.outputs;
         selected: Options.output;
         picked(v) => { Options.set-output(v); }
@@ -344,10 +345,11 @@ component MidiPage inherits VerticalLayout {
         }
     }
     SectionTitle { text: "MIDI INPUT FOR LEARN"; }
-    ChipGrid {
+    ChoiceList {
         options: Options.midi-ports;
         selected: Options.midi-port;
         empty-text: "No MIDI inputs found";
+        ports: true;
         picked(v) => { Options.set-midi-port(v); }
     }
 }
@@ -496,14 +498,14 @@ export component OptionsPanel inherits Rectangle {
     border-width: 1px;
     border-color: Theme.border;
 
-    property <[{icon: string, label: string}]> pages: [
-        { icon: "🔊", label: "Audio" },
-        { icon: "💾", label: "Presets" },
-        { icon: "🎹", label: "MIDI" },
-        { icon: "📶", label: "WiFi" },
-        { icon: "ᛒ", label: "Bluetooth" },
-        { icon: "🖥", label: "Display" },
-        { icon: "⚙", label: "System" },
+    property <[{solid: string, line: string, label: string}]> pages: [
+        { solid: Icons.audio-solid, line: Icons.audio-line, label: "Audio" },
+        { solid: Icons.presets-solid, line: Icons.presets-line, label: "Presets" },
+        { solid: Icons.midi-solid, line: Icons.midi-line, label: "MIDI" },
+        { solid: Icons.wifi-solid, line: Icons.wifi-line, label: "WiFi" },
+        { solid: Icons.bluetooth-solid, line: Icons.bluetooth-line, label: "Bluetooth" },
+        { solid: Icons.display-solid, line: Icons.display-line, label: "Display" },
+        { solid: Icons.system-solid, line: Icons.system-line, label: "System" },
     ];
 
     HorizontalLayout {
@@ -525,12 +527,17 @@ export component OptionsPanel inherits Rectangle {
                     }
                     VerticalLayout {
                         alignment: center;
-                        spacing: 2px;
-                        Text {
-                            text: p.icon;
-                            font-size: 24px;
-                            horizontal-alignment: center;
-                            color: i == root.page ? Theme.accent : Theme.text-dim;
+                        spacing: 6px;
+                        HorizontalLayout {
+                            alignment: center;
+                            Icon {
+                                width: 26px;
+                                height: 26px;
+                                solid: p.solid;
+                                line: p.line;
+                                weight: 1.8;
+                                tint: i == root.page ? #ffffff : #ffffffa6;
+                            }
                         }
                         Text {
                             text: p.label;
@@ -566,10 +573,18 @@ export component OptionsPanel inherits Rectangle {
                 padding: Theme.pad * 1.5;
                 spacing: 14px;
                 alignment: start;
-                Text {
-                    text: root.pages[root.page].label;
-                    font-size: Theme.font-title;
-                    color: Theme.text;
+                HorizontalLayout {
+                    Text {
+                        text: root.pages[root.page].label;
+                        font-size: Theme.font-title;
+                        color: Theme.text;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    CollapseButton {
+                        icon: Icons.chevron-right;
+                        clicked => { root.close(); }
+                    }
                 }
                 if root.page == 0: AudioPage { }
                 if root.page == 1: PresetsPage { }

@@ -17,7 +17,13 @@ off-screen with XComposite and forwarded synthetic input) was dropped
    ordinary X11 windows too.
 2. The host thread watches for new windows (SubstructureNotify on the root,
    plus a search every 100 ms) and finds the editor by its `_NET_WM_NAME`
-   or `WM_NAME` once it is mapped.
+   or `WM_NAME` once it is mapped. Some editors ignore the title Carla
+   gives them, so the host notes which windows are already shown when the
+   editor is asked for (the request goes to the host before Carla is told
+   to show the editor). If no window has the title after 1.5 s, a window
+   that appeared since then is taken instead, as long as it is the only
+   one, is at least 32 × 32, and its `_NET_WM_PID` (when it has one) is
+   Carlita's or one of its child processes' (plugin bridges, Wine).
 3. If a window manager manages it, Carlita withdraws it first, as a program
    withdraws its own window (ICCCM 4.1.4): it unmaps the window and sends
    the window manager a synthetic `UnmapNotify`, then waits (up to 1 s) for
@@ -61,6 +67,9 @@ off-screen with XComposite and forwarded synthetic input) was dropped
   a still snapshot under them. The sidebars' and track bar's dimming does
   not reach the uncovered part, and a tap there goes to the plugin rather
   than closing the sidebar.
-* **Window not found** within 15 s: Carlita shows the generic parameter page
+* **Window not found** within 15 s: Carlita closes the editor (so it is not
+  left behind as a window of its own) and shows the generic parameter page
   instead.
-* **Keyboard focus** is not handed to the editor.
+* **Keyboard focus** is not handed to the editor. If the user clicked into
+  the editor and a dialog then hides it, the focus is given back to the
+  main window so typing reaches the dialog.

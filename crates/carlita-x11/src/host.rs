@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
 use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::properties::WmSizeHints;
 use x11rb::protocol::xproto::{
     AtomEnum, ChangeWindowAttributesAux, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux,
-    EventMask, ImageFormat, ImageOrder, MapState, UnmapNotifyEvent, Window, WindowClass,
-    UNMAP_NOTIFY_EVENT,
+    EventMask, ImageFormat, ImageOrder, InputFocus, MapState, UnmapNotifyEvent, Window,
+    WindowClass, UNMAP_NOTIFY_EVENT,
 };
 use x11rb::protocol::Event as XEvent;
 use x11rb::rust_connection::RustConnection;
@@ -16,6 +16,10 @@ use x11rb::rust_connection::RustConnection;
 const FIND_TIMEOUT: Duration = Duration::from_secs(15);
 /// How often to look for requested windows (new windows also trigger a look).
 const SEARCH_INTERVAL: Duration = Duration::from_millis(100);
+/// How long to wait for a window with the editor's title before taking a
+/// new window from Carlita's own processes instead. Some editors do not use
+/// the title Carla gives them.
+const FALLBACK_AFTER: Duration = Duration::from_millis(1500);
 /// How long to wait for the window manager to let go of an editor window.
 const WITHDRAW_TIMEOUT: Duration = Duration::from_secs(1);
 /// How often to put an editor back if something (a window manager) takes it
@@ -57,7 +61,9 @@ impl Area {
 
 pub enum HostCommand {
     /// Look for the window titled `title` and show it inside `parent` (the
-    /// main window's X11 id).
+    /// main window's X11 id). Send it before the editor is opened: if no
+    /// window gets that title, a window that appears afterwards from
+    /// Carlita's own processes is taken instead.
     Attach {
         key: u64,
         title: String,
@@ -158,6 +164,10 @@ struct Pending {
     title: String,
     parent: Window,
     since: Instant,
+    /// The windows that were already shown when the editor was asked for:
+    /// any other window that appears and belongs to Carlita (or one of its
+    /// plugin bridges) is taken as the editor if none has its title.
+    known: HashSet<Window>,
 }
 
 /// An editor window found and being taken back from the window manager.
@@ -182,6 +192,7 @@ struct Embedded {
 
 struct Atoms {
     net_wm_name: u32,
+    net_wm_pid: u32,
     utf8_string: u32,
     wm_state: u32,
 }
@@ -207,6 +218,7 @@ impl Embedder {
             |name: &[u8]| -> Result<u32> { Ok(conn.intern_atom(false, name)?.reply()?.atom) };
         let atoms = Atoms {
             net_wm_name: atom(b"_NET_WM_NAME")?,
+            net_wm_pid: atom(b"_NET_WM_PID")?,
             utf8_string: atom(b"UTF8_STRING")?,
             wm_state: atom(b"WM_STATE")?,
         };
@@ -268,12 +280,14 @@ impl Embedder {
             HostCommand::Attach { key, title, parent } => {
                 self.withdrawing.remove(&key);
                 self.release(key);
+                let known = self.client_windows().into_iter().collect();
                 self.pending.insert(
                     key,
                     Pending {
                         title,
                         parent,
                         since: Instant::now(),
+                        known,
                     },
                 );
                 // Carla may have shown the window already.
@@ -378,11 +392,129 @@ impl Embedder {
         None
     }
 
+    /// The windows the window manager shows (or would show) as windows of
+    /// their own: the top-level windows, or the client windows inside the
+    /// window manager's frames. Only those that are shown.
+    fn client_windows(&self) -> Vec<Window> {
+        let Some(tree) = self
+            .conn
+            .query_tree(self.root)
+            .ok()
+            .and_then(|c| c.reply().ok())
+        else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for &top in &tree.children {
+            let Some(attrs) = self
+                .conn
+                .get_window_attributes(top)
+                .ok()
+                .and_then(|c| c.reply().ok())
+            else {
+                continue;
+            };
+            if attrs.override_redirect || attrs.map_state != MapState::VIEWABLE {
+                continue;
+            }
+            out.push(self.client_in(top, 0).unwrap_or(top));
+        }
+        out
+    }
+
+    /// The window with `WM_STATE` at or below `w` (a frame's client).
+    fn client_in(&self, w: Window, depth: u32) -> Option<Window> {
+        if self.has_wm_state(w) {
+            return Some(w);
+        }
+        if depth >= 2 {
+            return None;
+        }
+        let tree = self.conn.query_tree(w).ok()?.reply().ok()?;
+        tree.children
+            .iter()
+            .find_map(|&c| self.client_in(c, depth + 1))
+    }
+
+    fn has_wm_state(&self, w: Window) -> bool {
+        self.conn
+            .get_property(false, w, self.atoms.wm_state, self.atoms.wm_state, 0, 1)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .is_some_and(|p| !p.value.is_empty())
+    }
+
+    fn window_pid(&self, w: Window) -> Option<u32> {
+        self.conn
+            .get_property(false, w, self.atoms.net_wm_pid, AtomEnum::CARDINAL, 0, 1)
+            .ok()?
+            .reply()
+            .ok()?
+            .value32()?
+            .next()
+    }
+
+    /// A window that appeared after the editor was asked for and that
+    /// belongs to Carlita or one of its child processes (plugin bridges,
+    /// Wine), if there is exactly one: the editor of a plugin that ignores
+    /// the title Carla gives its window.
+    fn find_new_window(&self, p: &Pending) -> Option<Window> {
+        let ours = own_processes();
+        let taken: HashSet<Window> = self
+            .embedded
+            .values()
+            .map(|e| e.window)
+            .chain(self.withdrawing.values().map(|w| w.window))
+            .collect();
+        let candidates: Vec<Window> = self
+            .client_windows()
+            .into_iter()
+            .filter(|w| !p.known.contains(w) && *w != p.parent && !taken.contains(w))
+            .filter(|&w| {
+                // Windows that say whose they are must be ours; most
+                // plugin toolkits do not say.
+                !matches!(self.window_pid(w), Some(pid) if !ours.contains(&pid))
+            })
+            .filter(|&w| {
+                self.conn
+                    .get_geometry(w)
+                    .ok()
+                    .and_then(|c| c.reply().ok())
+                    .is_some_and(|g| g.width >= 32 && g.height >= 32)
+            })
+            .collect();
+        match candidates.as_slice() {
+            [w] => {
+                log::info!(
+                    "no window titled {:?}; taking the new window {:#x} ({:?}) as the editor",
+                    p.title,
+                    w,
+                    self.window_title(*w).unwrap_or_default()
+                );
+                Some(*w)
+            }
+            [] => None,
+            more => {
+                log::debug!(
+                    "no window titled {:?}; {} new windows, not guessing",
+                    p.title,
+                    more.len()
+                );
+                None
+            }
+        }
+    }
+
     fn search_pending(&mut self) {
         let keys: Vec<u64> = self.pending.keys().copied().collect();
         for key in keys {
             let p = &self.pending[&key];
-            if let Some(w) = self.find_window(self.root, &p.title, 0) {
+            let found = self.find_window(self.root, &p.title, 0).or_else(|| {
+                (p.since.elapsed() > FALLBACK_AFTER)
+                    .then(|| self.find_new_window(p))
+                    .flatten()
+            });
+            if let Some(w) = found {
                 let parent = p.parent;
                 self.pending.remove(&key);
                 self.withdraw(key, w, parent);
@@ -566,13 +698,16 @@ impl Embedder {
         if e.shown == Some((full, full)) && part != full {
             self.snapshot(key, full);
         }
-        let e = self.embedded.get_mut(&key).unwrap();
         if part.is_empty() {
+            let e = self.embedded.get_mut(&key).unwrap();
             if e.shown.take().is_some() {
-                let _ = self.conn.unmap_window(e.holder);
+                let holder = e.holder;
+                self.take_focus_from(holder);
+                let _ = self.conn.unmap_window(holder);
             }
             return;
         }
+        let e = self.embedded.get_mut(&key).unwrap();
         if e.shown.map(|s| s.1) != Some(part) || e.shown.map(|s| s.0) != Some(full) {
             let _ = self.conn.configure_window(
                 e.window,
@@ -593,6 +728,42 @@ impl Embedder {
             let _ = self.conn.map_window(e.holder);
         }
         e.shown = Some((full, part));
+    }
+
+    /// If the keyboard focus is in the editor (the user clicked into it),
+    /// gives it back to the main window before the editor is hidden, so
+    /// typing reaches Carlita (the text prompt) rather than nowhere.
+    fn take_focus_from(&self, holder: Window) {
+        let Some(focus) = self
+            .conn
+            .get_input_focus()
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .map(|f| f.focus)
+        else {
+            return;
+        };
+        let mut w = focus;
+        for _ in 0..16 {
+            if w == holder {
+                let main = self
+                    .conn
+                    .query_tree(holder)
+                    .ok()
+                    .and_then(|c| c.reply().ok())
+                    .map(|t| t.parent);
+                if let Some(main) = main {
+                    let _ =
+                        self.conn
+                            .set_input_focus(InputFocus::PARENT, main, x11rb::CURRENT_TIME);
+                }
+                return;
+            }
+            match self.conn.query_tree(w).ok().and_then(|c| c.reply().ok()) {
+                Some(t) if t.parent != 0 && w != self.root => w = t.parent,
+                _ => return,
+            }
+        }
     }
 
     /// Reads what the editor shows (it is uncovered, see `place`) and sends
@@ -773,5 +944,64 @@ impl Embedder {
         }
         let _ = self.conn.flush();
         new_windows
+    }
+}
+
+/// Carlita's process id and those of all its descendants (plugin bridges,
+/// the Wine processes of yabridge plugins), read from /proc.
+fn own_processes() -> HashSet<u32> {
+    let me = std::process::id();
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    if let Ok(dir) = std::fs::read_dir("/proc") {
+        for entry in dir.flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+                continue;
+            };
+            // "pid (name) state ppid ...": the name may hold spaces and
+            // parentheses, so read after the last ')'.
+            let ppid = stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+                .and_then(|p| p.parse::<u32>().ok());
+            if let Some(ppid) = ppid {
+                children.entry(ppid).or_default().push(pid);
+            }
+        }
+    }
+    let mut out = HashSet::from([me]);
+    let mut todo = vec![me];
+    while let Some(p) = todo.pop() {
+        for &c in children.get(&p).into_iter().flatten() {
+            if out.insert(c) {
+                todo.push(c);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn own_processes_include_children() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
+        let ours = own_processes();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(ours.contains(&std::process::id()));
+        assert!(ours.contains(&child.id()));
+        assert!(!ours.contains(&1) || std::process::id() == 1);
     }
 }
