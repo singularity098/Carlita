@@ -115,9 +115,12 @@ component ListRow inherits Rectangle {
     touch := TouchArea {
         clicked => { root.clicked(); }
     }
+    // Buttons in the row sit inside its outline, clear of it.
     HorizontalLayout {
         padding-left: Theme.pad;
-        padding-right: 6px;
+        padding-right: 8px;
+        padding-top: 6px;
+        padding-bottom: 6px;
         spacing: 8px;
         VerticalLayout {
             alignment: center;
@@ -272,23 +275,26 @@ component PresetsPage inherits VerticalLayout {
         clicked => { Options.load-preset(p); }
         Rectangle {
             width: Theme.touch;
-            Text {
-                text: p == Options.default-preset ? "★" : "☆";
-                font-size: 24px;
-                color: p == Options.default-preset ? Theme.warn : Theme.text-faint;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            Icon {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 26px;
+                height: 26px;
+                line: p == Options.default-preset ? "" : Icons.star-line;
+                solid: p == Options.default-preset ? Icons.star-solid : "";
+                weight: 1.6;
+                tint: p == Options.default-preset ? Theme.warn : Theme.text-faint;
             }
             TouchArea {
                 clicked => { Options.set-default-preset(p == Options.default-preset ? "" : p); }
             }
         }
         BigButton {
-            icon: "✎";
+            icon-line: Icons.pencil-line;
             clicked => { Options.rename-preset(p); }
         }
         BigButton {
-            icon: "🗑";
+            icon-line: Icons.trash-line;
             danger: true;
             clicked => { Options.delete-preset(p); }
         }
@@ -339,7 +345,7 @@ component MidiPage inherits VerticalLayout {
         title: m.trigger + "  →  " + m.plugin;
         subtitle: m.action;
         BigButton {
-            icon: "🗑";
+            icon-line: Icons.trash-line;
             danger: true;
             clicked => { Options.delete-mapping(m.index); }
         }

@@ -85,7 +85,7 @@ fn empty_descriptor(format: PluginFormat, filename: &str) -> PluginDescriptor {
         parameters: 0,
         is_synth: false,
         has_custom_ui: false,
-        yabridge: filename.contains("/yabridge/") || filename.contains("/yabridge-"),
+        yabridge: is_yabridge_path(filename),
     }
 }
 
@@ -215,6 +215,17 @@ pub enum ProbeResult {
     TimedOut,
 }
 
+/// Whether `target` is a Windows plugin run through yabridge. Scanning one
+/// starts Wine, which can take far longer than a native plugin.
+pub fn is_yabridge_path(target: &str) -> bool {
+    target.contains("/yabridge/") || target.contains("/yabridge-")
+}
+
+/// How long to wait for the rest of the output once the discovery tool has
+/// exited. A process it started (Wine, a yabridge host) can keep the pipe
+/// open long after.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Runs `carla-discovery-native <format> <target>` with a timeout.
 pub fn probe(
     discovery_tool: &Path,
@@ -222,9 +233,18 @@ pub fn probe(
     target: &str,
     timeout: Duration,
 ) -> ProbeResult {
+    use std::os::unix::process::CommandExt;
     let child = Command::new(discovery_tool)
         .arg(format.discovery_arg())
         .arg(target)
+        // Only read the plugin's description, as Carla's own scanner does
+        // by default: the processing test instantiates and runs the plugin,
+        // which is slow and fragile for yabridge (Wine) plugins and makes
+        // them fail or time out.
+        .env("CARLA_DISCOVERY_NO_PROCESSING_CHECKS", "true")
+        // A group of its own, so a hung probe can be stopped together with
+        // whatever it started (Wine, yabridge's host).
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -237,19 +257,35 @@ pub fn probe(
     };
 
     // Read stdout on a helper thread so a chatty plugin cannot fill the pipe
-    // and deadlock while we wait for it.
+    // and deadlock while we wait for it. It is passed on in pieces, so the
+    // output is not lost when a process the probe started keeps the pipe
+    // open after the probe has exited.
     let mut stdout = child.stdout.take().expect("piped stdout");
-    let reader = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stdout.read_to_string(&mut s);
-        s
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            match stdout.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
     });
 
+    let mut output = Vec::new();
     let start = Instant::now();
     loop {
+        while let Ok(chunk) = rx.try_recv() {
+            output.extend(chunk);
+        }
         match child.try_wait() {
             Ok(Some(_status)) => break,
             Ok(None) if start.elapsed() > timeout => {
+                kill_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
                 return ProbeResult::TimedOut;
@@ -258,7 +294,15 @@ pub fn probe(
             Err(e) => return ProbeResult::Failed(e.to_string()),
         }
     }
-    let output = reader.join().unwrap_or_default();
+    let deadline = Instant::now() + DRAIN_TIMEOUT;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(chunk) => output.extend(chunk),
+            Err(_) => break,
+        }
+    }
+    let output = String::from_utf8_lossy(&output);
     let filename = if target.starts_with(':') { "" } else { target };
     let plugins = parse_discovery_output(format, filename, &output);
     if plugins.is_empty() {
@@ -270,6 +314,18 @@ pub fn probe(
     } else {
         ProbeResult::Ok(plugins)
     }
+}
+
+/// Kills every process in the group led by `pid`.
+fn kill_group(pid: u32) {
+    let _ = Command::new("kill")
+        .arg("-KILL")
+        .arg("--")
+        .arg(format!("-{pid}"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 /// Progress reported while scanning.
@@ -314,8 +370,9 @@ pub fn scan_all(
             total,
             current: target.clone(),
         });
-        // LV2 ":all" scans everything at once, so give it longer.
-        let t = if target.starts_with(':') {
+        // LV2 ":all" scans everything at once, and a yabridge plugin starts
+        // Wine first (the first one can take very long), so give them longer.
+        let t = if target.starts_with(':') || is_yabridge_path(&target) {
             timeout * 6
         } else {
             timeout

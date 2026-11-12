@@ -78,7 +78,8 @@ xvfb-run -a -s "-screen 0 1280x800x24" cargo test --workspace
 The engine test runs the real Carla engine against JACK. The editor-embedding
 test creates X11 windows and checks that an editor is moved into the main
 window, cut down to the part an overlay leaves uncovered (with a snapshot),
-hidden, shown and handed back.
+hidden, shown and handed back, and that clicks on the edge strips, F11 and the
+keyboard focus reach the main window while an editor is shown.
 Both tests skip themselves when JACK or X is not available, unless
 `CARLITA_REQUIRE_ENGINE=1` is set (CI sets it).
 
