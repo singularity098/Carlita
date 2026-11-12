@@ -111,6 +111,11 @@ pub struct App {
     undo: Option<Undo>,
     engine: EngineHandle,
     engine_running: bool,
+    /// When the first start was asked for: it waits for the main window to
+    /// exist, so plugin editors get the scale it is drawn at.
+    start_pending: Option<Instant>,
+    /// The scale the main window is drawn at.
+    ui_scale: f32,
     first_start: bool,
     skip_default_preset: bool,
     reload_chain_on_start: bool,
@@ -250,6 +255,8 @@ impl App {
             undo: None,
             engine: EngineHandle::spawn(),
             engine_running: false,
+            start_pending: None,
+            ui_scale: 1.0,
             first_start: true,
             skip_default_preset: opts.skip_default_preset,
             reload_chain_on_start: false,
@@ -277,7 +284,7 @@ impl App {
             let mut a = app.borrow_mut();
             a.init_ui(ui);
             a.engine.send(Command::QueryDrivers);
-            a.start_engine();
+            a.start_pending = Some(Instant::now());
             if a.catalog.plugins.is_empty() {
                 a.start_scan();
             }
@@ -742,6 +749,17 @@ impl App {
     // ============================================================== polling
 
     fn poll(&mut self) {
+        if let Some(since) = self.start_pending {
+            let mut scale = None;
+            self.with_winit(|w| scale = Some(w.scale_factor()));
+            // Give up waiting after a while (no window yet: start anyway).
+            if scale.is_some() || since.elapsed() > Duration::from_secs(3) {
+                self.start_pending = None;
+                self.ui_scale = scale.unwrap_or(1.0) as f32;
+                log::info!("drawing at scale {}", self.ui_scale);
+                self.start_engine();
+            }
+        }
         while let Ok(e) = self.engine.events().try_recv() {
             self.on_engine_event(e);
         }
@@ -866,10 +884,12 @@ impl App {
             output_client: a.output_client.clone(),
             auto_connect: a.auto_connect,
             client_name: "Carlita".into(),
+            ui_scale: self.ui_scale,
         }
     }
 
     fn start_engine(&mut self) {
+        self.start_pending = None;
         let cfg = self.engine_config();
         self.ui()
             .global::<Options>()

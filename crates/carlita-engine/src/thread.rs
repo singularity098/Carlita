@@ -468,6 +468,13 @@ impl Engine {
         );
         h.set_option(sys::ENGINE_OPTION_PREFER_UI_BRIDGES, 1, None);
         h.set_option(sys::ENGINE_OPTION_UIS_ALWAYS_ON_TOP, 0, None);
+        // Carla takes the scale in thousandths. Without it, editors draw at
+        // 1.0 however the desktop is scaled.
+        h.set_option(
+            sys::ENGINE_OPTION_FRONTEND_UI_SCALE,
+            (config.ui_scale.clamp(0.5, 4.0) * 1000.0).round() as i32,
+            None,
+        );
         h.set_option(
             sys::ENGINE_OPTION_AUDIO_BUFFER_SIZE,
             config.buffer_size as i32,

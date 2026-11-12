@@ -22,6 +22,11 @@ const SEARCH_INTERVAL: Duration = Duration::from_millis(100);
 const FALLBACK_AFTER: Duration = Duration::from_millis(1500);
 /// How long to wait for the window manager to let go of an editor window.
 const WITHDRAW_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long the area must keep its size before resizable editors are
+/// resized to it. While the main window is being resized the area changes
+/// many times a second, and an editor resized at each step falls behind
+/// (it flickers, draws only part of itself, and some crash).
+const RESIZE_SETTLE: Duration = Duration::from_millis(300);
 /// How often to put an editor back if something (a window manager) takes it
 /// out of Carlita's window again.
 const MAX_REEMBED: u32 = 5;
@@ -207,6 +212,9 @@ struct Embedder {
     embedded: HashMap<u64, Embedded>,
     area: Area,
     uncovered: Area,
+    /// When resizable editors should next be fitted to the area (set while
+    /// the area keeps changing size).
+    fit_due: Option<Instant>,
 }
 
 impl Embedder {
@@ -240,6 +248,7 @@ impl Embedder {
             embedded: HashMap::new(),
             area: Area::default(),
             uncovered: Area::default(),
+            fit_due: None,
         })
     }
 
@@ -267,6 +276,13 @@ impl Embedder {
             }
             if !self.withdrawing.is_empty() {
                 self.check_withdrawing();
+            }
+            if self.fit_due.is_some_and(|t| Instant::now() >= t) {
+                self.fit_due = None;
+                for key in self.embedded.keys().copied().collect::<Vec<_>>() {
+                    self.fit_resizable(key);
+                }
+                let _ = self.conn.flush();
             }
         }
         for key in self.embedded.keys().copied().collect::<Vec<_>>() {
@@ -302,10 +318,12 @@ impl Embedder {
                 let resized = area.width != self.area.width || area.height != self.area.height;
                 self.area = area;
                 self.uncovered = uncovered;
+                if resized {
+                    // The editor keeps its size (centred and cut to the
+                    // area) until the area stops changing.
+                    self.fit_due = Some(Instant::now() + RESIZE_SETTLE);
+                }
                 for key in self.embedded.keys().copied().collect::<Vec<_>>() {
-                    if resized {
-                        self.fit_resizable(key);
-                    }
                     self.place(key);
                 }
             }

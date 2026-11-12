@@ -22,6 +22,9 @@ pub struct EngineConfig {
     /// Connect inputs/outputs automatically after start.
     pub auto_connect: bool,
     pub client_name: String,
+    /// The scale Carlita draws at (the desktop's), passed to plugin editors
+    /// so they draw at the same size.
+    pub ui_scale: f32,
 }
 
 impl Default for EngineConfig {
@@ -36,6 +39,7 @@ impl Default for EngineConfig {
             output_client: String::new(),
             auto_connect: true,
             client_name: "Carlita".into(),
+            ui_scale: 1.0,
         }
     }
 }
