@@ -1,0 +1,26 @@
+diff --git a/source/bridges-plugin/CarlaBridgePlugin.cpp b/source/bridges-plugin/CarlaBridgePlugin.cpp
+index cbf79eb..e13211a 100644
+--- a/source/bridges-plugin/CarlaBridgePlugin.cpp
++++ b/source/bridges-plugin/CarlaBridgePlugin.cpp
+@@ -610,6 +610,21 @@ int main(int argc, char* argv[])
+                                         nullptr);
+         }
+ 
++        // Carlita: the host does not hand its UI scale to bridges, so plugin
++        // editors here would always be told 1.0. The host sets this instead.
++        if (useBridge)
++        {
++            if (const char* const uiScale = std::getenv("CARLA_BRIDGE_UI_SCALE"))
++            {
++                const double scale = std::atof(uiScale);
++                if (scale >= 0.5 && scale <= 4.0)
++                    carla_set_engine_option(gHostHandle,
++                                            CARLA_BACKEND_NAMESPACE::ENGINE_OPTION_FRONTEND_UI_SCALE,
++                                            static_cast<int>(scale*1000+0.5),
++                                            nullptr);
++            }
++        }
++
+         // -----------------------------------------------------------------
+         // Init plugin
+ 
