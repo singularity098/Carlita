@@ -357,6 +357,7 @@ export component MainWindow inherits Window {
     callback close-window;
     callback add-track;
     callback rename-track;
+    callback rename-track-to(int, string);
     callback delete-track;
     callback cycle-input;
     callback toggle-mute;
@@ -388,11 +389,11 @@ export component MainWindow inherits Window {
     function open-right() { root.right-pos = 1; root.left-pos = 0; root.top-pos = 0; }
     function close-right() { root.right-pos = 0; }
 
-    // Typing goes back to the window's own key handling whenever the prompt
-    // opens (it reads the hardware keyboard through it) and when the browser
-    // (whose search box had the focus) closes.
+    // Typing goes back to the window's own key handling when the text
+    // prompt (whose field has the focus while open) or the browser (whose
+    // search box had it) closes.
     changed prompt-open => {
-        if root.prompt-open { keys.focus(); }
+        if !root.prompt-open && !root.browser-open { keys.focus(); }
     }
     changed browser-open => {
         if !root.browser-open { keys.focus(); }
@@ -404,8 +405,8 @@ export component MainWindow inherits Window {
     forward-focus: keys;
     keys := FocusScope {
         key-pressed(e) => {
-            // The text prompt takes typing from a hardware keyboard too:
-            // Return accepts, Escape cancels.
+            // The text prompt's field types itself; should it have lost the
+            // focus, Return and Escape still answer the prompt.
             if root.prompt-open {
                 if e.text == Key.Return {
                     root.prompt-open = false;
@@ -415,14 +416,6 @@ export component MainWindow inherits Window {
                 if e.text == Key.Escape {
                     root.prompt-open = false;
                     root.prompt-done(false, "");
-                    return accept;
-                }
-                if e.text == Key.Backspace {
-                    root.prompt-text = TextUtil.drop-last(root.prompt-text);
-                    return accept;
-                }
-                if !e.modifiers.control && !e.modifiers.meta && TextUtil.is-text(e.text) {
-                    root.prompt-text += e.text;
                     return accept;
                 }
                 return accept;
@@ -535,6 +528,8 @@ export component MainWindow inherits Window {
                             minimum: p.minimum;
                             maximum: p.maximum;
                             value: p.value;
+                            has-default: true;
+                            default-value: p.default;
                             changed(v) => { root.set-param(p.index, p.is-int ? round(v) : v); }
                         }
                     }
@@ -611,10 +606,14 @@ export component MainWindow inherits Window {
         tracks: root.tracks;
         fullscreen: false;
         maximized: root.window-maximized;
-        tab-clicked(id, selected) => {
-            if selected { root.open-left(); } else { root.select-track(id); }
+        pick-track(id) => { root.select-track(id); }
+        tab-clicked(id, was-selected) => {
+            if was-selected { root.open-left(); }
         }
         close-track(id) => { root.close-track(id); }
+        rename-started(id) => { root.close-left(); }
+        rename-track(id, name) => { root.rename-track-to(id, name); }
+        rename-ended => { keys.focus(); }
         add-track => {
             root.add-track();
             root.open-left();
@@ -631,8 +630,11 @@ export component MainWindow inherits Window {
     if root.left-pos > 0 || root.right-pos > 0: Rectangle {
         y: root.top-inset;
         height: root.height - root.top-inset;
-        background: #000;
-        opacity: 0.6 * max(root.left-pos, root.right-pos);
+        // A see-through colour, not `opacity`: with `opacity` (on an element
+        // with children) the whole window-sized scrim was drawn into an
+        // offscreen layer on every frame, which cost a high-refresh display
+        // its frame rate while a sidebar was out.
+        background: Colors.rgba(0, 0, 0, 0.6 * max(root.left-pos, root.right-pos));
         TouchArea {
             property <bool> swiped;
             moved => {
@@ -709,8 +711,7 @@ export component MainWindow inherits Window {
     // Fullscreen: the track bar slides down over everything, with a scrim
     // below it that closes it on a tap.
     if !root.docked && root.top-pos > 0: Rectangle {
-        background: #000;
-        opacity: 0.45 * root.top-pos;
+        background: Colors.rgba(0, 0, 0, 0.45 * root.top-pos);
         TouchArea {
             clicked => { root.close-top(); }
         }
@@ -723,14 +724,24 @@ export component MainWindow inherits Window {
         visible: root.top-pos > 0;
         tracks: root.tracks;
         fullscreen: true;
-        tab-clicked(id, selected) => {
+        maximized: root.window-maximized;
+        pick-track(id) => { root.select-track(id); }
+        tab-clicked(id, was-selected) => {
             root.close-top();
-            if selected { root.open-left(); } else { root.select-track(id); }
+            if was-selected { root.open-left(); }
         }
         close-track(id) => {
             root.close-top();
             root.close-track(id);
         }
+        rename-track(id, name) => { root.rename-track-to(id, name); }
+        rename-ended => { keys.focus(); }
+        minimize => { root.minimize-window(); }
+        toggle-maximize => {
+            root.close-top();
+            root.toggle-maximize();
+        }
+        close-window => { root.close-window(); }
         add-track => {
             root.add-track();
             root.open-left();

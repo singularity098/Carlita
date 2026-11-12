@@ -44,6 +44,8 @@ export struct ParamItem {
     value: float,
     minimum: float,
     maximum: float,
+    // The plugin's default value (a double tap on the slider restores it).
+    default: float,
     text: string,
     is-bool: bool,
     is-int: bool,

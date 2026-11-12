@@ -141,6 +141,10 @@ pub struct App {
     tracks_model: Rc<VecModel<TrackItem>>,
     meters: Meters,
     restart_requested: bool,
+    /// The timer that runs `poll`, paced to the display's refresh rate.
+    poll_timer: Rc<slint::Timer>,
+    /// When the window's size and place were last noted.
+    last_window_check: Instant,
 }
 
 /// Runs `f` on the app, deferring it if the app is already borrowed
@@ -280,6 +284,8 @@ impl App {
             tracks_model,
             meters: Meters::default(),
             restart_requested: false,
+            poll_timer: Rc::new(slint::Timer::default()),
+            last_window_check: Instant::now(),
         }));
 
         Self::wire(ui, &app);
@@ -295,20 +301,21 @@ impl App {
             a.system.send(SysCmd::RefreshBt);
         }
 
-        // Poll engine/editor/system events at display rate.
-        let timer = slint::Timer::default();
-        let poll_app = app.clone();
+        // Poll engine/editor/system events at display rate (60 Hz until the
+        // window is up and the display's own rate is known).
+        let timer = app.borrow().poll_timer.clone();
+        let poll_app = Rc::downgrade(&app);
         timer.start(
             slint::TimerMode::Repeated,
             Duration::from_millis(16),
             move || {
-                if let Ok(mut a) = poll_app.try_borrow_mut() {
-                    a.poll();
+                if let Some(app) = poll_app.upgrade() {
+                    if let Ok(mut a) = app.try_borrow_mut() {
+                        a.poll();
+                    }
                 }
             },
         );
-        // Keep the timer alive for the app's lifetime.
-        std::mem::forget(timer);
         Ok(app)
     }
 
@@ -318,11 +325,20 @@ impl App {
 
     fn init_ui(&mut self, ui: &MainWindow) {
         let d = &self.settings.display;
+        // Where the window was, also when fullscreen: that picks the
+        // monitor it fills.
+        if let (Some(x), Some(y)) = (d.window_x, d.window_y) {
+            ui.window().set_position(slint::PhysicalPosition::new(x, y));
+        }
         if !d.fullscreen {
             ui.window().set_size(slint::LogicalSize::new(
                 d.window_width as f32,
                 d.window_height as f32,
             ));
+            if d.maximized {
+                ui.window().set_maximized(true);
+                ui.set_window_maximized(true);
+            }
         }
         ui.window().set_fullscreen(d.fullscreen);
         ui.set_strip_width(d.edge_strip_width as f32);
@@ -357,13 +373,12 @@ impl App {
         }
 
         let tu = ui.global::<TextUtil>();
-        tu.on_drop_last(|s| {
-            let mut s = s.to_string();
-            s.pop();
-            ss(s)
+        tu.on_edit(|text, anchor, cursor, insert, backspace| {
+            ss(edit_text(&text, anchor, cursor, &insert, backspace).0)
         });
-        tu.on_mask(|s| ss("•".repeat(s.chars().count())));
-        tu.on_is_text(|s| is_typed_text(&s));
+        tu.on_edit_cursor(|text, anchor, cursor, insert, backspace| {
+            edit_text(&text, anchor, cursor, &insert, backspace).1 as i32
+        });
         tu.on_port_label(|s| ss(port_label(&s)));
 
         // ---- chain
@@ -440,12 +455,21 @@ impl App {
             .set_minimized(true));
         on!(ui, on_toggle_maximize, |a| {
             let ui = a.ui();
+            if a.settings.display.fullscreen {
+                // From the fullscreen track bar: leave fullscreen for a
+                // maximized window.
+                a.settings.display.maximized = true;
+                a.set_fullscreen(false);
+                return;
+            }
             let m = !ui.window().is_maximized();
             if m {
                 a.remember_window_size();
             }
             ui.window().set_maximized(m);
             ui.set_window_maximized(m);
+            a.settings.display.maximized = m;
+            a.save_settings();
         });
         // Closing saves the window size and settings in `shutdown`.
         on!(ui, on_close_window, |a| a.quit());
@@ -480,6 +504,13 @@ impl App {
                 name,
                 false,
             );
+        });
+        on!(ui, on_rename_track_to, |a, id: i32, name: SharedString| {
+            let name = name.trim();
+            if let (Some(t), false) = (a.rig.track_mut(TrackId(id as u64)), name.is_empty()) {
+                t.name = name.to_string();
+            }
+            a.refresh_slots();
         });
         on!(ui, on_delete_track, |a| a.delete_track(a.view_track));
         on!(ui, on_close_track, |a, id: i32| a
@@ -763,6 +794,8 @@ impl App {
                 self.start_pending = None;
                 self.ui_scale = scale.unwrap_or(1.0) as f32;
                 log::info!("drawing at scale {}", self.ui_scale);
+                self.keep_window_on_screen();
+                self.pace_to_display();
                 self.start_engine();
             }
         }
@@ -810,6 +843,10 @@ impl App {
         let maximized = ui.window().is_maximized();
         if ui.get_window_maximized() != maximized {
             ui.set_window_maximized(maximized);
+        }
+        if self.last_window_check.elapsed() > Duration::from_millis(500) {
+            self.last_window_check = Instant::now();
+            self.note_window_state();
         }
         if self.toast_at.is_some_and(|t| t.elapsed() > TOAST_TIMEOUT) {
             self.toast_at = None;
@@ -1123,6 +1160,7 @@ impl App {
                             value: p.value,
                             minimum: p.min,
                             maximum: p.max,
+                            default: p.default,
                             text: ss(if p.unit.is_empty() || p.text.ends_with(&p.unit) {
                                 p.text.clone()
                             } else {
@@ -2030,7 +2068,6 @@ impl App {
             .catalog
             .filtered(&self.filter)
             .into_iter()
-            .take(600)
             .map(|p| PluginItem {
                 key: ss(p.key()),
                 name: ss(&p.name),
@@ -2096,7 +2133,20 @@ impl App {
                 for (path, err) in &report.failures {
                     log::info!("scan: {path}: {err}");
                 }
-                ui.set_scan_status(ss(format!("Found {found} plugins{failed}")));
+                let log_file = self.paths.scan_log_file();
+                let wrote = std::fs::create_dir_all(&self.paths.cache_dir)
+                    .and_then(|_| std::fs::write(&log_file, &report.log));
+                let details = match wrote {
+                    Ok(()) if !report.failures.is_empty() => {
+                        format!(" (details in {})", log_file.display())
+                    }
+                    Ok(()) => String::new(),
+                    Err(e) => {
+                        log::warn!("could not write {}: {e}", log_file.display());
+                        String::new()
+                    }
+                };
+                ui.set_scan_status(ss(format!("Found {found} plugins{failed}{details}")));
                 self.refresh_browser();
             }
         }
@@ -2300,8 +2350,15 @@ impl App {
                 d.window_width as f32,
                 d.window_height as f32,
             ));
+            if let (Some(x), Some(y)) = (d.window_x, d.window_y) {
+                ui.window().set_position(slint::PhysicalPosition::new(x, y));
+            }
+            if d.maximized {
+                ui.window().set_maximized(true);
+                ui.set_window_maximized(true);
+            }
         } else {
-            self.remember_window_size();
+            self.note_window_state();
             ui.window().set_fullscreen(true);
         }
         self.settings.display.fullscreen = fs;
@@ -2309,18 +2366,83 @@ impl App {
         self.save_settings();
     }
 
+    /// Notes whether the window is maximized and, when it is a plain window,
+    /// its size and place, so the next start opens it the same way.
+    fn note_window_state(&mut self) {
+        let ui = self.ui();
+        let w = ui.window();
+        if self.settings.display.fullscreen || w.is_fullscreen() || w.is_minimized() {
+            return;
+        }
+        self.settings.display.maximized = w.is_maximized();
+        self.remember_window_size();
+    }
+
     fn remember_window_size(&mut self) {
         let ui = self.ui();
+        let w = ui.window();
         if self.settings.display.fullscreen
-            || ui.window().is_fullscreen()
-            || ui.window().is_maximized()
+            || w.is_fullscreen()
+            || w.is_maximized()
+            || w.is_minimized()
         {
             return;
         }
-        let size = ui.window().size().to_logical(ui.window().scale_factor());
+        let size = w.size().to_logical(w.scale_factor());
         if size.width >= 400.0 && size.height >= 300.0 {
             self.settings.display.window_width = size.width as u32;
             self.settings.display.window_height = size.height as u32;
+        }
+        let mut pos = None;
+        self.with_winit(|win| pos = win.outer_position().ok());
+        if let Some(p) = pos {
+            self.settings.display.window_x = Some(p.x);
+            self.settings.display.window_y = Some(p.y);
+        }
+    }
+
+    /// Moves the window back onto a monitor when the place it was saved at
+    /// is no longer on any (a monitor was unplugged or rearranged).
+    fn keep_window_on_screen(&self) {
+        self.with_winit(|w| {
+            let Ok(pos) = w.outer_position() else { return };
+            let size = w.outer_size();
+            let (cx, cy) = (
+                pos.x + size.width as i32 / 2,
+                pos.y + size.height as i32 / 2,
+            );
+            let on_screen = w.available_monitors().any(|m| {
+                let (mp, ms) = (m.position(), m.size());
+                cx >= mp.x
+                    && cy >= mp.y
+                    && cx < mp.x + ms.width as i32
+                    && cy < mp.y + ms.height as i32
+            });
+            if !on_screen {
+                if let Some(m) = w
+                    .primary_monitor()
+                    .or_else(|| w.available_monitors().next())
+                {
+                    log::info!("the saved window place is off screen; moving the window back");
+                    w.set_outer_position(m.position());
+                }
+            }
+        });
+    }
+
+    /// Runs `poll` (meters, editor placement, ...) once per frame of the
+    /// display the window is on, so a 120 Hz display gets 120 updates a second.
+    fn pace_to_display(&self) {
+        let mut mhz = None;
+        self.with_winit(|w| {
+            mhz = w
+                .current_monitor()
+                .and_then(|m| m.refresh_rate_millihertz())
+        });
+        if let Some(mhz) = mhz.filter(|&m| m >= 30_000) {
+            let interval = Duration::from_micros(1_000_000_000 / mhz as u64);
+            log::info!("display refresh {:.1} Hz", mhz as f64 / 1000.0);
+            self.poll_timer.set_interval(interval);
         }
     }
 
@@ -2347,7 +2469,7 @@ impl App {
     }
 
     pub fn shutdown(&mut self) {
-        self.remember_window_size();
+        self.note_window_state();
         self.save_settings();
         self.release_editors();
         self.engine.send(Command::Stop);
@@ -2369,13 +2491,38 @@ impl App {
     }
 }
 
-/// Whether a key press from a hardware keyboard is text to type: not a
-/// control character (Backspace, Return, Escape, ...) and not one of the
-/// private-use characters Slint gives special keys (arrows, F-keys, ...).
-fn is_typed_text(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .all(|c| !c.is_control() && !('\u{f700}'..='\u{f8ff}').contains(&c))
+/// Types `insert` into `text` at a text field's selection (`anchor` to
+/// `cursor`, byte offsets), replacing what is selected; with `backspace`,
+/// deletes the selection, or the character before the cursor when nothing
+/// is selected. Returns the new text and the cursor's new byte offset.
+fn edit_text(
+    text: &str,
+    anchor: i32,
+    cursor: i32,
+    insert: &str,
+    backspace: bool,
+) -> (String, usize) {
+    // Offsets from the field are on character boundaries; clamp anyway.
+    let fix = |o: i32| {
+        let mut o = (o.max(0) as usize).min(text.len());
+        while !text.is_char_boundary(o) {
+            o -= 1;
+        }
+        o
+    };
+    let (mut start, end) = {
+        let (a, c) = (fix(anchor), fix(cursor));
+        (a.min(c), a.max(c))
+    };
+    if backspace && start == end {
+        start = text[..start]
+            .char_indices()
+            .next_back()
+            .map_or(0, |(i, _)| i);
+    }
+    let insert = if backspace { "" } else { insert };
+    let out = format!("{}{insert}{}", &text[..start], &text[end..]);
+    (out, start + insert.len())
 }
 
 /// A MIDI port's name as shown in the options: without the ALSA
@@ -2425,13 +2572,19 @@ mod text_tests {
     }
 
     #[test]
-    fn typed_text() {
-        assert!(is_typed_text("a"));
-        assert!(is_typed_text("Ä"));
-        assert!(!is_typed_text("\u{8}"));
-        assert!(!is_typed_text("\n"));
-        assert!(!is_typed_text("\u{1b}"));
-        assert!(!is_typed_text("\u{f700}"));
-        assert!(!is_typed_text(""));
+    fn on_screen_keys_edit_at_the_cursor() {
+        // Typing at the cursor, in the middle.
+        assert_eq!(edit_text("helo", 3, 3, "l", false), ("hello".into(), 4));
+        // Typing over a selection (either direction).
+        assert_eq!(edit_text("hello", 1, 4, "E", false), ("hEo".into(), 2));
+        assert_eq!(edit_text("hello", 4, 1, "E", false), ("hEo".into(), 2));
+        // Backspace deletes the character before the cursor, or the selection.
+        assert_eq!(edit_text("hello", 5, 5, "", true), ("hell".into(), 4));
+        assert_eq!(edit_text("hello", 0, 0, "", true), ("hello".into(), 0));
+        assert_eq!(edit_text("hello", 0, 5, "", true), ("".into(), 0));
+        // Multi-byte characters.
+        assert_eq!(edit_text("aÄb", 3, 3, "", true), ("ab".into(), 1));
+        // Offsets out of range are clamped.
+        assert_eq!(edit_text("ab", 99, 99, "c", false), ("abc".into(), 3));
     }
 }

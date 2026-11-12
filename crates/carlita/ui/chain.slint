@@ -436,6 +436,8 @@ export component ChainPanel inherits Rectangle {
                 minimum: 0;
                 maximum: 2;
                 value: root.track-volume;
+                has-default: true;
+                default-value: 1;
                 changed(v) => { root.set-volume(v); }
             }
             Text {

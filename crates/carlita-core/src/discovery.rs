@@ -211,9 +211,14 @@ fn walk(dir: &Path, ext: &str, out: &mut Vec<PathBuf>, depth: usize) {
 #[derive(Debug)]
 pub enum ProbeResult {
     Ok(Vec<PluginDescriptor>),
-    Failed(String),
-    TimedOut,
+    /// The reason, and the last lines the probe (and what it started, such
+    /// as yabridge and Wine) printed.
+    Failed(String, String),
+    TimedOut(String),
 }
+
+/// How many of the last lines of a probe's error output are kept.
+const ERROR_LINES: usize = 12;
 
 /// Whether `target` is a Windows plugin run through yabridge. Scanning one
 /// starts Wine, which can take far longer than a native plugin.
@@ -247,13 +252,57 @@ pub fn probe(
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn();
     let mut child = match child {
         Ok(c) => c,
         Err(e) => {
-            return ProbeResult::Failed(format!("cannot run {}: {e}", discovery_tool.display()))
+            return ProbeResult::Failed(
+                format!("cannot run {}: {e}", discovery_tool.display()),
+                String::new(),
+            )
         }
+    };
+
+    // The error output (yabridge and Wine report there), for the scan log.
+    // Only its last lines are kept.
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let errors = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    {
+        let errors = errors.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            let mut partial = Vec::new();
+            loop {
+                match stderr.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        partial.extend_from_slice(&buf[..n]);
+                        while let Some(i) = partial.iter().position(|&b| b == b'\n') {
+                            let line: Vec<u8> = partial.drain(..=i).collect();
+                            let line = String::from_utf8_lossy(&line).trim_end().to_string();
+                            if line.is_empty() {
+                                continue;
+                            }
+                            let mut e = errors.lock().unwrap();
+                            if e.len() == ERROR_LINES {
+                                e.pop_front();
+                            }
+                            e.push_back(line);
+                        }
+                    }
+                }
+            }
+        });
+    }
+    let error_text = move || {
+        errors
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     };
 
     // Read stdout on a helper thread so a chatty plugin cannot fill the pipe
@@ -288,10 +337,10 @@ pub fn probe(
                 kill_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
-                return ProbeResult::TimedOut;
+                return ProbeResult::TimedOut(error_text());
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(e) => return ProbeResult::Failed(e.to_string()),
+            Err(e) => return ProbeResult::Failed(e.to_string(), error_text()),
         }
     }
     let deadline = Instant::now() + DRAIN_TIMEOUT;
@@ -310,7 +359,7 @@ pub fn probe(
             .lines()
             .find_map(|l| l.trim().strip_prefix("carla-discovery::error::"))
             .unwrap_or("no plugins found");
-        ProbeResult::Failed(err.to_string())
+        ProbeResult::Failed(err.to_string(), error_text())
     } else {
         ProbeResult::Ok(plugins)
     }
@@ -341,6 +390,9 @@ pub struct ScanProgress {
 pub struct ScanReport {
     pub plugins: Vec<PluginDescriptor>,
     pub failures: Vec<(String, String)>,
+    /// A readable account of the scan: the folders searched, and what each
+    /// probe found or why it failed (with its error output).
+    pub log: String,
 }
 
 /// Scans all formats. `progress` is called before each probe.
@@ -350,19 +402,36 @@ pub fn scan_all(
     timeout: Duration,
     mut progress: impl FnMut(ScanProgress),
 ) -> ScanReport {
+    use std::fmt::Write;
+    let mut report = ScanReport::default();
+    let log = &mut report.log;
+    let _ = writeln!(log, "Scanner: {}", discovery_tool.display());
     let mut jobs: Vec<(PluginFormat, String)> = Vec::new();
     for &format in formats {
         match format {
             PluginFormat::Lv2 | PluginFormat::Internal => jobs.push((format, ":all".into())),
             _ => {
-                for c in find_candidates(format, &default_search_paths(format)) {
+                let roots = default_search_paths(format);
+                let found = find_candidates(format, &roots);
+                let _ = writeln!(log, "\n{}: {} found", format.label(), found.len());
+                for r in &roots {
+                    let n = found.iter().filter(|c| c.starts_with(r)).count();
+                    let state = if r.is_dir() {
+                        format!("{n}")
+                    } else {
+                        "missing".into()
+                    };
+                    let _ = writeln!(log, "  {:>7}  {}", state, r.display());
+                }
+                for c in found {
                     jobs.push((format, c.to_string_lossy().into_owned()));
                 }
             }
         }
     }
+    let yabridge = jobs.iter().filter(|(_, t)| is_yabridge_path(t)).count();
+    let _ = writeln!(log, "\nyabridge plugins found: {yabridge}\n");
 
-    let mut report = ScanReport::default();
     let total = jobs.len();
     for (i, (format, target)) in jobs.into_iter().enumerate() {
         progress(ScanProgress {
@@ -377,10 +446,29 @@ pub fn scan_all(
         } else {
             timeout
         };
-        match probe(discovery_tool, format, &target, t) {
+        let started = Instant::now();
+        let result = probe(discovery_tool, format, &target, t);
+        let secs = started.elapsed().as_secs_f32();
+        let (outcome, errors) = match &result {
+            ProbeResult::Ok(p) => (format!("ok, {} plugin(s)", p.len()), ""),
+            ProbeResult::Failed(e, out) => (format!("FAILED: {e}"), out.as_str()),
+            ProbeResult::TimedOut(out) => {
+                (format!("TIMED OUT after {}s", t.as_secs()), out.as_str())
+            }
+        };
+        let log = &mut report.log;
+        let _ = writeln!(log, "[{}] {target}: {outcome} ({secs:.1}s)", format.label());
+        // The error output of failed probes only: plugins that load fine
+        // can be chatty.
+        if !errors.is_empty() {
+            for l in errors.lines() {
+                let _ = writeln!(log, "      | {l}");
+            }
+        }
+        match result {
             ProbeResult::Ok(p) => report.plugins.extend(p),
-            ProbeResult::Failed(e) => report.failures.push((target, e)),
-            ProbeResult::TimedOut => report.failures.push((target, "timed out".into())),
+            ProbeResult::Failed(e, _) => report.failures.push((target, e)),
+            ProbeResult::TimedOut(_) => report.failures.push((target, "timed out".into())),
         }
     }
     progress(ScanProgress {
