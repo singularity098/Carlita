@@ -1,0 +1,105 @@
+// Hover help: a short description of a control, shown when the mouse rests
+// on it for a moment. A control puts a `Tip` inside itself (a direct child
+// of its outermost element, outside any layout, so it covers the control)
+// and binds `hover` and `pressed` to its TouchArea. The window draws the
+// tip once (`TooltipLayer`, above everything else).
+//
+// Touch has no hover: a touch presses the control at once, which hides its
+// tip, so tips only show for a mouse.
+import { Theme } from "theme.slint";
+
+export global Tips {
+    // The tip to show ("" = none), and the control it is for, in window
+    // coordinates.
+    in-out property <string> text;
+    in-out property <length> x;
+    in-out property <length> y;
+    in-out property <length> width;
+    in-out property <length> height;
+    // Counts the tips asked for, so a control that the mouse leaves hides
+    // only its own tip, not the next control's.
+    in-out property <int> serial;
+
+    public function hide() {
+        root.text = "";
+    }
+}
+
+export component Tip {
+    in property <string> text;
+    in property <bool> hover;
+    in property <bool> pressed;
+    property <int> mine: -1;
+
+    function update() {
+        if root.hover && !root.pressed && root.text != "" {
+            Tips.serial += 1;
+            root.mine = Tips.serial;
+            Tips.x = root.absolute-position.x;
+            Tips.y = root.absolute-position.y;
+            Tips.width = root.width;
+            Tips.height = root.height;
+            Tips.text = root.text;
+        } else if Tips.serial == root.mine {
+            Tips.text = "";
+        }
+    }
+    changed hover => { root.update(); }
+    changed pressed => { root.update(); }
+    // A tip that changes while it shows (a button whose meaning flips).
+    changed text => {
+        if root.hover && Tips.serial == root.mine {
+            Tips.text = root.text;
+        }
+    }
+}
+
+// Draws the tip asked for, after the mouse has rested a moment.
+export component TooltipLayer inherits Rectangle {
+    property <string> text: Tips.text;
+    property <int> serial: Tips.serial;
+    property <bool> shown: false;
+    changed serial => { root.shown = false; }
+    changed text => {
+        if root.text == "" { root.shown = false; }
+    }
+    Timer {
+        interval: 600ms;
+        running: root.text != "" && !root.shown;
+        triggered => { root.shown = true; }
+    }
+    // Long enough to read; a tip left behind (its control went away under
+    // the mouse) does not stay.
+    Timer {
+        interval: 12s;
+        running: root.shown;
+        triggered => { Tips.hide(); }
+    }
+
+    if root.shown && root.text != "": Rectangle {
+        property <length> margin: 8px;
+        property <length> gap: 6px;
+        width: min(380px, label.preferred-width + 24px, root.width - 2 * self.margin);
+        height: label.preferred-height + 14px;
+        // Centred under the control, inside the window; above it when there
+        // is no room below.
+        x: max(self.margin, min(root.width - self.width - self.margin, Tips.x + (Tips.width - self.width) / 2));
+        y: Tips.y + Tips.height + self.gap + self.height <= root.height - self.margin
+            ? Tips.y + Tips.height + self.gap
+            : max(self.margin, Tips.y - self.height - self.gap);
+        border-radius: 8px;
+        background: Theme.popup;
+        border-width: 1px;
+        border-color: Theme.border-hover;
+        label := Text {
+            x: 12px;
+            y: 7px;
+            width: parent.width - 24px;
+            text: root.text;
+            font-size: Theme.font-small;
+            font-weight: Theme.regular;
+            color: Theme.text;
+            wrap: word-wrap;
+        }
+    }
+}

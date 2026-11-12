@@ -4,6 +4,7 @@
 import { Theme } from "theme.slint";
 import { TrackItem } from "types.slint";
 import { Icon, Icons } from "icons.slint";
+import { Tip } from "tooltip.slint";
 
 component TrackTab inherits Rectangle {
     in property <TrackItem> item;
@@ -96,6 +97,13 @@ component TrackTab inherits Rectangle {
             root.start-editing();
         }
     }
+    Tip {
+        text: root.editing ? "" : root.item.selected
+            ? "Tap for this track's chain; double-click to rename it"
+            : "Show " + root.item.name + "; double-click to rename it";
+        hover: touch.has-hover;
+        pressed: touch.pressed;
+    }
 
     row := HorizontalLayout {
         padding-left: 16px;
@@ -184,6 +192,11 @@ component TrackTab inherits Rectangle {
             close-touch := TouchArea {
                 clicked => { root.close(); }
             }
+            Tip {
+                text: root.show-close ? "Close " + root.item.name : "";
+                hover: close-touch.has-hover;
+                pressed: close-touch.pressed;
+            }
         }
     }
 
@@ -194,6 +207,7 @@ component WindowButton inherits Rectangle {
     // SVG path commands for the icon.
     in property <string> icon;
     in property <bool> danger;
+    in property <string> tip;
     callback clicked;
     width: 52px;
     background: touch.pressed ? (root.danger ? Theme.danger.darker(20%) : #ffffff33)
@@ -215,6 +229,11 @@ component WindowButton inherits Rectangle {
     touch := TouchArea {
         mouse-cursor: default;
         clicked => { root.clicked(); }
+    }
+    Tip {
+        text: root.tip;
+        hover: touch.has-hover;
+        pressed: touch.pressed;
     }
 }
 
@@ -328,6 +347,11 @@ export component TrackBar inherits Rectangle {
                     add-touch := TouchArea {
                         clicked => { root.add-track(); }
                     }
+                    Tip {
+                        text: "Add a track";
+                        hover: add-touch.has-hover;
+                        pressed: add-touch.pressed;
+                    }
                 }
                 // Leaves room to grab the bar after the last tab.
                 Rectangle {
@@ -340,6 +364,7 @@ export component TrackBar inherits Rectangle {
         // fullscreen there is also a button that hides the bar again.
         if root.fullscreen: WindowButton {
             icon: "M 3 9 L 7 5 L 11 9";
+            tip: "Hide this bar";
             clicked => { root.dismiss(); }
         }
         WindowButton {
@@ -347,20 +372,24 @@ export component TrackBar inherits Rectangle {
                 // Leave fullscreen: corners pointing inwards.
                 ? "M 5.5 2.5 L 5.5 5.5 L 2.5 5.5 M 11.5 5.5 L 8.5 5.5 L 8.5 2.5 M 8.5 11.5 L 8.5 8.5 L 11.5 8.5 M 2.5 8.5 L 5.5 8.5 L 5.5 11.5"
                 : "M 2.5 5.5 L 2.5 2.5 L 5.5 2.5 M 8.5 2.5 L 11.5 2.5 L 11.5 5.5 M 11.5 8.5 L 11.5 11.5 L 8.5 11.5 M 5.5 11.5 L 2.5 11.5 L 2.5 8.5";
+            tip: root.fullscreen ? "Leave fullscreen (F11)" : "Fullscreen (F11)";
             clicked => { root.toggle-fullscreen(); }
         }
         WindowButton {
             icon: "M 3 7.5 L 11 7.5";
+            tip: "Minimize";
             clicked => { root.minimize(); }
         }
         WindowButton {
             // In fullscreen this leaves fullscreen for a maximized window.
             icon: root.maximized && !root.fullscreen ? "M 3 5 L 9 5 L 9 11 L 3 11 Z M 5 5 L 5 3 L 11 3 L 11 9 L 9 9" : "M 3 3 L 11 3 L 11 11 L 3 11 Z";
+            tip: root.fullscreen ? "Leave fullscreen for a maximized window" : root.maximized ? "Restore" : "Maximize";
             clicked => { root.toggle-maximize(); }
         }
         WindowButton {
             icon: "M 3.5 3.5 L 10.5 10.5 M 10.5 3.5 L 3.5 10.5";
             danger: true;
+            tip: "Quit Carlita";
             clicked => { root.close-window(); }
         }
     }

@@ -55,8 +55,10 @@
   Plugins that fail to load get the same placeholder.
 * **Presets** are JSON files that contain the whole rig, each plugin's
   Carla state (`.carxs` XML from `carla_save_plugin_state`), per-plugin
-  and MIDI-learn mappings. File writes are atomic. Version 1 presets
-  (a single chain) load as a one-track rig.
+  and MIDI-learn mappings, and which plugin was shown (`selected`, plus
+  `track_selections` for the other tracks), which is shown again on load.
+  File writes are atomic. Version 1 presets (a single chain) load as a
+  one-track rig.
 * **Scanning** runs `carla-discovery-native` once per binary, in a separate
   process with a timeout. The results are cached in `plugins.json`.
   yabridge's `~/.vst/yabridge` and `~/.vst3/yabridge` folders are part of the
@@ -95,7 +97,8 @@
 | MIDI learn for bypass | Done: toggle or momentary, CC, note or program change, saved per preset |
 | Top bar: track tabs with levels, app-drawn window controls (no WM decorations), docked when windowed, swipe-down from the top edge in fullscreen | Done. Moving and resizing go through winit's `drag_window` / `drag_resize_window`, so the window manager still snaps the window. |
 | Left sidebar: edge swipe, hover tab, list, drag reorder (into and out of lanes), swipe/long-press remove with undo, browser with search/format/category/favorites, bypass, close gestures, 48 px+ targets | Done |
-| Right sidebar: audio, presets, WiFi (NetworkManager), Bluetooth (BlueZ), display, system, on-screen keyboard toggle | Done. WiFi and Bluetooth are untested on real hardware. |
+| Right sidebar: audio, presets, WiFi (NetworkManager), Bluetooth (BlueZ), display, on-screen keyboard toggle; rescan, restart, reboot, shut down and quit as icon buttons in its fixed header | Done. WiFi and Bluetooth are untested on real hardware. |
+| Hover tips | Done (`ui/tooltip.slint`): a control holds a `Tip` bound to its TouchArea; the window draws the one tip (`TooltipLayer`) after 600 ms. A press hides it, so touch never shows one. Tips under a plugin editor are hidden by it (nothing draws over an editor). |
 | On-screen text keyboard (WiFi passwords, names) | Done. A hardware keyboard types into the same prompt (Return accepts, Escape cancels). |
 | Virtual piano → plugins | Done. Notes go to the selected plugin if it takes MIDI, otherwise to the first plugin that does. Sliding across the keys plays each key passed over. Opens from a strip on the bottom edge (hover tab), folds away with its own button. Single touch only. |
 | Fullscreen default, windowed, F11, size remembered | Done. Real fullscreen needs a window manager (kiosk setup uses matchbox). |

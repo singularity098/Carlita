@@ -36,6 +36,14 @@ off-screen with XComposite and forwarded synthetic input) was dropped
    `WM_NORMAL_HINTS` allow resizing are resized to fill the area.
 5. The editor draws itself and gets real pointer and touch input from the X
    server, so it works with every toolkit (Wine and yabridge included).
+   Many toolkits move their window when they resize it (a plugin's own
+   small/default/large menu, or after Carlita resized it), to where they
+   were as a window of their own. Inside the holder that put the editor
+   off-centre, so the host moves it back whenever it moves itself, and
+   centres it again whenever it changes its own size. The holder's
+   background is opaque Carlita grey: pixel 0, which it was, is see-through
+   in a 32-bit (ARGB) main window, and the desktop showed through Carlita
+   wherever the editor did not cover the holder.
 6. An X11 child window is always above what Slint draws, so nothing can be
    drawn over an editor. The main area reaches the window's edges (below
    the docked track bar, above the keyboard), and the editor may lie under
@@ -68,7 +76,13 @@ off-screen with XComposite and forwarded synthetic input) was dropped
 
 * **X11 only.** Under a pure Wayland session there is no main X11 window to
   embed into, and editors open in their own windows. XWayland works.
-* **No scaling.** A small editor stays small; a larger one is cut off.
+* **No scaling by Carlita.** A small editor stays small; a larger one is
+  cut off. Plugins are told the desktop's scale times the *plugin editor
+  size* picked in Display options (`ENGINE_OPTION_FRONTEND_UI_SCALE`, and
+  `CARLA_BRIDGE_UI_SCALE` for the patched bridge); changing it restarts the
+  engine, since plugins read it when they start. Editors that size their
+  controls to the window (Xythos, for one, shrinks below 900 × 560 logical
+  pixels) are still limited by the area they are given.
 * **Nothing draws over an editor.** Overlays cut it down or hide it, with
   a still snapshot under them. The plugin is not usable while a sidebar is
   open.

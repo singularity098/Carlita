@@ -30,6 +30,8 @@ const RESIZE_SETTLE: Duration = Duration::from_millis(300);
 /// How often to put an editor back if something (a window manager) takes it
 /// out of Carlita's window again.
 const MAX_REEMBED: u32 = 5;
+/// The colour behind an editor (Carlita's background, #15151a).
+const HOLDER_RGB: u32 = 0x0015_151a;
 /// The X keysym of F11.
 const KEYSYM_F11: u32 = 0xffc8;
 /// Presses of F11 closer together than this (key repeat) count once.
@@ -212,6 +214,14 @@ struct Embedded {
     /// While the holder is mapped: where the whole editor is, and the part
     /// of it the holder shows (the rest is under an overlay).
     shown: Option<(Area, Area)>,
+}
+
+impl Embedded {
+    /// Where the editor belongs inside its holder while it is shown.
+    fn offset(&self) -> Option<(i32, i32)> {
+        self.shown
+            .map(|(full, part)| (full.x - part.x, full.y - part.y))
+    }
 }
 
 struct Atoms {
@@ -644,6 +654,21 @@ impl Embedder {
 
     fn embed(&mut self, key: u64, window: Window, parent: Window) -> Result<()> {
         let geo = self.conn.get_geometry(window)?.reply()?;
+        // The holder shows wherever the editor does not cover it (for a
+        // moment while the editor changes size). Pixel 0 is see-through in a
+        // 32-bit (ARGB) main window, which let the desktop show through
+        // Carlita there: use opaque dark grey, Carlita's background.
+        let depth = self
+            .conn
+            .get_geometry(parent)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .map_or(24, |g| g.depth);
+        let background = if depth == 32 {
+            0xff00_0000 | HOLDER_RGB
+        } else {
+            HOLDER_RGB
+        };
         let holder = self.conn.generate_id()?;
         self.conn
             .create_window(
@@ -659,7 +684,7 @@ impl Embedder {
                 x11rb::COPY_FROM_PARENT,
                 // Leaving the editor gives the keyboard back to Carlita.
                 &CreateWindowAux::new()
-                    .background_pixel(0)
+                    .background_pixel(background)
                     .event_mask(EventMask::LEAVE_WINDOW),
             )?
             .check()
@@ -719,9 +744,11 @@ impl Embedder {
         let w = self.area.width.clamp(min.0, max.0.max(min.0));
         let h = self.area.height.clamp(min.1, max.1.max(min.1));
         if (w, h) != (e.width, e.height) {
-            let _ = self
-                .conn
-                .configure_window(e.window, &ConfigureWindowAux::new().width(w).height(h));
+            let mut aux = ConfigureWindowAux::new().width(w).height(h);
+            if let Some((x, y)) = e.offset() {
+                aux = aux.x(x).y(y);
+            }
+            let _ = self.conn.configure_window(e.window, &aux);
         }
     }
 
@@ -1094,7 +1121,28 @@ impl Embedder {
                         if (e.width, e.height) != (c.width as u32, c.height as u32) {
                             e.width = c.width as u32;
                             e.height = c.height as u32;
+                            // Placed anew below, wherever it moved itself.
+                            if let Some((full, _)) = e.shown {
+                                e.shown = Some((full, Area::default()));
+                            }
                             self.place(k);
+                        } else if let Some((x, y)) = e.offset() {
+                            // Many toolkits move their window when they
+                            // resize it (a plugin's own small/large menu, or
+                            // after Carlita resized it), to where it was as a
+                            // window of its own: put it back.
+                            let synthetic = c.response_type & 0x80 != 0;
+                            if !synthetic && (i32::from(c.x), i32::from(c.y)) != (x, y) {
+                                log::debug!(
+                                    "editor moved itself to {},{} in its holder; moving it back",
+                                    c.x,
+                                    c.y
+                                );
+                                let _ = self.conn.configure_window(
+                                    c.window,
+                                    &ConfigureWindowAux::new().x(x).y(y),
+                                );
+                            }
                         }
                     }
                 }

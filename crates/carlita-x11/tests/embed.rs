@@ -187,6 +187,28 @@ fn embeds_hides_and_hands_back() {
     until(|| geometry(holder) == (300, 250, 200, 100));
     until(|| geometry(editor) == (0, 0, 200, 100));
 
+    // The editor moves itself inside the holder (toolkits do when they
+    // resize, to where they were as a window of their own): it is put back.
+    conn.configure_window(editor, &ConfigureWindowAux::new().x(400).y(300))
+        .unwrap();
+    conn.flush().unwrap();
+    until(|| geometry(editor) == (0, 0, 200, 100));
+
+    // It changes its own size and moves at once (a plugin's size menu): it
+    // is centred again at its new size.
+    conn.configure_window(
+        editor,
+        &ConfigureWindowAux::new()
+            .x(500)
+            .y(10)
+            .width(300)
+            .height(160),
+    )
+    .unwrap();
+    conn.flush().unwrap();
+    until(|| geometry(holder) == (20 + 230, 50 + 170, 300, 160));
+    until(|| geometry(editor) == (0, 0, 300, 160));
+
     // Detached: back to an unmapped top-level window.
     host.send(HostCommand::Detach { key: 42 });
     until(|| parent_of(&conn, editor) == root);

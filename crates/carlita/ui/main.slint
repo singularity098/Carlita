@@ -24,6 +24,7 @@ import { OptionsPanel, Options } from "options.slint";
 import { TextPrompt, Piano, TextUtil } from "keyboards.slint";
 import { TrackBar } from "trackbar.slint";
 import { Icon, Icons } from "icons.slint";
+import { Tips, TooltipLayer } from "tooltip.slint";
 
 export { Theme, ThemeLook, Options, TextUtil, SlotItem, TrackItem, PluginItem, ParamItem, WifiItem, BtItem, MappingItem }
 
@@ -393,14 +394,21 @@ export component MainWindow inherits Window {
     // prompt (whose field has the focus while open) or the browser (whose
     // search box had it) closes.
     changed prompt-open => {
+        Tips.hide();
         if !root.prompt-open && !root.browser-open { keys.focus(); }
     }
     changed browser-open => {
+        Tips.hide();
         if !root.browser-open { keys.focus(); }
     }
     changed confirm-text => {
+        Tips.hide();
         if root.confirm-text != "" { keys.focus(); }
     }
+    // A tip whose control slides away or goes with a panel goes too.
+    changed left-pos => { Tips.hide(); }
+    changed right-pos => { Tips.hide(); }
+    changed top-pos => { Tips.hide(); }
 
     forward-focus: keys;
     keys := FocusScope {
@@ -520,10 +528,12 @@ export component MainWindow inherits Window {
                             }
                         }
                         if p.is-bool: Toggle {
+                            tip: p.name + ": on or off";
                             checked: p.value > (p.minimum + p.maximum) / 2;
                             toggled(v) => { root.set-param(p.index, v ? p.maximum : p.minimum); }
                         }
                         if !p.is-bool: BigSlider {
+                            tip: p.name + ": drag to set it.";
                             y: (parent.height - self.height) / 2;
                             minimum: p.minimum;
                             maximum: p.maximum;
@@ -565,11 +575,13 @@ export component MainWindow inherits Window {
                 spacing: 12px;
                 BigButton {
                     text: "Open chain";
+                    tip: "The plugins of this track (or swipe in from the left edge)";
                     primary: true;
                     clicked => { root.open-left(); }
                 }
                 BigButton {
                     text: "Options";
+                    tip: "Audio, presets, MIDI, WiFi, Bluetooth and display (or swipe in from the right edge)";
                     clicked => { root.open-right(); }
                 }
             }
@@ -937,6 +949,14 @@ export component MainWindow inherits Window {
         ResizeHandle { direction: "ne"; x: root.width - parent.c; y: 0; width: parent.c; height: parent.c; start(d) => { root.start-resize(d); } }
         ResizeHandle { direction: "sw"; x: 0; y: root.height - parent.c; width: parent.c; height: parent.c; start(d) => { root.start-resize(d); } }
         ResizeHandle { direction: "se"; x: root.width - parent.c; y: root.height - parent.c; width: parent.c; height: parent.c; start(d) => { root.start-resize(d); } }
+    }
+
+    // Hover help, over everything else (it takes no input).
+    TooltipLayer {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
     }
 
     // Phosphor's faint CRT lines, over everything (they take no input).

@@ -59,6 +59,19 @@ pub struct DisplaySettings {
     /// The UI theme, by name (`Theme.names` in `ui/theme.slint`; unknown
     /// names fall back to the first, Iris). Never rename a theme.
     pub theme: String,
+    /// How large plugin editors are drawn, in percent of the desktop's
+    /// scale (passed to plugins as their UI scale). Touchscreens want more.
+    pub editor_zoom: u32,
+}
+
+impl DisplaySettings {
+    /// The editor zooms offered in Display options, in percent.
+    pub const EDITOR_ZOOMS: [u32; 5] = [100, 125, 150, 175, 200];
+
+    /// `editor_zoom` as a factor, kept to what is offered (100%..200%).
+    pub fn editor_zoom_factor(&self) -> f32 {
+        self.editor_zoom.clamp(100, 200) as f32 / 100.0
+    }
 }
 
 impl Default for DisplaySettings {
@@ -73,6 +86,7 @@ impl Default for DisplaySettings {
             brightness: None,
             edge_strip_width: 18,
             theme: "Iris".into(),
+            editor_zoom: 100,
         }
     }
 }
@@ -131,6 +145,8 @@ mod tests {
         assert!(!s.display.fullscreen);
         assert_eq!(s.display.window_width, 1280);
         assert_eq!(s.audio.driver, "JACK");
+        assert_eq!(s.display.editor_zoom, 100);
+        assert_eq!(s.display.editor_zoom_factor(), 1.0);
     }
 
     #[test]

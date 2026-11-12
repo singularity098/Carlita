@@ -1,6 +1,9 @@
 // Large, touch-friendly building blocks.
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
+import { Tip, Tips } from "tooltip.slint";
+
+export { Tip, Tips }
 
 // String helpers implemented in Rust (Slint has no substring operations).
 export global TextUtil {
@@ -25,6 +28,8 @@ export component BigButton inherits Rectangle {
     in property <bool> primary: false;
     in property <bool> danger: false;
     in property <bool> enabled: true;
+    // Hover help (see tooltip.slint).
+    in property <string> tip;
     callback clicked;
 
     min-height: Theme.touch;
@@ -80,12 +85,18 @@ export component BigButton inherits Rectangle {
         enabled: root.enabled;
         clicked => { root.clicked(); }
     }
+    Tip {
+        text: root.tip;
+        hover: touch.has-hover;
+        pressed: touch.pressed;
+    }
 }
 
 // An on/off switch with a large hit area.
 export component Toggle inherits Rectangle {
     in-out property <bool> checked;
     in property <bool> enabled: true;
+    in property <string> tip;
     callback toggled(bool);
 
     width: 72px;
@@ -110,18 +121,24 @@ export component Toggle inherits Rectangle {
         }
     }
 
-    TouchArea {
+    toggle-touch := TouchArea {
         enabled: root.enabled;
         clicked => {
             root.checked = !root.checked;
             root.toggled(root.checked);
         }
     }
+    Tip {
+        text: root.tip;
+        hover: toggle-touch.has-hover;
+        pressed: toggle-touch.pressed;
+    }
 }
 
 export component Chip inherits Rectangle {
     in property <string> text;
     in property <bool> selected;
+    in property <string> tip;
     callback clicked;
 
     height: 44px;
@@ -148,6 +165,11 @@ export component Chip inherits Rectangle {
     touch := TouchArea {
         clicked => { root.clicked(); }
     }
+    Tip {
+        text: root.tip;
+        hover: touch.has-hover;
+        pressed: touch.pressed;
+    }
 }
 
 // A vertical stereo peak meter.
@@ -155,7 +177,14 @@ export component StereoMeter inherits Rectangle {
     in property <float> left;
     in property <float> right;
     in property <string> label;
+    in property <string> tip;
     width: 30px;
+
+    meter-touch := TouchArea { }
+    Tip {
+        text: root.tip;
+        hover: meter-touch.has-hover;
+    }
 
     VerticalLayout {
         spacing: 4px;
@@ -221,11 +250,13 @@ export component SettingRow inherits Rectangle {
 export component Segmented inherits HorizontalLayout {
     in property <[string]> options;
     in property <int> selected;
+    in property <[string]> tips;
     callback picked(int);
     spacing: 6px;
     for opt[i] in root.options: Chip {
         text: opt;
         selected: i == root.selected;
+        tip: i < root.tips.length ? root.tips[i] : "";
         clicked => { root.picked(i); }
     }
 }
@@ -238,6 +269,7 @@ export component BigSlider inherits Rectangle {
     // A double click or double tap puts the slider back to this value.
     in property <bool> has-default: false;
     in property <float> default-value;
+    in property <string> tip;
     callback changed(float);
     height: Theme.touch;
 
@@ -283,11 +315,17 @@ export component BigSlider inherits Rectangle {
             }
         }
     }
+    Tip {
+        text: root.tip != "" && root.has-default ? root.tip + " Double-click to reset." : root.tip;
+        hover: touch.has-hover;
+        pressed: touch.pressed;
+    }
 }
 
 // A small round button that folds a panel (or the keyboard) away.
 export component CollapseButton inherits Rectangle {
     in property <string> icon;
+    in property <string> tip;
     callback clicked;
     width: 44px;
     height: 44px;
@@ -306,6 +344,49 @@ export component CollapseButton inherits Rectangle {
     touch := TouchArea {
         clicked => { root.clicked(); }
     }
+    Tip {
+        text: root.tip;
+        hover: touch.has-hover;
+        pressed: touch.pressed;
+    }
+}
+
+// A small round button with an icon only (its tip says what it does).
+export component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> icon-solid;
+    in property <bool> danger;
+    in property <string> tip;
+    callback clicked;
+    width: 44px;
+    height: 44px;
+    border-radius: 22px;
+    background: touch.pressed ? (root.danger ? Theme.danger.darker(20%) : Theme.pressed)
+        : touch.has-hover && root.danger ? Theme.danger.transparentize(30%)
+        : transparent;
+    border-width: 1px;
+    border-color: root.danger ? Theme.danger.transparentize(touch.has-hover ? 0% : 50%)
+        : touch.has-hover ? Theme.border-hover : Theme.border-strong;
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 22px;
+        height: 22px;
+        line: root.icon;
+        solid: root.icon-solid;
+        weight: 1.8;
+        tint: root.danger && (touch.pressed || touch.has-hover) ? #ffffff
+            : root.danger ? Theme.danger.brighter(30%)
+            : touch.pressed || touch.has-hover ? Theme.text : Theme.text-dim;
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    Tip {
+        text: root.tip;
+        hover: touch.has-hover;
+        pressed: touch.pressed;
+    }
 }
 
 // A list to pick one option from, one full-width row each: for names that
@@ -316,6 +397,8 @@ export component ChoiceList inherits VerticalLayout {
     in property <string> empty-text: "None available";
     // Show MIDI port names shortened (TextUtil.port-label).
     in property <bool> ports;
+    // Hover help on every row, followed by the row's full name.
+    in property <string> tip;
     callback picked(string);
     spacing: 6px;
     if root.options.length == 0: Text {
@@ -342,6 +425,11 @@ export component ChoiceList inherits VerticalLayout {
         }
         touch := TouchArea {
             clicked => { root.picked(o); }
+        }
+        Tip {
+            text: root.tip == "" ? "" : root.tip + ": " + o;
+            hover: touch.has-hover;
+            pressed: touch.pressed;
         }
     }
 }
