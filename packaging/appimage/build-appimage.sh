@@ -23,6 +23,25 @@ install -m755 "$ROOT/target/release/carlita" "$APPDIR/usr/bin/carlita"
 # Carla: engine library, plugin bridges, discovery tools and resources.
 cp -a "$PREFIX/lib/carla" "$APPDIR/usr/lib/carla"
 cp -a "$PREFIX/share/carla/resources" "$APPDIR/usr/share/carla/" 2>/dev/null || true
+
+# Carla's plugin bridge, rebuilt from the same Carla version with the patches
+# in carla-patches/: Carla does not hand its UI scale to bridges, so editors
+# of plugins running in their own process were always drawn at 1.0. Set
+# CARLITA_STOCK_BRIDGE=1 to keep Carla's own bridge.
+if [ -z "${CARLITA_STOCK_BRIDGE:-}" ]; then
+    CARLA_VERSION="$(PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
+        pkg-config --modversion carla-standalone)"
+    SRC="$ROOT/target/carla-src-$CARLA_VERSION"
+    if [ ! -x "$SRC/bin/carla-bridge-native" ]; then
+        rm -rf "$SRC"
+        git clone --quiet --depth 1 --branch "v$CARLA_VERSION" https://github.com/falkTX/Carla.git "$SRC"
+        for patch in "$ROOT"/packaging/appimage/carla-patches/*.patch; do
+            git -C "$SRC" apply "$patch"
+        done
+        make -C "$SRC" -j"$(nproc)" bridges-plugin
+    fi
+    install -m755 "$SRC/bin/carla-bridge-native" "$APPDIR/usr/lib/carla/carla-bridge-native"
+fi
 install -m755 "$ROOT/packaging/appimage/AppRun" "$APPDIR/AppRun"
 install -m644 "$ROOT/packaging/appimage/carlita.desktop" "$APPDIR/carlita.desktop"
 install -m644 "$ROOT/assets/branding/carlita-app-icon.svg" "$APPDIR/carlita.svg"
@@ -41,6 +60,10 @@ export LD_LIBRARY_PATH="$APPDIR/usr/lib/carla${LD_LIBRARY_PATH:+:$LD_LIBRARY_PAT
     --library "$APPDIR/usr/lib/carla/libcarla_standalone2.so" \
     --desktop-file "$APPDIR/carlita.desktop" --icon-file "$APPDIR/carlita.svg"
 rm -f "$APPDIR"/usr/lib/libjack.so*
+# Nor libxkbcommon: Carlita's window library loads it together with the
+# host's libxkbcommon-x11, and the two must be the same version. With an
+# older bundled one, typing on a newer system crashed Carlita.
+rm -f "$APPDIR"/usr/lib/libxkbcommon.so*
 
 # Carla clears LD_LIBRARY_PATH when it starts a plugin bridge, so its own
 # programs and libraries must find the bundled libraries (liblo, libmagic,

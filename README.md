@@ -62,7 +62,9 @@ CI builds the AppImage on every push and pull request (download it from the
 run's *Carlita-AppImage* artifact) and attaches it to a release for `v*` tags.
 
 This bundles Carla (engine, plugin bridges and the scanner) next to
-Carlita. When PipeWire is running, the AppImage uses PipeWire's JACK
+Carlita. Carla's plugin bridge is rebuilt from the same Carla release with
+the patches in `packaging/appimage/carla-patches` (it needs Carla's build
+dependencies, listed in the CI workflow). When PipeWire is running, the AppImage uses PipeWire's JACK
 library, so Carlita talks to PipeWire directly and no `jackd` is needed.
 
 ### Tests
