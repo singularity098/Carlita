@@ -346,19 +346,13 @@ component ChainRow inherits Rectangle {
                 width: Theme.touch;
                 height: Theme.touch;
                 y: (parent.height - self.height) / 2;
-                // The circle is a path: its edge is drawn smoother than a
-                // rounded rectangle's.
-                Path {
-                    width: parent.width;
-                    height: parent.height;
-                    viewbox-x: 0;
-                    viewbox-y: 0;
-                    viewbox-width: 52;
-                    viewbox-height: 52;
-                    commands: "M 1 26 A 25 25 0 1 1 51 26 A 25 25 0 1 1 1 26 Z";
-                    fill: root.item.bypassed ? Theme.surface-3 : Theme.paint;
-                    stroke: root.item.bypassed ? Theme.border-strong : transparent;
-                    stroke-width: 1px;
+                // A rounded rectangle, not a path: Skia draws its edge
+                // smoothly on the GPU, where a path's edge comes out jagged.
+                Rectangle {
+                    border-radius: self.width / 2;
+                    background: root.item.bypassed ? Theme.surface-3 : Theme.paint;
+                    border-color: root.item.bypassed ? Theme.border-strong : transparent;
+                    border-width: 1px;
                 }
                 Icon {
                     x: (parent.width - self.width) / 2;

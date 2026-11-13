@@ -202,7 +202,7 @@ component TrackTab inherits Rectangle {
 
 }
 
-// A window control, its icon drawn as a path in a 14 × 14 box.
+// A window control, its icon drawn on a 14 × 14 grid.
 component WindowButton inherits Rectangle {
     // SVG path commands for the icon.
     in property <string> icon;
@@ -213,18 +213,17 @@ component WindowButton inherits Rectangle {
     background: touch.pressed ? (root.danger ? Theme.danger.darker(20%) : #ffffff33)
         : touch.has-hover ? (root.danger ? Theme.danger : Theme.pressed)
         : transparent;
-    Path {
+    Icon {
         width: 16px;
         height: 16px;
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        viewbox-width: 14;
-        viewbox-height: 14;
-        commands: root.icon;
-        fill: transparent;
-        stroke: root.danger && (touch.has-hover || touch.pressed) ? #fff
+        grid: 14;
+        // 1.6px at 16px across.
+        weight: 1.4;
+        line: root.icon;
+        tint: root.danger && (touch.has-hover || touch.pressed) ? #fff
             : touch.has-hover || touch.pressed ? Theme.text : Theme.text-dim;
-        stroke-width: 1.6px;
     }
     touch := TouchArea {
         mouse-cursor: default;

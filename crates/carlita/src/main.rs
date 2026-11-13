@@ -1,6 +1,7 @@
 //! Carlita: a touch-first plugin chain host for a pedalboard.
 
 mod app;
+mod icons;
 mod midi_in;
 mod scan;
 mod system;
@@ -37,6 +38,7 @@ fn main() -> anyhow::Result<()> {
 
     use_x11()?;
     let ui = MainWindow::new()?;
+    icons::install(&ui);
     let app = app::App::new(&ui, opts)?;
     ui.run()?;
     app.borrow_mut().shutdown();
