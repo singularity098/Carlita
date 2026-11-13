@@ -15,11 +15,12 @@ pub struct EngineConfig {
     pub buffer_size: u32,
     /// Run plugins in separate bridge processes (crash isolation).
     pub isolate_plugins: bool,
-    /// JACK client whose outputs feed the rig input ("" = physical "system").
+    /// JACK client whose outputs are the hardware inputs tracks pick from
+    /// ("" = physical "system").
     pub input_client: String,
     /// JACK client the rig output is connected to ("" = physical "system").
     pub output_client: String,
-    /// Connect inputs/outputs automatically after start.
+    /// Under JACK, connect the hardware inputs, outputs and MIDI devices.
     pub auto_connect: bool,
     pub client_name: String,
     /// The scale Carlita draws at (the desktop's), passed to plugin editors
@@ -173,15 +174,26 @@ pub struct ClientInfo {
     pub audio_ins: u32,
 }
 
+/// A hardware MIDI device (one of its ports) that tracks can take.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MidiDevice {
+    /// Full port name, "client:port": what a track stores.
+    pub id: String,
+    /// The name to show.
+    pub name: String,
+}
+
 /// Periodic meter readings (~30 Hz).
 #[derive(Debug, Clone, Default)]
 pub struct Meters {
-    /// Peak level entering the rig, left/right, 0..1.
+    /// Peak level entering the rig (the loudest track input), left/right, 0..1.
     pub input: [f32; 2],
     /// Peak level leaving the rig, left/right, 0..1.
     pub output: [f32; 2],
     /// Peak level of each track's bus (after its volume), left/right.
     pub tracks: Vec<(TrackId, [f32; 2])>,
+    /// Peak level of the inputs each track takes, left/right.
+    pub track_inputs: Vec<(TrackId, [f32; 2])>,
     /// DSP load in percent.
     pub dsp_load: f32,
     pub xruns: u32,
@@ -216,6 +228,16 @@ pub enum Event {
     Stopped,
     Drivers(Vec<DriverInfo>),
     Clients(Vec<ClientInfo>),
+    /// The hardware inputs and MIDI devices tracks can pick from, sent when
+    /// they change.
+    Hardware {
+        /// Port name of each input channel, in order.
+        inputs: Vec<String>,
+        midi: Vec<MidiDevice>,
+        /// MIDI devices cannot be told apart (not under JACK): every track
+        /// takes all of them.
+        merged_midi: bool,
+    },
     PluginLoaded {
         slot: SlotId,
         info: PluginRuntimeInfo,

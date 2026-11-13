@@ -80,15 +80,19 @@ impl Drop for EngineHandle {
 /// What a Carla plugin is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Owner {
-    InputBus,
     OutputBus,
+    /// The bus at the end of a track (volume, mute, level).
     TrackBus(TrackId),
+    /// Meters the inputs a track takes; its outputs go nowhere.
+    TrackInputBus(TrackId),
     Plugin(SlotId),
 }
 
 /// A Carla plugin. `Engine::slots[i]` is Carla plugin id `i`.
 struct Slot {
     owner: Owner,
+    /// The name Carla knows it by; under JACK, also its JACK client's name.
+    name: String,
     /// What was loaded (user plugins only).
     load: Option<PluginLoad>,
     placeholder: bool,
@@ -153,7 +157,7 @@ impl Patchbay {
         let mut v: Vec<ClientInfo> = self
             .clients
             .iter()
-            .filter(|(_, n)| n.as_str() != own)
+            .filter(|(_, n)| !is_own_client(n, own))
             .map(|(id, name)| ClientInfo {
                 name: name.clone(),
                 audio_outs: self.ports_of(*id, |h| is_audio(h) && !is_input(h)).len() as u32,
@@ -164,6 +168,57 @@ impl Patchbay {
         v.sort_by(|a, b| a.name.cmp(&b.name));
         v
     }
+}
+
+fn is_jack_driver(driver: &str) -> bool {
+    driver.to_ascii_lowercase().starts_with("jack")
+}
+
+/// Whether a JACK client is Carlita's own: its main client or one of its
+/// plugins' clients ("Carlita.…").
+fn is_own_client(name: &str, own: &str) -> bool {
+    name == own || name.strip_prefix(own).is_some_and(|r| r.starts_with('.'))
+}
+
+/// Whether a JACK client carries hardware MIDI (JACK "system", PipeWire
+/// "Midi-Bridge", a2jmidid "a2j").
+fn is_midi_hardware(client: &str) -> bool {
+    client == "system" || client.starts_with("Midi-Bridge") || client.starts_with("a2j")
+}
+
+/// Whether JACK client `name` is the one opened for plugin name `expected`.
+/// JACK appends "-01" and so on when the name is still taken (a crashed
+/// plugin's client may still be closing).
+fn client_matches(name: &str, expected: &str) -> bool {
+    name.strip_prefix(expected).is_some_and(|r| {
+        r.is_empty()
+            || (r.len() > 1 && r.starts_with('-') && r[1..].chars().all(|c| c.is_ascii_digit()))
+    })
+}
+
+/// A MIDI port's name as shown to the user: the device's own name for the
+/// port, without the audio server's decoration. "Arturia KeyStep 32:
+/// (capture_0) KeyStep 32 MIDI 1" (PipeWire) becomes "KeyStep 32 MIDI 1",
+/// "KeyStep [24] (capture): KeyStep MIDI 1" (a2jmidid) "KeyStep MIDI 1".
+fn midi_label(port: &str) -> String {
+    let cut = [") ", ": "]
+        .iter()
+        .filter_map(|sep| port.rfind(sep).map(|i| i + sep.len()))
+        .max();
+    match cut {
+        Some(i) if i < port.len() => port[i..].trim().to_string(),
+        _ => port.to_string(),
+    }
+}
+
+/// Keeps a name to characters JACK and Carla take as they are.
+fn clean_name(name: &str, max: usize) -> String {
+    name.chars()
+        .map(|c| if c == ':' || c == '/' { '.' } else { c })
+        .take(max)
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 fn is_input(hints: u32) -> bool {
@@ -183,6 +238,12 @@ struct Engine {
     // Boxed so its address stays stable for Carla's callback pointer.
     raw_tx: Box<Sender<RawCallback>>,
     running: bool,
+    /// Carla runs one JACK client per plugin (under JACK), and the rig is
+    /// wired in the JACK graph itself. Otherwise it is wired in Carla's
+    /// internal graph.
+    multi: bool,
+    /// The hardware inputs and MIDI devices last reported to the UI.
+    hardware: Option<(Vec<String>, Vec<MidiDevice>)>,
     config: EngineConfig,
     slots: Vec<Slot>,
     layout: RigLayout,
@@ -213,6 +274,8 @@ impl Engine {
             raw_rx,
             raw_tx,
             running: false,
+            multi: false,
+            hardware: None,
             config: EngineConfig::default(),
             slots: Vec::new(),
             layout: RigLayout::default(),
@@ -265,12 +328,8 @@ impl Engine {
         self.drain();
         if self.connect_at.is_some_and(|t| Instant::now() >= t) {
             self.connect_at = None;
-            self.with_external(|e| {
-                e.emit_clients();
-                if e.config.auto_connect {
-                    e.connect_io();
-                }
-            });
+            self.emit_clients();
+            self.dirty = true;
         }
         // Load queued plugins one per tick so the UI keeps updating.
         if let Some(load) = self.pending_loads.pop_front() {
@@ -295,8 +354,8 @@ impl Engine {
             Command::Stop => self.stop(),
             Command::QueryDrivers => {
                 self.emit(Event::Drivers(carla::drivers()));
-                if self.running {
-                    self.with_external(|e| e.emit_clients());
+                if self.running && self.multi {
+                    self.emit_clients();
                 }
             }
             Command::AddPlugin { load } => {
@@ -374,23 +433,18 @@ impl Engine {
             } => {
                 self.config.input_client = input_client;
                 self.config.output_client = output_client;
-                if self.running {
-                    self.with_external(|e| {
-                        e.disconnect_io();
-                        e.connect_io();
-                    });
-                }
+                self.dirty = true;
             }
             Command::DescribeGraph { reply } => {
+                let graph = self.routing();
                 let name = |g: u32| {
-                    self.internal
+                    graph
                         .clients
                         .get(&g)
                         .cloned()
                         .unwrap_or_else(|| g.to_string())
                 };
-                let mut edges: Vec<(String, String)> = self
-                    .internal
+                let mut edges: Vec<(String, String)> = graph
                     .connections
                     .values()
                     .map(|(og, _, ig, _)| (name(*og), name(*ig)))
@@ -449,10 +503,18 @@ impl Engine {
         if self.running {
             self.stop();
         }
+        let multi = is_jack_driver(&config.driver);
         let h = &self.host;
+        // Under JACK every plugin gets its own JACK client, so each track
+        // can take any hardware inputs and MIDI devices: Carla's own client
+        // has only two inputs and one MIDI input that merges every device.
         h.set_option(
             sys::ENGINE_OPTION_PROCESS_MODE,
-            sys::ENGINE_PROCESS_MODE_PATCHBAY as i32,
+            if multi {
+                sys::ENGINE_PROCESS_MODE_MULTIPLE_CLIENTS
+            } else {
+                sys::ENGINE_PROCESS_MODE_PATCHBAY
+            } as i32,
             None,
         );
         h.set_option(
@@ -539,23 +601,38 @@ impl Engine {
         self.internal.clear();
         self.external.clear();
         self.view = View::Internal;
+        self.hardware = None;
+        self.config = config.clone();
         match self.host.init(&config.driver, &config.client_name) {
             Ok(()) => {
                 self.running = true;
+                self.multi = multi;
                 self.drain();
-                self.add_bus(Owner::InputBus);
+                if multi {
+                    // The JACK graph is the rig's graph from now on.
+                    self.mark(MARK_EXTERNAL);
+                    self.host.patchbay_refresh(true);
+                }
+                self.drain();
                 self.add_bus(Owner::OutputBus);
                 self.sync_buses();
                 self.dirty = true;
                 let (sr, bs) = (self.host.sample_rate(), self.host.buffer_size());
-                log::info!("engine started: {} @ {sr} Hz, {bs} frames", config.driver);
-                self.config = config.clone();
+                log::info!(
+                    "engine started: {} @ {sr} Hz, {bs} frames{}",
+                    config.driver,
+                    if multi {
+                        ", one JACK client per plugin"
+                    } else {
+                        ""
+                    }
+                );
                 self.emit(Event::Started {
                     driver: config.driver,
                     sample_rate: sr,
                     buffer_size: bs,
                 });
-                if self.is_jack() {
+                if multi {
                     self.connect_at = Some(Instant::now() + CONNECT_DELAY);
                 }
             }
@@ -574,6 +651,8 @@ impl Engine {
         self.host.remove_all();
         self.host.close();
         self.running = false;
+        self.multi = false;
+        self.hardware = None;
         self.slots.clear();
         self.pending_loads.clear();
         self.loading_rig = false;
@@ -584,10 +663,6 @@ impl Engine {
         self.external.clear();
         self.view = View::Internal;
         self.emit(Event::Stopped);
-    }
-
-    fn is_jack(&self) -> bool {
-        self.config.driver.to_ascii_lowercase().starts_with("jack")
     }
 
     /// Handles every queued Carla callback now. Called after each change to
@@ -609,21 +684,6 @@ impl Engine {
         });
     }
 
-    /// Runs `f` with the JACK graph loaded into `self.external`, then
-    /// switches Carla's patchbay reports back to the internal graph.
-    fn with_external(&mut self, f: impl FnOnce(&mut Self)) {
-        if !self.running || !self.is_jack() {
-            return;
-        }
-        self.mark(MARK_EXTERNAL);
-        self.host.patchbay_refresh(true);
-        self.drain();
-        f(self);
-        self.mark(MARK_INTERNAL);
-        self.host.patchbay_refresh(false);
-        self.drain();
-    }
-
     fn emit_clients(&self) {
         self.emit(Event::Clients(
             self.external.clients_info(&self.config.client_name),
@@ -632,13 +692,25 @@ impl Engine {
 
     // --------------------------------------------------------------- plugins
 
+    /// The name a Carla plugin gets: unique, so that under JACK its client
+    /// can be told apart from every other ("Carlita.12 Big Muff").
+    fn carla_name(&self, owner: Owner, load_name: &str) -> String {
+        let client = &self.config.client_name;
+        match owner {
+            Owner::OutputBus => format!("{client}.out"),
+            Owner::TrackBus(t) => format!("{client}.track-{}", t.0),
+            Owner::TrackInputBus(t) => format!("{client}.in-{}", t.0),
+            Owner::Plugin(s) => clean_name(&format!("{client}.{} {load_name}", s.0), 48),
+        }
+    }
+
     fn add_raw(&self, load: &PluginLoad) -> Result<(), String> {
         let p = &load.plugin;
         self.host.add_plugin(
             carla::binary_type(p.arch),
             carla::plugin_type(p.format),
             &p.filename,
-            &load.name,
+            &self.carla_name(Owner::Plugin(load.slot), &load.name),
             &p.label,
             p.unique_id,
         )
@@ -706,18 +778,14 @@ impl Engine {
 
     /// Adds an internal gain plugin used as a bus.
     fn add_bus(&mut self, owner: Owner) {
-        let name = match owner {
-            Owner::InputBus => "Input".to_string(),
-            Owner::OutputBus => "Output".to_string(),
-            Owner::TrackBus(t) => format!("Track {}", t.0),
-            Owner::Plugin(_) => unreachable!("buses only"),
-        };
+        let name = self.carla_name(owner, "");
         if let Err(e) = self.add_placeholder(&name) {
             log::warn!("could not add the {name} bus: {e}");
             return;
         }
         self.slots.push(Slot {
             owner,
+            name,
             load: None,
             placeholder: false,
             info: PluginRuntimeInfo::default(),
@@ -738,17 +806,20 @@ impl Engine {
             .iter()
             .map(|t| (t.id, t.volume))
             .collect();
-        while let Some(i) = self.slots.iter().position(
-            |s| matches!(s.owner, Owner::TrackBus(t) if !tracks.iter().any(|(id, _)| *id == t)),
-        ) {
+        while let Some(i) = self.slots.iter().position(|s| match s.owner {
+            Owner::TrackBus(t) | Owner::TrackInputBus(t) => !tracks.iter().any(|(id, _)| *id == t),
+            _ => false,
+        }) {
             self.host.remove_plugin(i as u32);
             self.slots.remove(i);
             self.drain();
             self.dirty = true;
         }
         for (id, volume) in tracks {
-            if self.slot_of(Owner::TrackBus(id)).is_none() {
-                self.add_bus(Owner::TrackBus(id));
+            for owner in [Owner::TrackBus(id), Owner::TrackInputBus(id)] {
+                if self.slot_of(owner).is_none() {
+                    self.add_bus(owner);
+                }
             }
             if let Some(i) = self
                 .slots
@@ -786,7 +857,8 @@ impl Engine {
                     slot: load.slot,
                     error,
                 });
-                if let Err(e) = self.add_placeholder(&load.name) {
+                let name = self.carla_name(Owner::Plugin(load.slot), &load.name);
+                if let Err(e) = self.add_placeholder(&name) {
                     self.emit(Event::Error(format!(
                         "Could not add a placeholder for {}: {e}",
                         load.name
@@ -808,6 +880,7 @@ impl Engine {
         let slot = load.slot;
         self.slots.push(Slot {
             owner: Owner::Plugin(slot),
+            name: self.carla_name(Owner::Plugin(slot), &load.name),
             load: Some(load.clone()),
             placeholder,
             info: info.clone(),
@@ -916,6 +989,7 @@ impl Engine {
                 let slot = load.slot;
                 self.slots[i] = Slot {
                     owner: Owner::Plugin(slot),
+                    name: self.carla_name(Owner::Plugin(slot), &load.name),
                     load: Some(load.clone()),
                     placeholder: false,
                     info: info.clone(),
@@ -928,7 +1002,7 @@ impl Engine {
             Err(error) => {
                 // Make sure the placeholder is still in place.
                 self.host.replace_plugin(id);
-                let _ = self.add_placeholder(&load.name);
+                let _ = self.add_placeholder(&self.slots[i].name.clone());
                 self.slots[i].placeholder = true;
                 self.slots[i].info = PluginRuntimeInfo::default();
                 self.drain();
@@ -963,11 +1037,7 @@ impl Engine {
         if slot.placeholder {
             return;
         }
-        let name = slot
-            .load
-            .as_ref()
-            .map(|l| l.name.clone())
-            .unwrap_or_default();
+        let name = slot.name.clone();
         log::error!("plugin {name} crashed: {message}");
         self.host.replace_plugin(id);
         if self.add_placeholder(&name).is_ok() {
@@ -1000,7 +1070,8 @@ impl Engine {
             return;
         }
         let slot = self.slots.get(cb.plugin_id as usize).and_then(|s| s.id());
-        let internal = self.view == View::Internal;
+        // Whether the callback is about the graph the rig is wired in.
+        let routing = self.view == self.routing_view();
         match cb.action {
             sys::ENGINE_CALLBACK_PLUGIN_UNAVAILABLE => self.crash(cb.plugin_id, cb.text),
             sys::ENGINE_CALLBACK_ERROR => {
@@ -1045,12 +1116,21 @@ impl Engine {
             }
             sys::ENGINE_CALLBACK_PATCHBAY_CLIENT_ADDED
             | sys::ENGINE_CALLBACK_PATCHBAY_CLIENT_RENAMED => {
-                if internal
-                    && cb.action == sys::ENGINE_CALLBACK_PATCHBAY_CLIENT_ADDED
-                    && cb.value1 == ICON_PLUGIN
-                {
-                    if let Some(s) = self.slots.get_mut(cb.value2 as usize) {
-                        s.group = Some(cb.plugin_id);
+                if routing && cb.action == sys::ENGINE_CALLBACK_PATCHBAY_CLIENT_ADDED {
+                    if self.multi {
+                        // Plugin ids in JACK's metadata go stale when a
+                        // plugin before them is removed; names do not.
+                        if let Some(s) = self
+                            .slots
+                            .iter_mut()
+                            .find(|s| client_matches(&cb.text, &s.name))
+                        {
+                            s.group = Some(cb.plugin_id);
+                        }
+                    } else if cb.value1 == ICON_PLUGIN {
+                        if let Some(s) = self.slots.get_mut(cb.value2 as usize) {
+                            s.group = Some(cb.plugin_id);
+                        }
                     }
                     self.dirty = true;
                 }
@@ -1063,7 +1143,7 @@ impl Engine {
                 pb.ports.retain(|(c, _), _| *c != g);
                 pb.connections
                     .retain(|_, (og, _, ig, _)| *og != g && *ig != g);
-                if internal {
+                if routing {
                     for s in self.slots.iter_mut().filter(|s| s.group == Some(g)) {
                         s.group = None;
                     }
@@ -1076,13 +1156,13 @@ impl Engine {
                     (cb.plugin_id, cb.value1 as u32),
                     (cb.text, cb.value2 as u32),
                 );
-                self.dirty |= internal;
+                self.dirty |= routing;
             }
             sys::ENGINE_CALLBACK_PATCHBAY_PORT_REMOVED => {
                 self.graph_mut()
                     .ports
                     .remove(&(cb.plugin_id, cb.value1 as u32));
-                self.dirty |= internal;
+                self.dirty |= routing;
             }
             sys::ENGINE_CALLBACK_PATCHBAY_CONNECTION_ADDED => {
                 let parts: Vec<u32> = cb.text.split(':').filter_map(|p| p.parse().ok()).collect();
@@ -1106,6 +1186,22 @@ impl Engine {
         }
     }
 
+    /// The graph the rig is wired in.
+    fn routing_view(&self) -> View {
+        if self.multi {
+            View::External
+        } else {
+            View::Internal
+        }
+    }
+
+    fn routing(&self) -> &Patchbay {
+        match self.routing_view() {
+            View::Internal => &self.internal,
+            View::External => &self.external,
+        }
+    }
+
     fn graph_mut(&mut self) -> &mut Patchbay {
         match self.view {
             View::Internal => &mut self.internal,
@@ -1113,115 +1209,156 @@ impl Engine {
         }
     }
 
-    // ---------------------------------------------------------- connections
-
-    /// Connects the JACK client to the input/output clients and hardware
-    /// MIDI. Runs inside `with_external`.
-    fn connect_io(&mut self) {
-        let pb = &self.external;
-        let Some(own) = pb.client_id(&self.config.client_name) else {
-            log::warn!("own JACK client not found in patchbay; skipping auto-connect");
-            return;
-        };
-        let pick = |name: &str| -> Option<u32> {
-            if name.is_empty() {
-                pb.client_id("system")
-            } else {
-                pb.client_id(name)
-            }
-        };
-        let own_in = pb.ports_of(own, |h| is_audio(h) && is_input(h));
-        let own_out = pb.ports_of(own, |h| is_audio(h) && !is_input(h));
-        let own_midi_in = pb.ports_of(own, |h| is_midi(h) && is_input(h));
-
-        let mut todo = Vec::new();
-        if let Some(src) = pick(&self.config.input_client) {
-            let outs = pb.ports_of(src, |h| is_audio(h) && !is_input(h));
-            for (k, (dst_port, _)) in own_in.iter().enumerate() {
-                // A mono source feeds both chain inputs.
-                if let Some((p, _)) = outs.get(k).or(outs.first()) {
-                    todo.push((src, *p, own, *dst_port));
-                }
-            }
-        }
-        if let Some(dst) = pick(&self.config.output_client) {
-            let ins = pb.ports_of(dst, |h| is_audio(h) && is_input(h));
-            for ((src_port, _), (p, _)) in own_out.iter().zip(ins.iter()) {
-                todo.push((own, *src_port, dst, *p));
-            }
-        }
-        // Hardware MIDI (JACK "system", PipeWire "Midi-Bridge", a2jmidid "a2j").
-        if let Some((midi_in, _)) = own_midi_in.first() {
-            for (cid, name) in &pb.clients {
-                if *cid == own
-                    || !(name == "system"
-                        || name.starts_with("Midi-Bridge")
-                        || name.starts_with("a2j"))
-                {
-                    continue;
-                }
-                for (p, _) in pb.ports_of(*cid, |h| is_midi(h) && !is_input(h)) {
-                    todo.push((*cid, p, own, *midi_in));
-                }
-            }
-        }
-        let existing: Vec<_> = pb.connections.values().copied().collect();
-        for c in todo {
-            if !existing.contains(&c) && !self.host.patchbay_connect(true, c) {
-                log::warn!("could not connect {c:?}: {}", self.host.last_error());
-            }
-        }
-    }
-
-    fn disconnect_io(&mut self) {
-        let Some(own) = self.external.client_id(&self.config.client_name) else {
-            return;
-        };
-        let ids: Vec<u32> = self
-            .external
-            .connections
-            .iter()
-            .filter(|(_, (og, op, ig, ip))| {
-                let audio = |c: u32, p: u32| {
-                    self.external
-                        .ports
-                        .get(&(c, p))
-                        .is_some_and(|(_, h)| is_audio(*h))
-                };
-                (*og == own && audio(*og, *op)) || (*ig == own && audio(*ig, *ip))
-            })
-            .map(|(id, _)| *id)
-            .collect();
-        for id in ids {
-            self.host.patchbay_disconnect(true, id);
-        }
-    }
-
     // --------------------------------------------------------------- routing
 
-    /// The internal-graph group that stands for `node`.
-    fn group_of(&self, node: Node) -> Option<u32> {
-        let bus = |owner| self.slot_of(owner).and_then(|s| s.group);
-        match node {
-            Node::Input => bus(Owner::InputBus).or_else(|| self.internal.client_id(GROUP_AUDIO_IN)),
-            Node::Output => {
-                bus(Owner::OutputBus).or_else(|| self.internal.client_id(GROUP_AUDIO_OUT))
-            }
-            Node::MidiInput => self.internal.client_id(GROUP_MIDI_IN),
-            Node::MidiOutput => self.internal.client_id(GROUP_MIDI_OUT),
-            Node::Track(t) => bus(Owner::TrackBus(t)),
-            Node::Slot(id) => bus(Owner::Plugin(id)),
-        }
+    /// The group of one of Carlita's own plugins or buses.
+    fn group(&self, owner: Owner) -> Option<u32> {
+        self.slot_of(owner).and_then(|s| s.group)
     }
 
+    fn is_own_group(&self, g: u32) -> bool {
+        self.slots.iter().any(|s| s.group == Some(g))
+    }
+
+    /// Ports of `group` in the routing graph.
     fn ports(&self, group: u32, input: bool, audio: bool) -> Vec<u32> {
-        self.internal
+        self.routing()
             .ports_of(group, |h| {
                 is_input(h) == input && if audio { is_audio(h) } else { is_midi(h) }
             })
             .into_iter()
             .map(|(p, _)| p)
             .collect()
+    }
+
+    fn endpoints(&self, group: u32, input: bool, audio: bool) -> Vec<(u32, u32)> {
+        self.ports(group, input, audio)
+            .into_iter()
+            .map(|p| (group, p))
+            .collect()
+    }
+
+    /// The JACK client standing for the input or output "device".
+    fn device_client(&self, name: &str) -> Option<u32> {
+        self.external
+            .client_id(if name.is_empty() { "system" } else { name })
+    }
+
+    /// The hardware input channels, in order.
+    fn hardware_inputs(&self) -> Vec<(u32, u32)> {
+        let group = if self.multi {
+            self.device_client(&self.config.input_client)
+        } else {
+            self.internal.client_id(GROUP_AUDIO_IN)
+        };
+        group.map_or_else(Vec::new, |g| self.endpoints(g, false, true))
+    }
+
+    /// The hardware output channels, in order.
+    fn hardware_outputs(&self) -> Vec<(u32, u32)> {
+        let group = if self.multi {
+            self.device_client(&self.config.output_client)
+        } else {
+            self.internal.client_id(GROUP_AUDIO_OUT)
+        };
+        group.map_or_else(Vec::new, |g| self.endpoints(g, true, true))
+    }
+
+    /// Hardware MIDI ports that can feed a track, with their full names
+    /// ("client:port"). Without one client per plugin, every device comes
+    /// in merged through Carla's single MIDI input.
+    fn midi_devices(&self) -> Vec<((u32, u32), String)> {
+        if !self.multi {
+            return Vec::new();
+        }
+        let pb = &self.external;
+        let mut v: Vec<((u32, u32), String)> = pb
+            .clients
+            .iter()
+            .filter(|(_, name)| is_midi_hardware(name))
+            .flat_map(|(g, name)| {
+                pb.ports_of(*g, |h| is_midi(h) && !is_input(h))
+                    .into_iter()
+                    .map(move |(p, port)| ((*g, p), format!("{name}:{port}")))
+            })
+            .collect();
+        v.sort_by(|a, b| a.1.cmp(&b.1));
+        v
+    }
+
+    /// Where a track's MIDI comes from.
+    fn midi_sources(&self, track: TrackId) -> Vec<(u32, u32)> {
+        if !self.multi {
+            return self
+                .internal
+                .client_id(GROUP_MIDI_IN)
+                .map_or_else(Vec::new, |g| self.endpoints(g, false, false));
+        }
+        if !self.config.auto_connect {
+            return Vec::new();
+        }
+        let Some(t) = self.layout.tracks.iter().find(|t| t.id == track) else {
+            return Vec::new();
+        };
+        self.midi_devices()
+            .into_iter()
+            .filter(|(_, name)| t.midi.takes(name))
+            .map(|(e, _)| e)
+            .collect()
+    }
+
+    /// The ports a link starts from.
+    fn sources(&self, node: Node, sel: PortSel, audio: bool) -> Vec<(u32, u32)> {
+        let mut v = match node {
+            Node::Input if audio => {
+                if self.multi && !self.config.auto_connect {
+                    Vec::new()
+                } else {
+                    self.hardware_inputs()
+                }
+            }
+            Node::MidiInput(t) if !audio => return self.midi_sources(t),
+            Node::Track(t) => self
+                .group(Owner::TrackBus(t))
+                .map_or_else(Vec::new, |g| self.endpoints(g, false, audio)),
+            Node::Slot(id) => self
+                .group(Owner::Plugin(id))
+                .map_or_else(Vec::new, |g| self.endpoints(g, false, audio)),
+            _ => Vec::new(),
+        };
+        if let PortSel::Only(mask) = sel {
+            v = v
+                .into_iter()
+                .enumerate()
+                .filter(|(k, _)| *k < 64 && mask & (1 << k) != 0)
+                .map(|(_, e)| e)
+                .collect();
+        }
+        v
+    }
+
+    /// The ports a link ends at.
+    fn sinks(&self, node: Node, audio: bool) -> Vec<(u32, u32)> {
+        let of = |owner| {
+            self.group(owner)
+                .map(|g| self.endpoints(g, true, audio))
+                .filter(|v| !v.is_empty())
+        };
+        match node {
+            // Only ever through the output bus: never a hardware input
+            // straight to the speakers.
+            Node::Output => of(Owner::OutputBus).unwrap_or_default(),
+            // A track whose bus is missing plays straight into the output.
+            Node::Track(t) => {
+                of(Owner::TrackBus(t)).unwrap_or_else(|| self.sinks(Node::Output, audio))
+            }
+            Node::Slot(id) => of(Owner::Plugin(id)).unwrap_or_default(),
+            Node::MidiOutput if !audio && !self.multi => self
+                .internal
+                .client_id(GROUP_MIDI_OUT)
+                .map_or_else(Vec::new, |g| self.endpoints(g, true, false)),
+            _ => Vec::new(),
+        }
     }
 
     fn node_io(&self, id: SlotId) -> Option<NodeIo> {
@@ -1241,8 +1378,9 @@ impl Engine {
     }
 
     /// Port pairs that connect `outs` to `ins`: one to one, a mono output
-    /// to every input, several outputs summed into a mono input.
-    fn pair(outs: &[u32], ins: &[u32]) -> Vec<(u32, u32)> {
+    /// to every input, several outputs summed into a mono input, and more
+    /// outputs than inputs spread over them in turn.
+    fn pair<T: Copy>(outs: &[T], ins: &[T]) -> Vec<(T, T)> {
         if outs.is_empty() || ins.is_empty() {
             return Vec::new();
         }
@@ -1254,71 +1392,73 @@ impl Engine {
 
     fn desired_connections(&self) -> HashSet<(u32, u32, u32, u32)> {
         let mut out = HashSet::new();
-        let audio = |out: &mut HashSet<_>, from: u32, outs: &[u32], to: u32, ins: &[u32]| {
-            for (a, b) in Self::pair(outs, ins) {
-                out.insert((from, a, to, b));
+        let audio = |out: &mut HashSet<_>, outs: &[(u32, u32)], ins: &[(u32, u32)]| {
+            for ((g1, p1), (g2, p2)) in Self::pair(outs, ins) {
+                out.insert((g1, p1, g2, p2));
             }
         };
-        // Hardware in -> input bus, output bus -> hardware out.
-        let hw_in = self.internal.client_id(GROUP_AUDIO_IN);
-        let hw_out = self.internal.client_id(GROUP_AUDIO_OUT);
-        let in_bus = self.slot_of(Owner::InputBus).and_then(|s| s.group);
-        let out_bus = self.slot_of(Owner::OutputBus).and_then(|s| s.group);
-        if let (Some(hw), Some(bus)) = (hw_in, in_bus) {
-            audio(
-                &mut out,
-                hw,
-                &self.ports(hw, false, true),
-                bus,
-                &self.ports(bus, true, true),
-            );
+        // Output bus -> the first hardware outputs (not every one of them,
+        // on an interface with eight).
+        if self.config.auto_connect || !self.multi {
+            if let Some(bus) = self.group(Owner::OutputBus) {
+                let outs = self.endpoints(bus, false, true);
+                let mut hw = self.hardware_outputs();
+                if hw.len() > 1 {
+                    hw.truncate(outs.len());
+                }
+                audio(&mut out, &outs, &hw);
+            }
         }
-        if let (Some(bus), Some(hw)) = (out_bus, hw_out) {
-            audio(
-                &mut out,
-                bus,
-                &self.ports(bus, false, true),
-                hw,
-                &self.ports(hw, true, true),
-            );
+        // Each track's inputs -> its input meter.
+        for t in &self.layout.tracks {
+            if let Some(g) = self.group(Owner::TrackInputBus(t.id)) {
+                let from = self.sources(Node::Input, PortSel::Only(t.input.mask()), true);
+                audio(&mut out, &from, &self.endpoints(g, true, true));
+            }
         }
         for link in rig::route(&self.layout, |id| self.node_io(id)) {
-            let Some(from) = self.group_of(link.from) else {
-                continue;
-            };
-            // A track whose bus is missing plays straight into the output.
-            let to = match link.to {
-                Node::Track(_) => self
-                    .group_of(link.to)
-                    .or_else(|| self.group_of(Node::Output)),
-                n => self.group_of(n),
-            };
-            let Some(to) = to else { continue };
             match link.kind {
-                LinkKind::Audio => {
-                    let mut outs = self.ports(from, false, true);
-                    match link.sel {
-                        PortSel::All => {}
-                        PortSel::Left => outs.truncate(1),
-                        PortSel::Right => {
-                            if outs.len() > 1 {
-                                outs.remove(0);
-                            }
-                            outs.truncate(1);
-                        }
-                    }
-                    audio(&mut out, from, &outs, to, &self.ports(to, true, true));
-                }
+                LinkKind::Audio => audio(
+                    &mut out,
+                    &self.sources(link.from, link.sel, true),
+                    &self.sinks(link.to, true),
+                ),
                 LinkKind::Midi => {
-                    let outs = self.ports(from, false, false);
-                    let ins = self.ports(to, true, false);
-                    if let (Some(a), Some(b)) = (outs.first(), ins.first()) {
-                        out.insert((from, *a, to, *b));
+                    let from = match link.from {
+                        // A plugin's MIDI goes on from its first output.
+                        Node::Slot(_) => self
+                            .sources(link.from, link.sel, false)
+                            .into_iter()
+                            .take(1)
+                            .collect(),
+                        n => self.sources(n, link.sel, false),
+                    };
+                    if let Some((g2, p2)) = self.sinks(link.to, false).first() {
+                        for (g1, p1) in from {
+                            out.insert((g1, p1, *g2, *p2));
+                        }
                     }
                 }
             }
         }
+        // In the JACK graph, only ever connect Carlita's own clients.
+        if self.multi {
+            out.retain(|(og, _, ig, _)| self.is_own_group(*og) || self.is_own_group(*ig));
+        }
         out
+    }
+
+    /// Whether Carlita looks after this connection. In the JACK graph, that
+    /// is everything going into its own clients and its output going to the
+    /// output device; connections other programs make elsewhere (or from
+    /// Carlita's outputs, to record them) are left alone.
+    fn manages(&self, c: &(u32, u32, u32, u32)) -> bool {
+        if !self.multi {
+            return true;
+        }
+        let (og, _, ig, _) = *c;
+        self.is_own_group(ig)
+            || (self.is_own_group(og) && self.device_client(&self.config.output_client) == Some(ig))
     }
 
     /// Changes only the connections that differ from the layout. New
@@ -1329,9 +1469,10 @@ impl Engine {
         if !self.running {
             return;
         }
+        let external = self.multi;
         let desired = self.desired_connections();
         let current: HashMap<(u32, u32, u32, u32), u32> = self
-            .internal
+            .routing()
             .connections
             .iter()
             .map(|(id, c)| (*c, *id))
@@ -1339,15 +1480,15 @@ impl Engine {
         let mut changed = false;
         for c in &desired {
             if !current.contains_key(c) {
-                if !self.host.patchbay_connect(false, *c) {
+                if !self.host.patchbay_connect(external, *c) {
                     log::warn!("could not connect {c:?}: {}", self.host.last_error());
                 }
                 changed = true;
             }
         }
         for (c, id) in &current {
-            if !desired.contains(c) {
-                self.host.patchbay_disconnect(false, *id);
+            if !desired.contains(c) && self.manages(c) {
+                self.host.patchbay_disconnect(external, *id);
                 changed = true;
             }
         }
@@ -1356,6 +1497,40 @@ impl Engine {
             self.drain();
             // Our own connection changes do not need another pass.
             self.dirty = dirty;
+        }
+        self.emit_hardware();
+    }
+
+    /// Tells the UI which hardware inputs and MIDI devices there are, when
+    /// that changed.
+    fn emit_hardware(&mut self) {
+        let pb = self.routing();
+        let inputs: Vec<String> = self
+            .hardware_inputs()
+            .into_iter()
+            .map(|(g, p)| {
+                pb.ports
+                    .get(&(g, p))
+                    .map(|(n, _)| n.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        let midi: Vec<MidiDevice> = self
+            .midi_devices()
+            .into_iter()
+            .map(|(_, id)| MidiDevice {
+                name: midi_label(id.split_once(':').map_or(&id[..], |(_, p)| p)),
+                id,
+            })
+            .collect();
+        let hw = (inputs, midi);
+        if self.hardware.as_ref() != Some(&hw) {
+            self.emit(Event::Hardware {
+                inputs: hw.0.clone(),
+                midi: hw.1.clone(),
+                merged_midi: !self.multi,
+            });
+            self.hardware = Some(hw);
         }
     }
 
@@ -1398,8 +1573,16 @@ impl Engine {
                 .find(|(s, _)| *s == id)
                 .map_or(0, |(_, l)| *l)
         });
+        let track_inputs: Vec<(TrackId, [f32; 2])> = self
+            .layout
+            .tracks
+            .iter()
+            .map(|t| (t.id, peak(Owner::TrackInputBus(t.id), true)))
+            .collect();
         Meters {
-            input: peak(Owner::InputBus, true),
+            input: track_inputs
+                .iter()
+                .fold([0.0; 2], |m, (_, p)| [m[0].max(p[0]), m[1].max(p[1])]),
             output: peak(Owner::OutputBus, false),
             tracks: self
                 .layout
@@ -1407,6 +1590,7 @@ impl Engine {
                 .iter()
                 .map(|t| (t.id, peak(Owner::TrackBus(t.id), false)))
                 .collect(),
+            track_inputs,
             dsp_load,
             xruns,
             latencies,
@@ -1414,5 +1598,36 @@ impl Engine {
             sample_rate: self.host.sample_rate(),
             buffer_size: self.host.buffer_size(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_jack_clients_and_ports() {
+        assert!(client_matches("Carlita.12 Amp", "Carlita.12 Amp"));
+        assert!(client_matches("Carlita.12 Amp-01", "Carlita.12 Amp"));
+        assert!(!client_matches("Carlita.12 Amp 2", "Carlita.12 Amp"));
+        assert!(!client_matches("Carlita.12 Amp-", "Carlita.12 Amp"));
+        assert!(is_own_client("Carlita", "Carlita"));
+        assert!(is_own_client("Carlita.track-1", "Carlita"));
+        assert!(!is_own_client("Carlitas", "Carlita"));
+        assert_eq!(
+            midi_label("Arturia KeyStep 32:(capture_0) KeyStep 32 MIDI 1"),
+            "KeyStep 32 MIDI 1"
+        );
+        assert_eq!(
+            midi_label("KeyStep [24] (capture): KeyStep MIDI 1"),
+            "KeyStep MIDI 1"
+        );
+        assert_eq!(midi_label("midi_capture_1"), "midi_capture_1");
+        assert_eq!(clean_name("Carlita.3 A:B/C", 48), "Carlita.3 A.B.C");
+        assert_eq!(
+            Engine::pair(&[1, 2], &[10]),
+            vec![(1, 10), (2, 10)],
+            "a stereo source sums into a mono input"
+        );
     }
 }

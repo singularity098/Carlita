@@ -1,9 +1,133 @@
 // Left sidebar: the chain of the selected track (tracks are picked in the
 // top bar).
 import { Theme } from "theme.slint";
-import { BigButton, BigSlider, Chip, StereoMeter, CollapseButton, Tip } from "widgets.slint";
+import { BigButton, BigSlider, Chip, StereoMeter, CollapseButton, Tip, SectionTitle, SettingRow, Toggle } from "widgets.slint";
 import { Icon, Icons } from "icons.slint";
-import { SlotItem } from "types.slint";
+import { SlotItem, IoChoice } from "types.slint";
+
+// What feeds the selected track: hardware inputs and MIDI devices.
+export global TrackIo {
+    // Short texts for the track's buttons ("In 1+2", "All MIDI").
+    in property <string> input-label;
+    in property <string> midi-label;
+    // Every hardware input channel, and whether the track takes it.
+    in property <[IoChoice]> inputs;
+    // Every MIDI device, and whether the track takes it.
+    in property <[IoChoice]> midi;
+    // The track takes every MIDI device, also ones plugged in later.
+    in property <bool> midi-all;
+    // MIDI devices cannot be told apart (not under JACK).
+    in property <bool> merged-midi;
+    callback toggle-input(int);
+    callback toggle-midi(int);
+    callback set-midi-all(bool);
+}
+
+// Picks the hardware inputs and MIDI devices of the selected track.
+component TrackIoPage inherits Rectangle {
+    in property <string> track-name;
+    callback close;
+
+    // Opaque, so the chain underneath does not show through.
+    background: Theme.popup.with-alpha(1);
+    // Keeps touches from reaching the chain underneath.
+    TouchArea {
+        moved => {
+            if self.mouse-x - self.pressed-x < -60px {
+                root.close();
+            }
+        }
+    }
+
+    VerticalLayout {
+        padding: Theme.pad;
+        spacing: 10px;
+        HorizontalLayout {
+            spacing: 10px;
+            Text {
+                text: root.track-name + ": inputs";
+                font-size: Theme.font-title;
+                color: Theme.text;
+                overflow: elide;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            CollapseButton {
+                icon: Icons.chevron-left;
+                tip: "Back to the chain";
+                clicked => { root.close(); }
+            }
+        }
+        Flickable {
+            vertical-stretch: 1;
+            content-height: column.preferred-height;
+            interactive: self.content-height > self.height;
+            column := VerticalLayout {
+                spacing: 8px;
+                alignment: start;
+                SectionTitle { text: "AUDIO INPUTS"; }
+                Text {
+                    text: TrackIo.inputs.length == 0
+                        ? "No audio inputs found. Start the audio engine, or pick an input device in the options."
+                        : "One input plays on both sides, two make a stereo pair. Pick none for a synth.";
+                    font-size: Theme.font-small;
+                    font-weight: Theme.regular;
+                    color: Theme.text-dim;
+                    wrap: word-wrap;
+                }
+                inputs-grid := Rectangle {
+                    property <int> per-row: max(1, floor((self.width + 8px) / 72px));
+                    property <length> cell: (self.width - (self.per-row - 1) * 8px) / self.per-row;
+                    height: TrackIo.inputs.length == 0 ? 0 : ceil(TrackIo.inputs.length / self.per-row) * 52px;
+                    for c[i] in TrackIo.inputs: Chip {
+                        x: mod(i, inputs-grid.per-row) * (inputs-grid.cell + 8px);
+                        y: floor(i / inputs-grid.per-row) * 52px;
+                        width: inputs-grid.cell;
+                        text: c.name;
+                        selected: c.on;
+                        tip: c.detail;
+                        clicked => { TrackIo.toggle-input(i); }
+                    }
+                }
+                Rectangle { height: 8px; }
+                SectionTitle { text: "MIDI DEVICES"; }
+                if TrackIo.merged-midi: Text {
+                    text: "Every track takes all MIDI devices. Telling them apart needs the JACK driver (JACK or PipeWire).";
+                    font-size: Theme.font-small;
+                    font-weight: Theme.regular;
+                    color: Theme.text-dim;
+                    wrap: word-wrap;
+                }
+                if !TrackIo.merged-midi: SettingRow {
+                    label: "All devices";
+                    detail: "Also ones plugged in later";
+                    Toggle {
+                        tip: "Take every MIDI device";
+                        checked: TrackIo.midi-all;
+                        toggled(v) => { TrackIo.set-midi-all(v); }
+                    }
+                }
+                if !TrackIo.merged-midi && TrackIo.midi.length == 0: Text {
+                    text: "No MIDI devices found.";
+                    font-size: Theme.font-small;
+                    font-weight: Theme.regular;
+                    color: Theme.text-dim;
+                }
+                if !TrackIo.merged-midi: VerticalLayout {
+                    for d[i] in TrackIo.midi: SettingRow {
+                        label: d.name;
+                        detail: d.detail;
+                        Toggle {
+                            tip: d.on ? "Stop taking this device" : "Take this device";
+                            checked: d.on;
+                            toggled(v) => { TrackIo.toggle-midi(i); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 component ChainRow inherits Rectangle {
     in property <SlotItem> item;
@@ -354,7 +478,6 @@ export component ChainPanel inherits Rectangle {
     in property <string> preset-name;
     in property <string> undo-text;
     in property <string> track-name;
-    in property <string> track-input;
     in property <bool> track-muted;
     in property <float> track-volume;
     in property <string> track-volume-text;
@@ -377,7 +500,6 @@ export component ChainPanel inherits Rectangle {
     callback close;
     callback rename-track;
     callback delete-track;
-    callback cycle-input;
     callback toggle-mute;
     callback set-volume(float);
 
@@ -386,6 +508,8 @@ export component ChainPanel inherits Rectangle {
     border-color: Theme.border;
 
     property <int> drag-index: -1;
+    // The page that picks the track's inputs covers the chain.
+    property <bool> io-open: false;
     property <length> drag-offset: 0;
     property <length> content-h: root.slots.length == 0 ? 0 : root.slots[root.slots.length - 1].y + root.slots[root.slots.length - 1].h;
 
@@ -444,7 +568,7 @@ export component ChainPanel inherits Rectangle {
                     left: root.in-left;
                     right: root.in-right;
                     label: "IN";
-                    tip: "Input level";
+                    tip: "Level of the inputs this track takes";
                 }
                 StereoMeter {
                     left: root.out-left;
@@ -469,9 +593,15 @@ export component ChainPanel inherits Rectangle {
             spacing: 6px;
             Chip {
                 y: (parent.height - self.height) / 2;
-                text: root.track-input;
-                tip: "Which inputs feed this track: tap for the next choice";
-                clicked => { root.cycle-input(); }
+                text: TrackIo.input-label;
+                tip: "Which hardware inputs feed this track";
+                clicked => { root.io-open = true; }
+            }
+            Chip {
+                y: (parent.height - self.height) / 2;
+                text: TrackIo.midi-label;
+                tip: "Which MIDI devices play this track";
+                clicked => { root.io-open = true; }
             }
             Chip {
                 y: (parent.height - self.height) / 2;
@@ -628,5 +758,12 @@ export component ChainPanel inherits Rectangle {
             height: 60px;
             clicked => { root.add-plugin(); }
         }
+    }
+
+    if root.io-open: TrackIoPage {
+        width: root.width;
+        height: root.height;
+        track-name: root.track-name;
+        close => { root.io-open = false; }
     }
 }

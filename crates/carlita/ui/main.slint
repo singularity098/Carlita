@@ -17,8 +17,8 @@ import "../../../assets/fonts/Jost-Light.ttf";
 import "../../../assets/fonts/Jost-Regular.ttf";
 import { Theme, ThemeLook } from "theme.slint";
 import { BigButton, BigSlider, Toggle, SectionTitle } from "widgets.slint";
-import { SlotItem, TrackItem, PluginItem, ParamItem, WifiItem, BtItem, MappingItem } from "types.slint";
-import { ChainPanel } from "chain.slint";
+import { SlotItem, TrackItem, PluginItem, ParamItem, WifiItem, BtItem, MappingItem, IoChoice } from "types.slint";
+import { ChainPanel, TrackIo } from "chain.slint";
 import { PluginBrowser } from "browser.slint";
 import { OptionsPanel, Options } from "options.slint";
 import { TextPrompt, Piano, TextUtil } from "keyboards.slint";
@@ -26,7 +26,7 @@ import { TrackBar } from "trackbar.slint";
 import { Icon, Icons } from "icons.slint";
 import { Tips, TooltipLayer } from "tooltip.slint";
 
-export { Theme, ThemeLook, Options, TextUtil, SlotItem, TrackItem, PluginItem, ParamItem, WifiItem, BtItem, MappingItem }
+export { Theme, ThemeLook, Options, TextUtil, TrackIo, SlotItem, TrackItem, PluginItem, ParamItem, WifiItem, BtItem, MappingItem, IoChoice }
 
 // A sidebar that follows the finger and snaps open or closed.
 component EdgeStrip inherits Rectangle {
@@ -257,7 +257,6 @@ export component MainWindow inherits Window {
     // Tracks.
     in property <[TrackItem]> tracks;
     in property <string> track-name;
-    in property <string> track-input;
     in property <bool> track-muted;
     in property <float> track-volume: 1;
     in property <string> track-volume-text;
@@ -360,7 +359,6 @@ export component MainWindow inherits Window {
     callback rename-track;
     callback rename-track-to(int, string);
     callback delete-track;
-    callback cycle-input;
     callback toggle-mute;
     callback set-volume(float);
     callback undo-remove;
@@ -681,7 +679,6 @@ export component MainWindow inherits Window {
         undo-text: root.undo-text;
         drop-y: root.drop-y;
         track-name: root.track-name;
-        track-input: root.track-input;
         track-muted: root.track-muted;
         track-volume: root.track-volume;
         track-volume-text: root.track-volume-text;
@@ -701,7 +698,6 @@ export component MainWindow inherits Window {
         add-to-lane(row) => { root.add-to-lane(row); }
         rename-track => { root.rename-track(); }
         delete-track => { root.delete-track(); }
-        cycle-input => { root.cycle-input(); }
         toggle-mute => { root.toggle-mute(); }
         set-volume(v) => { root.set-volume(v); }
         add-plugin => { root.open-browser(); }

@@ -9,8 +9,8 @@
 //!         └─►  track "Vocals": eq ─► delay ──────────────► bus ─┘
 //! ```
 //!
-//! Every track takes the rig input (both channels, or only the left or right
-//! one) and ends in its own bus, which sets the track volume and feeds the
+//! Every track takes the hardware inputs it picks (any of them, or none) and
+//! the MIDI devices it picks, and ends in its own bus, which sets the track volume and feeds the
 //! rig output. A parallel block sends its input into every lane and sums the
 //! lanes' outputs; an empty lane is a dry path. Parallel blocks hold plain
 //! plugins only, so the structure stays readable on a touchscreen.
@@ -27,36 +27,142 @@ use serde::{Deserialize, Serialize};
 #[serde(transparent)]
 pub struct TrackId(pub u64);
 
-/// Which channels of the rig input feed a track.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TrackInput {
-    /// Both input channels.
-    #[default]
-    Stereo,
-    /// Only input 1, sent to both sides of a stereo plugin.
-    Left,
-    /// Only input 2, sent to both sides of a stereo plugin.
-    Right,
-    /// No audio input (a synth played over MIDI).
-    None,
+/// The most hardware input channels a track can pick from.
+pub const MAX_INPUTS: usize = 64;
+
+/// Which hardware input channels feed a track (0 is the first input).
+///
+/// One channel is sent to both sides of a stereo plugin, two make a stereo
+/// pair, and more are spread over the plugin's inputs (odd ones left, even
+/// ones right). No channels means no audio input (a synth played over MIDI).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct TrackInput {
+    channels: Vec<u16>,
+}
+
+impl Default for TrackInput {
+    fn default() -> Self {
+        Self::stereo()
+    }
 }
 
 impl TrackInput {
-    pub const ALL: [TrackInput; 4] = [Self::Stereo, Self::Left, Self::Right, Self::None];
+    /// Inputs 1 and 2.
+    pub fn stereo() -> Self {
+        Self::new([0, 1])
+    }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Stereo => "In 1+2",
-            Self::Left => "In 1",
-            Self::Right => "In 2",
-            Self::None => "No input",
+    pub fn none() -> Self {
+        Self::new([])
+    }
+
+    /// The given channels, sorted, without duplicates or channels past
+    /// [`MAX_INPUTS`].
+    pub fn new(channels: impl IntoIterator<Item = u16>) -> Self {
+        let mut channels: Vec<u16> = channels
+            .into_iter()
+            .filter(|c| (*c as usize) < MAX_INPUTS)
+            .collect();
+        channels.sort_unstable();
+        channels.dedup();
+        Self { channels }
+    }
+
+    pub fn channels(&self) -> &[u16] {
+        &self.channels
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.channels.is_empty()
+    }
+
+    pub fn contains(&self, channel: u16) -> bool {
+        self.channels.contains(&channel)
+    }
+
+    /// Adds or removes one channel.
+    pub fn toggle(&mut self, channel: u16) {
+        if self.contains(channel) {
+            self.channels.retain(|c| *c != channel);
+        } else {
+            *self = Self::new(self.channels.iter().copied().chain([channel]));
         }
     }
 
-    pub fn next(self) -> Self {
-        let i = Self::ALL.iter().position(|x| *x == self).unwrap_or(0);
-        Self::ALL[(i + 1) % Self::ALL.len()]
+    /// The channels as a bit mask (bit 0 is the first input).
+    pub fn mask(&self) -> u64 {
+        self.channels.iter().fold(0, |m, c| m | 1 << c)
+    }
+
+    /// Short text for the track's input button: "In 1+2", "In 3", "In 1, 4",
+    /// "No input".
+    pub fn label(&self) -> String {
+        let n: Vec<String> = self.channels.iter().map(|c| (c + 1).to_string()).collect();
+        match n.len() {
+            0 => "No input".into(),
+            2 if self.channels[1] == self.channels[0] + 1 => format!("In {}+{}", n[0], n[1]),
+            1..=3 => format!("In {}", n.join(", ")),
+            k => format!("{k} inputs"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TrackInput {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // Presets from before input channels were listed name one of four
+        // choices.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Channels(Vec<u16>),
+            Old(String),
+        }
+        Ok(match Repr::deserialize(d)? {
+            Repr::Channels(c) => Self::new(c),
+            Repr::Old(s) => match s.as_str() {
+                "left" => Self::new([0]),
+                "right" => Self::new([1]),
+                "none" => Self::none(),
+                _ => Self::stereo(),
+            },
+        })
+    }
+}
+
+/// Which MIDI devices a track takes. Devices are named by their port
+/// ("client:port", as the audio server lists them).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrackMidi {
+    /// Every hardware MIDI device.
+    #[default]
+    All,
+    /// Only these devices (none at all when the list is empty).
+    Devices(Vec<String>),
+}
+
+impl TrackMidi {
+    pub fn takes(&self, device: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Devices(d) => d.iter().any(|x| x == device),
+        }
+    }
+
+    /// Adds or removes one device. Leaving "all devices" keeps every other
+    /// device in `known`.
+    pub fn toggle(&mut self, device: &str, known: &[String]) {
+        let mut list = match self {
+            Self::All => known.to_vec(),
+            Self::Devices(d) => std::mem::take(d),
+        };
+        if let Some(i) = list.iter().position(|x| x == device) {
+            list.remove(i);
+        } else {
+            list.push(device.to_string());
+        }
+        *self = Self::Devices(list);
     }
 }
 
@@ -90,6 +196,8 @@ pub struct Track {
     pub name: String,
     #[serde(default)]
     pub input: TrackInput,
+    #[serde(default)]
+    pub midi: TrackMidi,
     /// Linear gain of the track bus, 0..=4 (unity is 1).
     #[serde(default = "unity")]
     pub volume: f32,
@@ -104,7 +212,8 @@ impl Track {
         Self {
             id,
             name,
-            input: TrackInput::Stereo,
+            input: TrackInput::stereo(),
+            midi: TrackMidi::All,
             volume: 1.0,
             muted: false,
             blocks: Vec::new(),
@@ -514,7 +623,8 @@ impl Rig {
                 .iter()
                 .map(|t| TrackLayout {
                     id: t.id,
-                    input: t.input,
+                    input: t.input.clone(),
+                    midi: t.midi.clone(),
                     volume: t.volume,
                     muted: t.muted,
                     blocks: t
@@ -674,6 +784,7 @@ pub struct RigLayout {
 pub struct TrackLayout {
     pub id: TrackId,
     pub input: TrackInput,
+    pub midi: TrackMidi,
     pub volume: f32,
     pub muted: bool,
     pub blocks: Vec<BlockLayout>,
@@ -703,12 +814,12 @@ impl RigLayout {
 /// A point in the signal graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Node {
-    /// The rig's audio input (outputs of the input bus).
+    /// The hardware audio inputs (pick channels with [`PortSel::Only`]).
     Input,
     /// The rig's audio output (input of the output bus).
     Output,
-    /// Hardware MIDI coming in.
-    MidiInput,
+    /// The hardware MIDI that a track takes (see [`TrackMidi`]).
+    MidiInput(TrackId),
     /// MIDI going out of the rig.
     MidiOutput,
     /// The bus at the end of a track.
@@ -720,10 +831,8 @@ pub enum Node {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PortSel {
     All,
-    /// Only the first output.
-    Left,
-    /// Only the second output.
-    Right,
+    /// Only the outputs whose bits are set (bit 0 is the first output).
+    Only(u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -809,13 +918,12 @@ pub fn route(layout: &RigLayout, io: impl Fn(SlotId) -> Option<NodeIo>) -> Vec<L
     };
     for t in &layout.tracks {
         let mut f = Frontier {
-            audio: match t.input {
-                TrackInput::Stereo => vec![(Node::Input, PortSel::All)],
-                TrackInput::Left => vec![(Node::Input, PortSel::Left)],
-                TrackInput::Right => vec![(Node::Input, PortSel::Right)],
-                TrackInput::None => vec![],
+            audio: if t.input.is_empty() {
+                vec![]
+            } else {
+                vec![(Node::Input, PortSel::Only(t.input.mask()))]
             },
-            midi: vec![Node::MidiInput],
+            midi: vec![Node::MidiInput(t.id)],
         };
         for b in &t.blocks {
             match b {
@@ -858,7 +966,7 @@ pub fn route(layout: &RigLayout, io: impl Fn(SlotId) -> Option<NodeIo>) -> Vec<L
             });
         }
         for &from in &f.midi {
-            if from != Node::MidiInput {
+            if !matches!(from, Node::MidiInput(_)) {
                 add(Link {
                     kind: LinkKind::Midi,
                     from,
@@ -1091,12 +1199,17 @@ mod tests {
         let (mut r, t, ids) = rig(&["a", "b", "c"]);
         r.split(ids[1]);
         let t2 = r.add_track(None);
-        r.track_mut(t2).unwrap().input = TrackInput::Right;
+        r.track_mut(t2).unwrap().input = TrackInput::new([1]);
         r.track_mut(t2).unwrap().muted = true;
         let links = route(&r.layout(), |_| fx());
         let (a, b, c) = (Node::Slot(ids[0]), Node::Slot(ids[1]), Node::Slot(ids[2]));
         let expect = [
-            audio(Node::Input, a),
+            Link {
+                kind: LinkKind::Audio,
+                from: Node::Input,
+                sel: PortSel::Only(0b11),
+                to: a,
+            },
             audio(a, b),
             // b's lane and the dry lane both feed c.
             audio(b, c),
@@ -1107,7 +1220,7 @@ mod tests {
             Link {
                 kind: LinkKind::Audio,
                 from: Node::Input,
-                sel: PortSel::Right,
+                sel: PortSel::Only(0b10),
                 to: Node::Track(t2),
             },
         ];
@@ -1149,15 +1262,47 @@ mod tests {
         assert_eq!(
             links,
             [
-                midi(Node::MidiInput, s(0)),
+                midi(Node::MidiInput(t), s(0)),
                 audio(s(0), s(1)),
                 audio(s(0), s(3)),
-                midi(Node::MidiInput, s(3)),
+                midi(Node::MidiInput(t), s(3)),
                 audio(s(3), Node::Track(t)),
                 audio(Node::Track(t), Node::Output),
                 midi(s(3), Node::MidiOutput),
             ]
         );
+    }
+
+    #[test]
+    fn track_inputs_read_old_presets_and_label() {
+        let read = |j: &str| serde_json::from_str::<TrackInput>(j).unwrap();
+        assert_eq!(read(r#""stereo""#), TrackInput::stereo());
+        assert_eq!(read(r#""left""#).channels(), [0]);
+        assert_eq!(read(r#""right""#).channels(), [1]);
+        assert!(read(r#""none""#).is_empty());
+        assert_eq!(read("[5, 2, 2, 99]").channels(), [2, 5]);
+        assert_eq!(serde_json::to_string(&TrackInput::new([3])).unwrap(), "[3]");
+        assert_eq!(TrackInput::stereo().label(), "In 1+2");
+        assert_eq!(TrackInput::new([2]).label(), "In 3");
+        assert_eq!(TrackInput::new([0, 3]).label(), "In 1, 4");
+        assert_eq!(TrackInput::new(0..5).label(), "5 inputs");
+        assert_eq!(TrackInput::none().label(), "No input");
+        let mut i = TrackInput::new([0]);
+        i.toggle(7);
+        assert_eq!(i.mask(), 0b1000_0001);
+        i.toggle(0);
+        assert_eq!(i.channels(), [7]);
+
+        // A track from before MIDI devices were picked takes them all.
+        let t: Track = serde_json::from_str(r#"{"id":1,"name":"x","input":"left"}"#).unwrap();
+        assert_eq!(t.midi, TrackMidi::All);
+        let known = vec!["a:1".to_string(), "b:1".to_string()];
+        let mut m = TrackMidi::All;
+        m.toggle("a:1", &known);
+        assert_eq!(m, TrackMidi::Devices(vec!["b:1".into()]));
+        assert!(!m.takes("a:1"));
+        let back: TrackMidi = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back, m);
     }
 
     #[test]

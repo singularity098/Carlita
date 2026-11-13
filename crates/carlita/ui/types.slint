@@ -82,3 +82,11 @@ export struct TrackItem {
     // Peak level of the track's output, 0..1.
     level: float,
 }
+
+// A hardware input channel or MIDI device a track can take.
+export struct IoChoice {
+    name: string,
+    // Longer description (the port's full name), for the tip.
+    detail: string,
+    on: bool,
+}
