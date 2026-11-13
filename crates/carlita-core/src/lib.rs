@@ -17,7 +17,7 @@ pub use catalog::{CatalogFilter, PluginCatalog};
 pub use chain::{Chain, ChainSlot, SlotId};
 pub use plugin::{BinaryArch, PluginCategory, PluginDescriptor, PluginFormat};
 pub use preset::{Preset, PresetStore};
-pub use rig::{Rig, Track, TrackId, TrackInput};
+pub use rig::{Rig, Track, TrackId, TrackInput, TrackMidi};
 pub use settings::Settings;
 
 /// Reads a JSON file, returning `Ok(None)` when it does not exist.

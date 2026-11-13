@@ -24,26 +24,46 @@
   only, which keeps the list readable on a touchscreen.
 
   ```
-  input ─┬─► comp ─► ┌ A: amp ─► cab ┐ ─► reverb ─► [Guitar bus] ─┬─► output
-         │           └ B: (dry) ─────┘                           │
-         └─► (input 2 only) eq ──────────────────► [Vocals bus] ─┘
+  in 1+2 ──► comp ─► ┌ A: amp ─► cab ┐ ─► reverb ─► [Guitar bus] ─┬─► output
+                     └ B: (dry) ─────┘                           │
+  in 5 ────► eq ─────────────────────────────────► [Vocals bus] ─┘
+  KeyStep ─► synth ──────────────────────────────► [Keys bus] ───┘
   ```
-* **Patchbay wiring.** Carla runs in *patchbay* mode. The UI sends the rig's
-  layout (`Command::SetLayout`) and `rig::route` turns it into links between
-  nodes. The engine resolves each node to a group in Carla's internal graph
-  and changes only the connections that differ, making new ones before
-  removing old ones, so adding, moving and bypassing plugins happen while
-  audio keeps running. A plugin without audio outputs (a tuner) passes audio
+* **Track inputs.** Each track picks any of the hardware input channels
+  (one plays on both sides of a stereo plugin, two make a stereo pair) and
+  any MIDI devices, or all of them (the default, which also takes devices
+  plugged in later). Devices are stored by their port name ("client:port").
+  Old presets' "stereo", "left", "right" and "none" read as inputs 1+2, 1,
+  2 and none.
+* **Wiring.** Under JACK (and PipeWire), Carla runs in *multiple clients*
+  mode: every plugin and bus is a JACK client of its own, named
+  `Carlita.<slot> <plugin>` (`Carlita.track-<id>`, `Carlita.in-<id>`,
+  `Carlita.out` for buses), and the rig is wired in the JACK graph, from the
+  hardware ports straight to each track's first plugins. Carla's single
+  client has only two audio inputs and one MIDI input that merges every
+  device, so it cannot give each track its own. With other drivers (ALSA),
+  Carla runs in *patchbay* mode and the rig is wired in its internal graph,
+  whose inputs are the device's channels; MIDI devices are merged there.
+  Either way, the UI sends the rig's layout (`Command::SetLayout`) and
+  `rig::route` turns it into links between nodes. The engine resolves each
+  node to ports and changes only the connections that differ, making new
+  ones before removing old ones, so adding, moving and bypassing plugins
+  happen while audio keeps running. In the JACK graph it only touches
+  connections into its own clients and from its output bus to the output
+  device; connections other programs make (say, recording Carlita's
+  output) are left alone. A plugin without audio outputs (a tuner) passes audio
   on, and a plugin without MIDI outputs passes MIDI on, as in a rack.
-* **Buses.** The engine adds Carla's internal `audiogain_s` as an input bus,
-  an output bus and one bus per track. The buses carry the meters, the track
-  volume (the gain parameter) and mute (the bus is disconnected from the
-  output). Hardware → input bus and output bus → hardware are fixed links.
-* **Two graphs.** Carla reports either its internal graph or the JACK graph,
-  whichever was refreshed last, through the same callbacks. The engine keeps
-  the internal graph reported and switches to the JACK graph only briefly
-  (auto-connect, device lists), putting a marker into the callback queue
-  before each refresh so every callback is filed under the right graph.
+* **Buses.** The engine adds Carla's internal `audiogain_s` as an output bus
+  and two buses per track: one at its end, which carries the track volume
+  (the gain parameter), mute (the bus is disconnected from the output) and
+  the track's level, and one that only meters the inputs the track takes.
+  The output bus feeds the first two hardware outputs.
+* **Two graphs.** Carla reports either its internal graph or the JACK graph
+  through the same callbacks. The engine puts a marker into the callback
+  queue before a refresh, so every callback is filed under the right graph;
+  under JACK it switches to the JACK graph once, at start. Plugin clients
+  are matched to plugins by name: the plugin ids in JACK's metadata go stale
+  when a plugin before them is removed.
 * **Bypass.** Plugins that can mix dry and wet are set fully dry, so audio
   passes straight through. Plugins that cannot (synths, mono→stereo) are
   deactivated and routed around.
@@ -72,10 +92,11 @@
   (where yabridge and Wine report). In the AppImage, Carlita gives the
   programs it starts the desktop's own `LD_LIBRARY_PATH` back, so Wine does
   not load the AppImage's bundled libraries.
-* **Audio I/O.** Under JACK or PipeWire, the "input device" and "output
-  device" are the JACK clients the chain is auto-connected to. The default
-  is the physical `system` ports. Hardware MIDI (`system`, PipeWire
-  `Midi-Bridge`, `a2j`) is connected to the chain's MIDI input. Sample rate
+* **Audio I/O.** Under JACK or PipeWire, the "input device" is the JACK
+  client whose outputs are the input channels tracks pick from, and the
+  "output device" the client the output bus feeds. The default is the
+  physical `system` ports. The MIDI devices tracks pick from are the ports
+  of `system`, PipeWire's `Midi-Bridge` and a2jmidid's `a2j`. Sample rate
   and buffer size are requested with `PIPEWIRE_QUANTUM` under PipeWire, or
   passed to the driver under ALSA. A plain JACK server sets its own values.
 
@@ -85,7 +106,7 @@
 | --- | --- |
 | Serial chain, audio + MIDI passed down the chain | Done (Carla patchbay mode, wired by the engine) |
 | Parallel branches | Done: parallel blocks with any number of lanes, empty lanes are dry. Lanes are summed; Carla does not compensate latency between lanes, so lanes with different PDC drift apart by that delay. |
-| Several chains at once (tracks) | Done: each track takes input 1+2, 1, 2 or nothing, and has volume, mute and a meter. All tracks receive hardware MIDI. |
+| Several chains at once (tracks) | Done: each track takes any hardware inputs (up to 64) and any MIDI devices (under JACK/PipeWire; with ALSA every track gets all MIDI), and has volume, mute and meters. |
 | JACK / PipeWire, device, sample rate, buffer size | Done. PipeWire goes through pipewire-jack. |
 | One-tap bypass | Done |
 | Add / remove / reorder while running | Done, covered by the engine test |

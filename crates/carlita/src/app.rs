@@ -5,8 +5,8 @@ use crate::midi_in::MidiListener;
 use crate::scan::{self, ScanMsg};
 use crate::system::{SysCmd, SysEvent, SystemWorker};
 use crate::{
-    BtItem, MainWindow, MappingItem, Options, ParamItem, PluginItem, SlotItem, TextUtil, Theme,
-    TrackItem, WifiItem,
+    BtItem, IoChoice, MainWindow, MappingItem, Options, ParamItem, PluginItem, SlotItem, TextUtil,
+    Theme, TrackIo, TrackItem, WifiItem,
 };
 use carlita_core::midi::{self, BypassChange, MidiAction, MidiMapping, MidiMessage};
 use carlita_core::paths::AppPaths;
@@ -14,11 +14,11 @@ use carlita_core::rig::{self, Location, Row, RowKind, Spot};
 use carlita_core::settings::DisplaySettings;
 use carlita_core::{
     CatalogFilter, ChainSlot, PluginCatalog, PluginCategory, PluginFormat, Preset, PresetStore,
-    Rig, Settings, SlotId, TrackId,
+    Rig, Settings, SlotId, TrackId, TrackMidi,
 };
 use carlita_engine::{
-    editor_window_title, Command, EngineConfig, EngineHandle, Event, Meters, PluginLoad,
-    PluginRuntimeInfo,
+    editor_window_title, Command, EngineConfig, EngineHandle, Event, Meters, MidiDevice,
+    PluginLoad, PluginRuntimeInfo,
 };
 use carlita_x11::{Area, EditorHost, HostCommand, HostEvent};
 use crossbeam_channel::Receiver;
@@ -141,6 +141,12 @@ pub struct App {
     slots_model: Rc<VecModel<SlotItem>>,
     tracks_model: Rc<VecModel<TrackItem>>,
     meters: Meters,
+    /// Port names of the hardware inputs tracks can take, in order.
+    hw_inputs: Vec<String>,
+    /// MIDI devices tracks can take.
+    midi_devices: Vec<MidiDevice>,
+    /// Every track takes every MIDI device (not under JACK).
+    merged_midi: bool,
     restart_requested: bool,
     /// The timer that runs `poll`, paced to the display's refresh rate.
     poll_timer: Rc<slint::Timer>,
@@ -284,6 +290,9 @@ impl App {
             slots_model,
             tracks_model,
             meters: Meters::default(),
+            hw_inputs: Vec::new(),
+            midi_devices: Vec::new(),
+            merged_midi: false,
             restart_requested: false,
             poll_timer: Rc::new(slint::Timer::default()),
             last_window_check: Instant::now(),
@@ -522,9 +531,37 @@ impl App {
         on!(ui, on_delete_track, |a| a.delete_track(a.view_track));
         on!(ui, on_close_track, |a, id: i32| a
             .delete_track(TrackId(id as u64)));
-        on!(ui, on_cycle_input, |a| {
+        let io = ui.global::<TrackIo>();
+        on!(io, on_toggle_input, |a, i: i32| {
             if let Some(t) = a.rig.track_mut(a.view_track) {
-                t.input = t.input.next();
+                t.input.toggle(i.clamp(0, u16::MAX as i32) as u16);
+                a.rig_changed();
+            }
+        });
+        on!(io, on_toggle_midi, |a, i: i32| {
+            let ids = a.midi_ids();
+            let Some(id) = a
+                .midi_choices()
+                .get(i as usize)
+                .map(|(id, _, _)| id.clone())
+            else {
+                return;
+            };
+            if let Some(t) = a.rig.track_mut(a.view_track) {
+                t.midi.toggle(&id, &ids);
+                a.rig_changed();
+            }
+        });
+        on!(io, on_set_midi_all, |a, all: bool| {
+            let ids = a.midi_ids();
+            if let Some(t) = a.rig.track_mut(a.view_track) {
+                // Leaving "all devices" keeps the devices there are now, so
+                // the track sounds the same until one is turned off.
+                t.midi = if all {
+                    TrackMidi::All
+                } else {
+                    TrackMidi::Devices(ids)
+                };
                 a.rig_changed();
             }
         });
@@ -1055,7 +1092,7 @@ impl App {
                         .filter(|_| !self.skip_default_preset);
                     match default {
                         Some(name) if self.presets.exists(&name) => self.load_preset(&name),
-                        _ => {}
+                        _ => self.engine.send(Command::SetLayout(self.rig.layout())),
                     }
                 } else if self.reload_chain_on_start {
                     self.reload_chain_on_start = false;
@@ -1121,6 +1158,16 @@ impl App {
                     .collect();
                 o.set_inputs(strings(ins));
                 o.set_outputs(strings(outs));
+            }
+            Event::Hardware {
+                inputs,
+                midi,
+                merged_midi,
+            } => {
+                self.hw_inputs = inputs;
+                self.midi_devices = midi;
+                self.merged_midi = merged_midi;
+                self.refresh_track_io();
             }
             Event::PluginLoaded { slot, info } => {
                 let has_ui = info.has_custom_ui;
@@ -1230,8 +1277,14 @@ impl App {
 
     fn on_meters(&mut self, m: Meters) {
         let ui = self.ui();
-        ui.set_in_left(m.input[0]);
-        ui.set_in_right(m.input[1]);
+        // The chain panel shows the selected track's inputs.
+        let input = m
+            .track_inputs
+            .iter()
+            .find(|(t, _)| *t == self.view_track)
+            .map_or(m.input, |(_, l)| *l);
+        ui.set_in_left(input[0]);
+        ui.set_in_right(input[1]);
         ui.set_out_left(m.output[0]);
         ui.set_out_right(m.output[1]);
         let load = format!("{:.0}%", m.dsp_load);
@@ -1414,12 +1467,88 @@ impl App {
         let ui = self.ui();
         if let Some(t) = self.rig.track(self.view_track) {
             ui.set_track_name(ss(&t.name));
-            ui.set_track_input(ss(t.input.label()));
             ui.set_track_muted(t.muted);
             ui.set_track_volume(t.volume);
             ui.set_track_volume_text(ss(volume_text(t.volume)));
         }
         ui.set_preset_name(ss(self.settings.current_preset.clone().unwrap_or_default()));
+        self.refresh_track_io();
+    }
+
+    /// Ids of the MIDI devices there are now.
+    fn midi_ids(&self) -> Vec<String> {
+        self.midi_devices.iter().map(|d| d.id.clone()).collect()
+    }
+
+    /// The MIDI devices to list for the selected track as (id, name,
+    /// detail): the devices there are, then devices the track takes that
+    /// are not plugged in.
+    fn midi_choices(&self) -> Vec<(String, String, String)> {
+        let mut v: Vec<(String, String, String)> = self
+            .midi_devices
+            .iter()
+            .map(|d| (d.id.clone(), d.name.clone(), d.id.clone()))
+            .collect();
+        if let Some(TrackMidi::Devices(ids)) = self.rig.track(self.view_track).map(|t| &t.midi) {
+            for id in ids {
+                if !v.iter().any(|(x, _, _)| x == id) {
+                    v.push((id.clone(), midi_name(id), "Not plugged in".into()));
+                }
+            }
+        }
+        v
+    }
+
+    /// Shows what feeds the selected track.
+    fn refresh_track_io(&self) {
+        let Some(t) = self.rig.track(self.view_track) else {
+            return;
+        };
+        let ui = self.ui();
+        let io = ui.global::<TrackIo>();
+        // Channels the track takes that the interface does not have (a
+        // preset made on a bigger one) are listed too.
+        let count = self
+            .hw_inputs
+            .len()
+            .max(t.input.channels().last().map_or(0, |c| *c as usize + 1))
+            .min(rig::MAX_INPUTS);
+        let inputs: Vec<IoChoice> = (0..count)
+            .map(|k| IoChoice {
+                name: ss((k + 1).to_string()),
+                detail: ss(self
+                    .hw_inputs
+                    .get(k)
+                    .map_or("Not available on this audio device", |n| n.as_str())),
+                on: t.input.contains(k as u16),
+            })
+            .collect();
+        let midi: Vec<IoChoice> = self
+            .midi_choices()
+            .into_iter()
+            .map(|(id, name, detail)| IoChoice {
+                name: ss(name),
+                detail: ss(detail),
+                on: t.midi.takes(&id),
+            })
+            .collect();
+        let midi_label = match &t.midi {
+            _ if self.merged_midi => "All MIDI".to_string(),
+            TrackMidi::All => "All MIDI".to_string(),
+            TrackMidi::Devices(d) if d.is_empty() => "No MIDI".to_string(),
+            TrackMidi::Devices(d) if d.len() == 1 => self
+                .midi_devices
+                .iter()
+                .find(|x| x.id == d[0])
+                .map_or_else(|| midi_name(&d[0]), |x| x.name.clone()),
+            TrackMidi::Devices(d) => format!("{} MIDI", d.len()),
+        };
+        io.set_input_label(ss(t.input.label()));
+        io.set_midi_label(ss(midi_label));
+        io.set_inputs(ModelRc::new(VecModel::from(inputs)));
+        io.set_midi(ModelRc::new(VecModel::from(midi)));
+        io.set_midi_all(t.midi == TrackMidi::All);
+        io.set_merged_midi(self.merged_midi);
     }
 
     fn track_level(&self, id: TrackId) -> f32 {
@@ -2567,6 +2696,17 @@ fn edit_text(
     let insert = if backspace { "" } else { insert };
     let out = format!("{}{insert}{}", &text[..start], &text[end..]);
     (out, start + insert.len())
+}
+
+/// A short name for a MIDI device that is not plugged in, from its port
+/// name ("client:port").
+fn midi_name(id: &str) -> String {
+    let port = id.split_once(':').map_or(id, |(_, p)| p);
+    port.rsplit([')', ':'])
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .unwrap_or(port)
+        .to_string()
 }
 
 /// A MIDI port's name as shown in the options: without the ALSA

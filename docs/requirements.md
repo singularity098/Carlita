@@ -19,7 +19,7 @@ The engine runs several tracks at once, each a chain that may contain parallel b
 
 - Run plugins in a serial or parallel chain: input → plugin 1 → plugin 2 → … → output
 - Parallel blocks: split the signal into lanes (each a serial chain, an empty lane is the dry signal) and mix them back together
-- Several tracks (chains) play at the same time, each fed by input 1+2, input 1, input 2 or no input, with its own volume and mute
+- Several tracks (chains) play at the same time, each fed by any of the hardware inputs (as many as the interface has) or none, and by its own choice of MIDI devices, with its own volume and mute
 - Supports both audio and MIDI input and output.  One plugin may send MIDI or audio down the chain to the next plugin which receives it
 - Audio through JACK / PipeWire (native pipewire support); choose input and output device, sample rate and buffer size
 - Bypass any plugin with one tap without removing it
@@ -46,7 +46,7 @@ Swiping in from the left edge opens the chain, where plugins are added, removed,
 
 - Opens with a swipe from a host-owned strip on the left screen edge (works even over a plugin editor)
 - Also opens from a visible tab or button, for windowed mode and mouse use, but these are only visible when the mouse is hovering to the side so that VST can be displayed in 100% fullscreen normally
-- The selected track's name (tap to rename), input, mute, volume and delete
+- The selected track's name (tap to rename), inputs and MIDI devices, mute, volume and delete
 - Lists the chain in order, parallel lanes indented; tap a plugin to show its editor in the main area
 - Drag a plugin to reorder it, including into and out of parallel lanes; split a plugin into a parallel block and add or remove lanes
 - Swipe a plugin sideways or long-press it to remove it, with a short undo

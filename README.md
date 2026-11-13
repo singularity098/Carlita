@@ -16,6 +16,8 @@ touchscreen.
   Carla internals, and Windows plugins bridged with yabridge). Audio and MIDI
   flow from each plugin into the next, and parallel blocks split the signal
   into lanes (one can stay dry) and mix them back together.
+* Each track picks its own hardware inputs (any of an interface's
+  channels: one for mono, two for a stereo pair) and its own MIDI devices.
 * Add, remove, reorder, split and bypass plugins while audio keeps running.
 * Tracks are tabs in the top bar, which Carlita draws itself in place of the
   window manager's title bar. In fullscreen, swipe down from the **top** edge
