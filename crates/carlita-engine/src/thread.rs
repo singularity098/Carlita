@@ -85,6 +85,9 @@ enum Owner {
     TrackBus(TrackId),
     /// Meters the inputs a track takes; its outputs go nowhere.
     TrackInputBus(TrackId),
+    /// Meters two hardware inputs (2k and 2k+1) on its own; its outputs go
+    /// nowhere.
+    InputProbe(u16),
     Plugin(SlotId),
 }
 
@@ -244,6 +247,8 @@ struct Engine {
     multi: bool,
     /// The hardware inputs and MIDI devices last reported to the UI.
     hardware: Option<(Vec<String>, Vec<MidiDevice>)>,
+    /// How many hardware inputs to meter one by one (0 = none).
+    probe_inputs: u16,
     config: EngineConfig,
     slots: Vec<Slot>,
     layout: RigLayout,
@@ -276,6 +281,7 @@ impl Engine {
             running: false,
             multi: false,
             hardware: None,
+            probe_inputs: 0,
             config: EngineConfig::default(),
             slots: Vec::new(),
             layout: RigLayout::default(),
@@ -426,6 +432,10 @@ impl Engine {
                     self.host
                         .send_note(i as u32, channel & 0x0F, note & 0x7F, velocity & 0x7F);
                 }
+            }
+            Command::ProbeInputs { count } => {
+                self.probe_inputs = count.min(rig::MAX_INPUTS as u16);
+                self.sync_buses();
             }
             Command::Reconnect {
                 input_client,
@@ -700,6 +710,7 @@ impl Engine {
             Owner::OutputBus => format!("{client}.out"),
             Owner::TrackBus(t) => format!("{client}.track-{}", t.0),
             Owner::TrackInputBus(t) => format!("{client}.in-{}", t.0),
+            Owner::InputProbe(k) => format!("{client}.probe-{}", k + 1),
             Owner::Plugin(s) => clean_name(&format!("{client}.{} {load_name}", s.0), 48),
         }
     }
@@ -795,7 +806,8 @@ impl Engine {
         self.dirty = true;
     }
 
-    /// Adds and removes track buses to match the layout and sets volumes.
+    /// Adds and removes track buses to match the layout and sets volumes,
+    /// and the probes that meter the hardware inputs.
     fn sync_buses(&mut self) {
         if !self.running {
             return;
@@ -806,8 +818,10 @@ impl Engine {
             .iter()
             .map(|t| (t.id, t.volume))
             .collect();
+        let probes = self.probe_inputs.div_ceil(2);
         while let Some(i) = self.slots.iter().position(|s| match s.owner {
             Owner::TrackBus(t) | Owner::TrackInputBus(t) => !tracks.iter().any(|(id, _)| *id == t),
+            Owner::InputProbe(k) => k >= probes,
             _ => false,
         }) {
             self.host.remove_plugin(i as u32);
@@ -828,6 +842,11 @@ impl Engine {
             {
                 self.host
                     .set_parameter(i as u32, GAIN_PARAM, volume.clamp(0.0, 4.0));
+            }
+        }
+        for k in 0..probes {
+            if self.slot_of(Owner::InputProbe(k)).is_none() {
+                self.add_bus(Owner::InputProbe(k));
             }
         }
     }
@@ -1416,6 +1435,18 @@ impl Engine {
                 audio(&mut out, &from, &self.endpoints(g, true, true));
             }
         }
+        // Hardware inputs 2k and 2k+1 -> the left and right of probe k.
+        let hw = self.hardware_inputs();
+        for k in 0..self.probe_inputs.div_ceil(2) {
+            if let Some(g) = self.group(Owner::InputProbe(k)) {
+                let ins = self.endpoints(g, true, true);
+                for (side, (g2, p2)) in ins.iter().take(2).enumerate() {
+                    if let Some((g1, p1)) = hw.get(2 * k as usize + side) {
+                        out.insert((*g1, *p1, *g2, *p2));
+                    }
+                }
+            }
+        }
         for link in rig::route(&self.layout, |id| self.node_io(id)) {
             match link.kind {
                 LinkKind::Audio => audio(
@@ -1579,6 +1610,9 @@ impl Engine {
             .iter()
             .map(|t| (t.id, peak(Owner::TrackInputBus(t.id), true)))
             .collect();
+        let hardware_inputs: Vec<f32> = (0..self.probe_inputs)
+            .map(|c| peak(Owner::InputProbe(c / 2), true)[(c % 2) as usize])
+            .collect();
         Meters {
             input: track_inputs
                 .iter()
@@ -1591,6 +1625,7 @@ impl Engine {
                 .map(|t| (t.id, peak(Owner::TrackBus(t.id), false)))
                 .collect(),
             track_inputs,
+            hardware_inputs,
             dsp_load,
             xruns,
             latencies,

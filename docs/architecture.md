@@ -35,6 +35,12 @@
   plugged in later). Devices are stored by their port name ("client:port").
   Old presets' "stereo", "left", "right" and "none" read as inputs 1+2, 1,
   2 and none.
+  The options set how many inputs the interface really has (*Input
+  channels*, "All" by default), so tracks are not offered every port the
+  audio system reports. While a track's input page is open, the engine
+  meters each offered input on its own (`Command::ProbeInputs`, probe buses
+  `Carlita.probe-<n>` with two inputs each) and the page lights the inputs
+  that hear something, so playing shows where an instrument comes in.
 * **Wiring.** Under JACK (and PipeWire), Carla runs in *multiple clients*
   mode: every plugin and bus is a JACK client of its own, named
   `Carlita.<slot> <plugin>` (`Carlita.track-<id>`, `Carlita.in-<id>`,

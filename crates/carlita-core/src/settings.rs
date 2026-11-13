@@ -21,6 +21,9 @@ pub struct AudioSettings {
     pub input_client: String,
     /// JACK client the chain plays into ("" = the physical "system" ports).
     pub output_client: String,
+    /// How many hardware inputs the interface really has, so tracks are
+    /// not offered ports that are not there (0 = every port reported).
+    pub input_count: u32,
 }
 
 impl Default for AudioSettings {
@@ -34,6 +37,7 @@ impl Default for AudioSettings {
             auto_connect: true,
             input_client: String::new(),
             output_client: String::new(),
+            input_count: 0,
         }
     }
 }

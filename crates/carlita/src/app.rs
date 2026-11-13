@@ -147,6 +147,15 @@ pub struct App {
     midi_devices: Vec<MidiDevice>,
     /// Every track takes every MIDI device (not under JACK).
     merged_midi: bool,
+    /// The track's input page is open, so the hardware inputs are metered
+    /// one by one to show which have a signal.
+    probing: bool,
+    /// The probe count last sent to the engine.
+    probe_sent: Option<u16>,
+    /// Until when each hardware input shows a signal.
+    signal_until: Vec<Instant>,
+    /// Whether each hardware input shows a signal.
+    signal_model: Rc<VecModel<bool>>,
     restart_requested: bool,
     /// The timer that runs `poll`, paced to the display's refresh rate.
     poll_timer: Rc<slint::Timer>,
@@ -293,6 +302,10 @@ impl App {
             hw_inputs: Vec::new(),
             midi_devices: Vec::new(),
             merged_midi: false,
+            probing: false,
+            probe_sent: None,
+            signal_until: Vec::new(),
+            signal_model: Rc::new(VecModel::default()),
             restart_requested: false,
             poll_timer: Rc::new(slint::Timer::default()),
             last_window_check: Instant::now(),
@@ -538,6 +551,10 @@ impl App {
                 a.rig_changed();
             }
         });
+        on!(io, on_probe, |a, on: bool| {
+            a.probing = on;
+            a.update_probe();
+        });
         on!(io, on_toggle_midi, |a, i: i32| {
             let ids = a.midi_ids();
             let Some(id) = a
@@ -682,6 +699,13 @@ impl App {
                 v.to_string()
             };
             a.reconnect();
+        });
+        on!(o, on_set_input_count, |a, v: SharedString| {
+            a.settings.audio.input_count = v.parse().unwrap_or(0);
+            a.save_settings();
+            a.refresh_audio_options();
+            a.refresh_track_io();
+            a.update_probe();
         });
         on!(o, on_set_sample_rate, |a, v: SharedString| {
             if let Ok(sr) = v.parse() {
@@ -1101,6 +1125,8 @@ impl App {
                     self.engine.send(Command::SetLayout(self.rig.layout()));
                 }
                 self.engine.send(Command::QueryDrivers);
+                self.probe_sent = None;
+                self.update_probe();
             }
             Event::StartFailed(err) => {
                 self.engine_running = false;
@@ -1168,6 +1194,8 @@ impl App {
                 self.midi_devices = midi;
                 self.merged_midi = merged_midi;
                 self.refresh_track_io();
+                self.refresh_audio_options();
+                self.update_probe();
             }
             Event::PluginLoaded { slot, info } => {
                 let has_ui = info.has_custom_ui;
@@ -1287,6 +1315,7 @@ impl App {
         ui.set_in_right(input[1]);
         ui.set_out_left(m.output[0]);
         ui.set_out_right(m.output[1]);
+        self.show_signals(&m.hardware_inputs);
         let load = format!("{:.0}%", m.dsp_load);
         let latency = format!("{:.1} ms", m.total_latency_ms());
         ui.set_dsp_load(ss(&load));
@@ -1475,6 +1504,60 @@ impl App {
         self.refresh_track_io();
     }
 
+    /// How many hardware inputs tracks are offered: the ports there are,
+    /// or fewer when the options say the interface has fewer.
+    fn input_count(&self) -> usize {
+        match self.settings.audio.input_count as usize {
+            0 => self.hw_inputs.len(),
+            n => n.min(self.hw_inputs.len()),
+        }
+        .min(rig::MAX_INPUTS)
+    }
+
+    /// Meters the offered hardware inputs while the input page is open.
+    fn update_probe(&mut self) {
+        let count = if self.probing && self.engine_running {
+            self.input_count() as u16
+        } else {
+            0
+        };
+        if self.probe_sent != Some(count) {
+            self.probe_sent = Some(count);
+            self.engine.send(Command::ProbeInputs { count });
+        }
+        if count == 0 {
+            self.show_signals(&[]);
+        }
+    }
+
+    /// Lights the hardware inputs that hear something, and keeps each lit
+    /// a moment after it goes quiet, so it does not flicker.
+    fn show_signals(&mut self, levels: &[f32]) {
+        /// About -42 dBFS: above the hiss of an idle input, below the
+        /// quietest playing.
+        const THRESHOLD: f32 = 0.008;
+        const HOLD: Duration = Duration::from_millis(300);
+        let now = Instant::now();
+        self.signal_until.resize(levels.len(), now);
+        for (until, level) in self.signal_until.iter_mut().zip(levels) {
+            if *level >= THRESHOLD {
+                *until = now + HOLD;
+            }
+        }
+        let model = &self.signal_model;
+        while model.row_count() > levels.len() {
+            model.remove(model.row_count() - 1);
+        }
+        for (k, until) in self.signal_until.iter().enumerate() {
+            let on = *until > now;
+            match model.row_data(k) {
+                Some(v) if v == on => {}
+                Some(_) => model.set_row_data(k, on),
+                None => model.push(on),
+            }
+        }
+    }
+
     /// Ids of the MIDI devices there are now.
     fn midi_ids(&self) -> Vec<String> {
         self.midi_devices.iter().map(|d| d.id.clone()).collect()
@@ -1509,8 +1592,7 @@ impl App {
         // Channels the track takes that the interface does not have (a
         // preset made on a bigger one) are listed too.
         let count = self
-            .hw_inputs
-            .len()
+            .input_count()
             .max(t.input.channels().last().map_or(0, |c| *c as usize + 1))
             .min(rig::MAX_INPUTS);
         let inputs: Vec<IoChoice> = (0..count)
@@ -1549,6 +1631,7 @@ impl App {
         io.set_midi(ModelRc::new(VecModel::from(midi)));
         io.set_midi_all(t.midi == TrackMidi::All);
         io.set_merged_midi(self.merged_midi);
+        io.set_signal(ModelRc::from(self.signal_model.clone()));
     }
 
     fn track_level(&self, id: TrackId) -> f32 {
@@ -2512,6 +2595,20 @@ impl App {
         o.set_sample_rate(ss(a.sample_rate.to_string()));
         o.set_buffer_size(ss(a.buffer_size.to_string()));
         o.set_isolate_plugins(a.isolate_plugins);
+        // "All", then every count up to the ports there are (and the one
+        // picked, when the interface is not there now).
+        let most = self
+            .hw_inputs
+            .len()
+            .max(a.input_count as usize)
+            .min(rig::MAX_INPUTS);
+        let mut counts = vec!["All".to_string()];
+        counts.extend((1..=most).map(|n| n.to_string()));
+        o.set_input_counts(strings(counts));
+        o.set_input_count(ss(match a.input_count {
+            0 => "All".to_string(),
+            n => n.to_string(),
+        }));
     }
 
     fn set_fullscreen(&mut self, fs: bool) {

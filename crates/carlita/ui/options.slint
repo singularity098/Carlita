@@ -19,6 +19,9 @@ export global Options {
     in property <string> input;
     in property <[string]> outputs;
     in property <string> output;
+    // How many hardware inputs tracks are offered ("All" or a number).
+    in property <[string]> input-counts: ["All"];
+    in property <string> input-count: "All";
     in property <[string]> sample-rates: ["44100", "48000", "88200", "96000"];
     in property <string> sample-rate;
     in property <[string]> buffer-sizes: ["32", "64", "128", "256", "512", "1024"];
@@ -28,6 +31,7 @@ export global Options {
     callback set-device(string);
     callback set-input(string);
     callback set-output(string);
+    callback set-input-count(string);
     callback set-sample-rate(string);
     callback set-buffer-size(string);
     callback set-isolate(bool);
@@ -230,6 +234,13 @@ component AudioPage inherits VerticalLayout {
         selected: Options.output;
         tip: "Play the chain into";
         picked(v) => { Options.set-output(v); }
+    }
+    SectionTitle { text: "INPUT CHANNELS"; }
+    ChipGrid {
+        options: Options.input-counts;
+        selected: Options.input-count;
+        tip: "How many inputs your audio interface has. Tracks only offer these, not every port the audio system reports.";
+        picked(v) => { Options.set-input-count(v); }
     }
     SectionTitle { text: "SAMPLE RATE"; }
     ChipGrid {
