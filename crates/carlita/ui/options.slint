@@ -102,9 +102,6 @@ export global Options {
 
     // ---- system (the buttons at the top of the panel)
     in property <string> version;
-    in property <string> plugin-count;
-    callback rescan-plugins;
-    callback restart-app;
     callback reboot;
     callback shutdown;
     callback quit;
@@ -636,22 +633,6 @@ export component OptionsPanel inherits Rectangle {
                 HorizontalLayout {
                     alignment: end;
                     spacing: 6px;
-                    VerticalLayout {
-                        alignment: center;
-                        IconButton {
-                            icon: Icons.plug-line;
-                            tip: "Rescan plugins: look for newly installed plugins (" + Options.plugin-count + ")";
-                            clicked => { Options.rescan-plugins(); }
-                        }
-                    }
-                    VerticalLayout {
-                        alignment: center;
-                        IconButton {
-                            icon: Icons.restart-line;
-                            tip: "Restart Carlita (asks first)";
-                            clicked => { Options.restart-app(); }
-                        }
-                    }
                     VerticalLayout {
                         alignment: center;
                         IconButton {

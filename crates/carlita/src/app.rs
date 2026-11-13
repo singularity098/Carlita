@@ -71,7 +71,6 @@ enum Confirm {
     DeleteTrack(TrackId),
     Reboot,
     Shutdown,
-    Restart,
     Quit,
 }
 
@@ -156,7 +155,6 @@ pub struct App {
     signal_until: Vec<Instant>,
     /// Whether each hardware input shows a signal.
     signal_model: Rc<VecModel<bool>>,
-    restart_requested: bool,
     /// The timer that runs `poll`, paced to the display's refresh rate.
     poll_timer: Rc<slint::Timer>,
     /// When the window's size and place were last noted.
@@ -306,7 +304,6 @@ impl App {
             probe_sent: None,
             signal_until: Vec::new(),
             signal_model: Rc::new(VecModel::default()),
-            restart_requested: false,
             poll_timer: Rc::new(slint::Timer::default()),
             last_window_check: Instant::now(),
         }));
@@ -856,11 +853,6 @@ impl App {
         });
 
         // ---- options: system
-        on!(o, on_rescan_plugins, |a| a.start_scan());
-        on!(o, on_restart_app, |a| a.open_confirm(
-            Confirm::Restart,
-            "Restart Carlita? Audio stops for a few seconds.".into()
-        ));
         on!(o, on_quit, |a| a
             .open_confirm(Confirm::Quit, "Quit Carlita?".into()));
         on!(o, on_reboot, |a| a.open_confirm(
@@ -2308,10 +2300,6 @@ impl App {
             }
             Confirm::Reboot => self.system.send(SysCmd::Reboot),
             Confirm::Shutdown => self.system.send(SysCmd::PowerOff),
-            Confirm::Restart => {
-                self.restart_requested = true;
-                self.quit();
-            }
             Confirm::Quit => self.quit(),
         }
     }
@@ -2339,10 +2327,6 @@ impl App {
         ui.set_browser_format(ss(self.filter.format.map(|f| f.label()).unwrap_or("")));
         ui.set_browser_category(ss(self.filter.category.map(|c| c.label()).unwrap_or("")));
         ui.set_browser_favorites(self.filter.favorites_only);
-        ui.global::<Options>().set_plugin_count(ss(format!(
-            "{} plugins in the library",
-            self.catalog.plugins.len()
-        )));
     }
 
     fn start_scan(&mut self) {
@@ -2742,21 +2726,6 @@ impl App {
         self.save_settings();
         self.release_editors();
         self.engine.send(Command::Stop);
-        if self.restart_requested {
-            let exe = std::env::var_os("APPIMAGE")
-                .map(std::path::PathBuf::from)
-                .or_else(|| std::env::current_exe().ok());
-            if let Some(exe) = exe {
-                // Give the engine a moment to release the audio device.
-                std::thread::sleep(Duration::from_millis(300));
-                if let Err(e) = std::process::Command::new(exe)
-                    .args(std::env::args().skip(1))
-                    .spawn()
-                {
-                    log::error!("could not restart: {e}");
-                }
-            }
-        }
     }
 }
 
