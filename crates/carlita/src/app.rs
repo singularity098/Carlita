@@ -364,7 +364,7 @@ impl App {
             }
         }
         ui.window().set_fullscreen(d.fullscreen);
-        ui.set_strip_width(d.edge_strip_width as f32);
+        ui.set_strip_width(d.edge_swipe_width as f32);
         apply_theme(ui, &d.theme);
         ui.set_browser_formats(strings(PluginFormat::ALL.iter().map(|f| f.label())));
         ui.set_browser_categories(strings(PluginCategory::ALL.iter().map(|c| c.label())));
@@ -570,14 +570,13 @@ impl App {
             }
         });
         on!(io, on_set_midi_all, |a, all: bool| {
-            let ids = a.midi_ids();
             if let Some(t) = a.rig.track_mut(a.view_track) {
-                // Leaving "all devices" keeps the devices there are now, so
-                // the track sounds the same until one is turned off.
+                // Turning "all devices" off turns every device off, as
+                // turning it on turns them all on.
                 t.midi = if all {
                     TrackMidi::All
                 } else {
-                    TrackMidi::Devices(ids)
+                    TrackMidi::Devices(Vec::new())
                 };
                 a.rig_changed();
             }

@@ -221,7 +221,7 @@ export component MainWindow inherits Window {
     default-font-weight: Theme.light;
 
     // ---------------------------------------------------------- properties
-    in property <length> strip-width: 18px;
+    in property <length> strip-width: 6px;
 
     // Sidebars: 0 = closed, 1 = open.
     in-out property <float> left-pos: 0;
@@ -447,6 +447,9 @@ export component MainWindow inherits Window {
                 if root.top-pos > 0 { root.close-top(); return accept; }
                 if root.left-pos > 0 { root.close-left(); return accept; }
                 if root.right-pos > 0 { root.close-right(); return accept; }
+                // Nothing open: Escape brings in the options.
+                root.open-right();
+                return accept;
             }
             reject
         }

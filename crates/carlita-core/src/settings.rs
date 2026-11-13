@@ -59,7 +59,10 @@ pub struct DisplaySettings {
     /// Brightness 0..=100, if the hardware supports it.
     pub brightness: Option<u32>,
     /// Width of the invisible edge strips that open the sidebars, in pixels.
-    pub edge_strip_width: u32,
+    /// Kept narrow, so buttons near the screen's edges stay reachable by
+    /// touch. (Renamed from `edge_strip_width`, whose old default of 18 was
+    /// too wide, so saved settings pick up the new default.)
+    pub edge_swipe_width: u32,
     /// The UI theme, by name (`Theme.names` in `ui/theme.slint`; unknown
     /// names fall back to the first, Iris). Never rename a theme.
     pub theme: String,
@@ -88,7 +91,7 @@ impl Default for DisplaySettings {
             window_y: None,
             maximized: false,
             brightness: None,
-            edge_strip_width: 18,
+            edge_swipe_width: 6,
             theme: "Iris".into(),
             editor_zoom: 100,
         }

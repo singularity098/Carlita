@@ -1,6 +1,6 @@
 // Large, touch-friendly building blocks.
 import { Theme } from "theme.slint";
-import { Icon } from "icons.slint";
+import { Icon, Icons } from "icons.slint";
 import { Tip, Tips } from "tooltip.slint";
 
 export { Tip, Tips }
@@ -389,47 +389,99 @@ export component IconButton inherits Rectangle {
     }
 }
 
-// A list to pick one option from, one full-width row each: for names that
-// are too long for chips (devices, MIDI ports).
-export component ChoiceList inherits VerticalLayout {
+// One choice out of several: a button showing the current one, which opens
+// a list to pick from (so long lists do not fill the screen).
+export component Dropdown inherits Rectangle {
     in property <[string]> options;
     in property <string> selected;
     in property <string> empty-text: "None available";
     // Show MIDI port names shortened (TextUtil.port-label).
     in property <bool> ports;
-    // Hover help on every row, followed by the row's full name.
+    // Hover help on the button and on every row, followed by the row's name.
     in property <string> tip;
     callback picked(string);
-    spacing: 6px;
-    if root.options.length == 0: Text {
-        text: root.empty-text;
-        color: Theme.text-faint;
+
+    property <length> item-height: 48px;
+    property <bool> enabled: root.options.length > 0;
+
+    height: 48px;
+    border-radius: Theme.radius;
+    background: touch.pressed ? Theme.pressed : Theme.surface-2;
+    border-width: 1px;
+    border-color: touch.has-hover && root.enabled ? Theme.border-hover : Theme.border-strong;
+
+    Text {
+        x: Theme.pad;
+        width: parent.width - 2 * Theme.pad - 28px;
+        text: !root.enabled ? root.empty-text
+            : root.selected == "" ? "Choose…"
+            : root.ports ? TextUtil.port-label(root.selected) : root.selected;
         font-size: Theme.font-small;
         font-weight: Theme.regular;
+        color: root.enabled && root.selected != "" ? Theme.text : Theme.text-faint;
+        vertical-alignment: center;
+        overflow: elide;
     }
-    for o in root.options: Rectangle {
-        height: 48px;
-        border-radius: Theme.radius;
-        background: o == root.selected ? Theme.paint : touch.pressed ? Theme.pressed : Theme.surface-2;
-        border-width: 1px;
-        border-color: o == root.selected ? transparent : touch.has-hover ? Theme.border-hover : Theme.border-strong;
-        Text {
-            x: Theme.pad;
-            width: parent.width - 2 * Theme.pad;
-            text: root.ports ? TextUtil.port-label(o) : o;
-            font-size: Theme.font-small;
-            font-weight: Theme.regular;
-            color: o == root.selected ? Theme.on-paint : Theme.text;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-        touch := TouchArea {
-            clicked => { root.picked(o); }
-        }
-        Tip {
-            text: root.tip == "" ? "" : root.tip + ": " + o;
-            hover: touch.has-hover;
-            pressed: touch.pressed;
+    if root.enabled: Icon {
+        x: parent.width - Theme.pad - self.width;
+        y: (parent.height - self.height) / 2;
+        width: 22px;
+        height: 22px;
+        line: Icons.chevron-down;
+        tint: Theme.text-dim;
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { popup.show(); }
+    }
+    Tip {
+        text: root.selected == "" ? root.tip : root.tip + ": " + root.selected;
+        hover: touch.has-hover;
+        pressed: touch.pressed;
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        width: root.width;
+        height: min(root.options.length * (root.item-height + 4px) + 8px, 340px);
+        close-policy: close-on-click-outside;
+        Rectangle {
+            border-radius: Theme.radius;
+            background: Theme.popup.with-alpha(1);
+            border-width: 1px;
+            border-color: Theme.border-hover;
+            clip: true;
+            Flickable {
+                x: 4px;
+                y: 4px;
+                width: parent.width - 8px;
+                height: parent.height - 8px;
+                content-height: root.options.length * (root.item-height + 4px) - 4px;
+                interactive: self.content-height > self.height;
+                for o[i] in root.options: Rectangle {
+                    y: i * (root.item-height + 4px);
+                    height: root.item-height;
+                    border-radius: Theme.radius - 2px;
+                    background: o == root.selected ? Theme.paint : row-touch.pressed ? Theme.pressed : row-touch.has-hover ? Theme.surface-2 : transparent;
+                    Text {
+                        x: Theme.pad;
+                        width: parent.width - 2 * Theme.pad;
+                        text: root.ports ? TextUtil.port-label(o) : o;
+                        font-size: Theme.font-small;
+                        font-weight: Theme.regular;
+                        color: o == root.selected ? Theme.on-paint : Theme.text;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    row-touch := TouchArea {
+                        clicked => {
+                            popup.close();
+                            root.picked(o);
+                        }
+                    }
+                }
+            }
         }
     }
 }
