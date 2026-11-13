@@ -22,6 +22,10 @@ slint = { version = "1.14", default-features = false, features = [
     "std",
     "compat-1-2",
     "backend-winit-x11",
+    # Skia antialiases curves and thin lines (round buttons, icons) far
+    # better than femtovg, so it is the default; femtovg and software stay
+    # available through SLINT_BACKEND (winit-femtovg, winit-software).
+    "renderer-skia",
     "renderer-femtovg",
     "renderer-software",
     "accessibility",

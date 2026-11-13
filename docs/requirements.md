@@ -7,7 +7,7 @@ A touch-first plugin chain host for a pedalboard: Rust app, Carla engine, Slint 
 - **Purpose:** load and run a serial or parallel chain of audio plugins live; no recording, no timeline
 - **Hardware:** small x86 Linux mini PC, ~12" touchscreen (as low as 1280×800), audio interface
 - **Engine:** Carla backend (`libcarla_standalone2`) via its C API, with Rust bindings from `bindgen`
-- **UI:** Slint, dark theme, GPU renderer
+- **UI:** Slint, dark theme, GPU renderer (Skia)
 - **Plugins:** native Linux VST2, VST3, CLAP, LV2, and Windows plugins through yabridge (yabridge managed by the user separately)
 - **Display server:** X11 (or XWayland), because plugin editors are X11 windows
 - **License:** GPL-2.0-or-later compatible, to match Carla

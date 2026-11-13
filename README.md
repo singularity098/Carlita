@@ -98,6 +98,7 @@ Both tests skip themselves when JACK or X is not available, unless
 | `--no-preset` | Do not load the default preset at startup |
 | `CARLITA_HOME=dir` | Keep settings, presets and the plugin cache below `dir` |
 | `SLINT_BACKEND=winit-software` | Software rendering on machines without OpenGL |
+| `SLINT_BACKEND=winit-femtovg` | The lighter femtovg GPU renderer instead of the default Skia (rougher edges on curves) |
 
 Files are stored in `~/.config/carlita/settings.json`,
 `~/.local/share/carlita/presets/*.json` and `~/.cache/carlita/plugins.json`.
