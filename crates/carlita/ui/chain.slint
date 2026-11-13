@@ -542,6 +542,16 @@ export component ChainPanel inherits Rectangle {
     property <length> drag-offset: 0;
     property <length> content-h: root.slots.length == 0 ? 0 : root.slots[root.slots.length - 1].y + root.slots[root.slots.length - 1].h;
 
+    // Under everything: keeps taps on the panel's empty space from reaching
+    // the scrim (which would close the panel). A swipe left still closes it.
+    TouchArea {
+        moved => {
+            if self.mouse-x - self.pressed-x < -60px {
+                root.close();
+            }
+        }
+    }
+
     VerticalLayout {
         padding: Theme.pad;
         spacing: 10px;

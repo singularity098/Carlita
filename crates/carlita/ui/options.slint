@@ -529,6 +529,16 @@ export component OptionsPanel inherits Rectangle {
         { solid: Icons.display-solid, line: Icons.display-line, label: "Display" },
     ];
 
+    // Under everything: keeps taps on the panel's empty space from reaching
+    // the scrim (which would close the panel). A swipe right still closes it.
+    TouchArea {
+        moved => {
+            if self.mouse-x - self.pressed-x > 60px {
+                root.close();
+            }
+        }
+    }
+
     HorizontalLayout {
         // Section rail.
         Rectangle {
