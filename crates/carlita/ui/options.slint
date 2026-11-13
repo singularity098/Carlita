@@ -1,6 +1,6 @@
 // Right sidebar: options. Every toggle applies immediately.
 import { Theme } from "theme.slint";
-import { BigButton, Toggle, Chip, SectionTitle, SettingRow, BigSlider, CollapseButton, ChoiceList, IconButton, Tip } from "widgets.slint";
+import { BigButton, Toggle, Chip, SectionTitle, SettingRow, BigSlider, CollapseButton, Dropdown, IconButton, Tip } from "widgets.slint";
 import { WifiItem, BtItem, MappingItem } from "types.slint";
 import { Icon, Icons } from "icons.slint";
 
@@ -157,32 +157,6 @@ component ListRow inherits Rectangle {
     }
 }
 
-component ChipGrid inherits Rectangle {
-    in property <[string]> options;
-    in property <string> selected;
-    in property <string> empty-text: "None available";
-    in property <string> tip;
-    callback picked(string);
-    property <int> per-row: max(1, floor(self.width / 120px));
-    height: root.options.length == 0 ? 30px : ceil(root.options.length / root.per-row) * 50px;
-    if root.options.length == 0: Text {
-        text: root.empty-text;
-        color: Theme.text-faint;
-        font-size: Theme.font-small;
-        font-weight: Theme.regular;
-        vertical-alignment: center;
-    }
-    for o[i] in root.options: Chip {
-        x: mod(i, root.per-row) * (root.width / root.per-row);
-        y: floor(i / root.per-row) * 50px;
-        width: root.width / root.per-row - 6px;
-        text: o;
-        selected: o == root.selected;
-        tip: root.tip;
-        clicked => { root.picked(o); }
-    }
-}
-
 component AudioPage inherits VerticalLayout {
     spacing: 12px;
     Rectangle {
@@ -208,49 +182,49 @@ component AudioPage inherits VerticalLayout {
         }
     }
     SectionTitle { text: "DRIVER"; }
-    ChipGrid {
+    Dropdown {
         options: Options.drivers;
         selected: Options.driver;
         tip: "The audio system to play through. JACK also works with PipeWire (pipewire-jack).";
         picked(v) => { Options.set-driver(v); }
     }
     if Options.devices.length > 0: SectionTitle { text: "DEVICE"; }
-    if Options.devices.length > 0: ChoiceList {
+    if Options.devices.length > 0: Dropdown {
         options: Options.devices;
         selected: Options.device;
         tip: "Use this sound card";
         picked(v) => { Options.set-device(v); }
     }
     if Options.inputs.length > 0 || Options.outputs.length > 0: SectionTitle { text: "INPUT DEVICE"; }
-    if Options.inputs.length > 0 || Options.outputs.length > 0: ChoiceList {
+    if Options.inputs.length > 0 || Options.outputs.length > 0: Dropdown {
         options: Options.inputs;
         selected: Options.input;
         tip: "Feed the chain from";
         picked(v) => { Options.set-input(v); }
     }
     if Options.inputs.length > 0 || Options.outputs.length > 0: SectionTitle { text: "OUTPUT DEVICE"; }
-    if Options.inputs.length > 0 || Options.outputs.length > 0: ChoiceList {
+    if Options.inputs.length > 0 || Options.outputs.length > 0: Dropdown {
         options: Options.outputs;
         selected: Options.output;
         tip: "Play the chain into";
         picked(v) => { Options.set-output(v); }
     }
     SectionTitle { text: "INPUT CHANNELS"; }
-    ChipGrid {
+    Dropdown {
         options: Options.input-counts;
         selected: Options.input-count;
         tip: "How many inputs your audio interface has. Tracks only offer these, not every port the audio system reports.";
         picked(v) => { Options.set-input-count(v); }
     }
     SectionTitle { text: "SAMPLE RATE"; }
-    ChipGrid {
+    Dropdown {
         options: Options.sample-rates;
         selected: Options.sample-rate;
         tip: "Samples per second. Higher rates cost more CPU.";
         picked(v) => { Options.set-sample-rate(v); }
     }
     SectionTitle { text: "BUFFER SIZE"; }
-    ChipGrid {
+    Dropdown {
         options: Options.buffer-sizes;
         selected: Options.buffer-size;
         tip: "Frames per audio block. Smaller is less latency but more CPU; raise it if you hear crackles.";
@@ -397,7 +371,7 @@ component MidiPage inherits VerticalLayout {
         }
     }
     SectionTitle { text: "MIDI INPUT FOR LEARN"; }
-    ChoiceList {
+    Dropdown {
         options: Options.midi-ports;
         selected: Options.midi-port;
         empty-text: "No MIDI inputs found";
@@ -498,7 +472,7 @@ component BluetoothPage inherits VerticalLayout {
 component DisplayPage inherits VerticalLayout {
     spacing: 12px;
     SectionTitle { text: "THEME"; }
-    ChipGrid {
+    Dropdown {
         options: Theme.names;
         selected: Theme.names[Theme.index];
         tip: "Colours of the highlights and text";
@@ -522,7 +496,7 @@ component DisplayPage inherits VerticalLayout {
         font-weight: Theme.regular;
         wrap: word-wrap;
     }
-    ChipGrid {
+    Dropdown {
         options: Options.editor-zooms;
         selected: Options.editor-zoom;
         tip: "Scale for plugin editors that support it (LV2, VST3, CLAP)";

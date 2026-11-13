@@ -724,11 +724,17 @@ export component ChainPanel inherits Rectangle {
                             root.drag-hover(idx, slot.y + dy + slot.h / 2);
                         }
                         drag-released(idx, dy) => {
-                            if root.drag-index >= 0 {
-                                root.drag-drop(idx);
-                            }
+                            // Clear the drag first: dropping rebuilds the
+                            // list, which ends this row (and this handler)
+                            // before anything after the drop would run, and
+                            // a leftover offset would shift whatever row
+                            // later takes this index.
+                            let dragging = root.drag-index >= 0;
                             root.drag-index = -1;
                             root.drag-offset = 0;
+                            if dragging {
+                                root.drag-drop(idx);
+                            }
                         }
                     }
                     if slot.kind != "plugin": StructureRow {
