@@ -122,6 +122,11 @@ pub enum Command {
     DescribeGraph {
         reply: Sender<Vec<(String, String)>>,
     },
+    /// Meter the first `count` hardware inputs one by one (0 = stop), for
+    /// showing which inputs have a signal while picking a track's inputs.
+    ProbeInputs {
+        count: u16,
+    },
     /// Connect the rig to different JACK clients.
     Reconnect {
         input_client: String,
@@ -194,6 +199,9 @@ pub struct Meters {
     pub tracks: Vec<(TrackId, [f32; 2])>,
     /// Peak level of the inputs each track takes, left/right.
     pub track_inputs: Vec<(TrackId, [f32; 2])>,
+    /// Peak level of each hardware input, 0..1, while they are probed
+    /// (`Command::ProbeInputs`); empty otherwise.
+    pub hardware_inputs: Vec<f32>,
     /// DSP load in percent.
     pub dsp_load: f32,
     pub xruns: u32,

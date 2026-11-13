@@ -18,6 +18,11 @@ export global TrackIo {
     in property <bool> midi-all;
     // MIDI devices cannot be told apart (not under JACK).
     in property <bool> merged-midi;
+    // Whether each hardware input hears something now (while probing).
+    in property <[bool]> signal;
+    // The input page opened or closed: meter the inputs one by one while
+    // it is open.
+    callback probe(bool);
     callback toggle-input(int);
     callback toggle-midi(int);
     callback set-midi-all(bool);
@@ -69,7 +74,7 @@ component TrackIoPage inherits Rectangle {
                 Text {
                     text: TrackIo.inputs.length == 0
                         ? "No audio inputs found. Start the audio engine, or pick an input device in the options."
-                        : "One input plays on both sides, two make a stereo pair. Pick none for a synth.";
+                        : "One input plays on both sides, two make a stereo pair. Pick none for a synth. An input lights up while it hears something: play to see where your instrument comes in.";
                     font-size: Theme.font-small;
                     font-weight: Theme.regular;
                     color: Theme.text-dim;
@@ -79,14 +84,37 @@ component TrackIoPage inherits Rectangle {
                     property <int> per-row: max(1, floor((self.width + 8px) / 72px));
                     property <length> cell: (self.width - (self.per-row - 1) * 8px) / self.per-row;
                     height: TrackIo.inputs.length == 0 ? 0 : ceil(TrackIo.inputs.length / self.per-row) * 52px;
-                    for c[i] in TrackIo.inputs: Chip {
+                    for c[i] in TrackIo.inputs: Rectangle {
                         x: mod(i, inputs-grid.per-row) * (inputs-grid.cell + 8px);
                         y: floor(i / inputs-grid.per-row) * 52px;
                         width: inputs-grid.cell;
-                        text: c.name;
-                        selected: c.on;
-                        tip: c.detail;
-                        clicked => { TrackIo.toggle-input(i); }
+                        height: 44px;
+                        property <bool> live: TrackIo.signal[i];
+                        Chip {
+                            width: parent.width;
+                            text: c.name;
+                            selected: c.on;
+                            tip: c.detail;
+                            clicked => { TrackIo.toggle-input(i); }
+                        }
+                        // Lights up while the input hears something.
+                        Rectangle {
+                            border-radius: 22px;
+                            border-width: 2px;
+                            border-color: Theme.ok;
+                            opacity: live ? 1 : 0;
+                            animate opacity { duration: live ? 40ms : 250ms; }
+                        }
+                        Rectangle {
+                            x: parent.width - 18px;
+                            y: (parent.height - self.height) / 2;
+                            width: 8px;
+                            height: 8px;
+                            border-radius: 4px;
+                            background: Theme.ok;
+                            opacity: live ? 1 : 0;
+                            animate opacity { duration: live ? 40ms : 250ms; }
+                        }
                     }
                 }
                 Rectangle { height: 8px; }
@@ -510,6 +538,7 @@ export component ChainPanel inherits Rectangle {
     property <int> drag-index: -1;
     // The page that picks the track's inputs covers the chain.
     property <bool> io-open: false;
+    changed io-open => { TrackIo.probe(self.io-open); }
     property <length> drag-offset: 0;
     property <length> content-h: root.slots.length == 0 ? 0 : root.slots[root.slots.length - 1].y + root.slots[root.slots.length - 1].h;
 

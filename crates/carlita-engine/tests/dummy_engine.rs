@@ -278,6 +278,25 @@ fn live_rig_on_dummy_driver() {
     assert_eq!(m.tracks.len(), 2);
     assert_eq!(m.track_inputs.len(), 2);
     assert!(m.total_latency_ms() > 0.0);
+    assert!(m.hardware_inputs.is_empty());
+
+    // Probing the hardware inputs meters each of them on its own, two per
+    // probe, until it is turned off.
+    let count = inputs.len().min(4) as u16;
+    engine.send(Command::ProbeInputs { count });
+    wait_graph(&engine, "inputs probed", |g| {
+        has(g, hw_in, "Carlita.probe-1") && (count <= 2 || has(g, hw_in, "Carlita.probe-2"))
+    });
+    wait_for(
+        &engine,
+        "input levels",
+        |e| matches!(e, Event::Meters(m) if m.hardware_inputs.len() == count as usize),
+    );
+    engine.send(Command::ProbeInputs { count: 0 });
+    wait_graph(&engine, "probes removed", |g| {
+        !g.iter()
+            .any(|(a, b)| a.contains("probe") || b.contains("probe"))
+    });
 
     // Removing a track drops its bus.
     let mut layout3 = layout2.clone();

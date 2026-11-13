@@ -18,6 +18,8 @@ touchscreen.
   into lanes (one can stay dry) and mix them back together.
 * Each track picks its own hardware inputs (any of an interface's
   channels: one for mono, two for a stereo pair) and its own MIDI devices.
+  While picking, each input lights up when it hears something, and the
+  options set how many inputs the interface has.
 * Add, remove, reorder, split and bypass plugins while audio keeps running.
 * Tracks are tabs in the top bar, which Carlita draws itself in place of the
   window manager's title bar. In fullscreen, swipe down from the **top** edge
