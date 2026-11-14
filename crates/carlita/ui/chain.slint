@@ -4,6 +4,7 @@ import { Theme } from "theme.slint";
 import { BigButton, BigSlider, Chip, StereoMeter, CollapseButton, Tip, SectionTitle, SettingRow, Toggle } from "widgets.slint";
 import { Icon, Icons } from "icons.slint";
 import { SlotItem, IoChoice } from "types.slint";
+import { Recording } from "options.slint";
 
 // What feeds the selected track: hardware inputs and MIDI devices.
 export global TrackIo {
@@ -489,6 +490,203 @@ component StructureRow inherits Rectangle {
     }
 }
 
+// Recording: the open project and the transport, at the foot of the chain.
+// How takes are recorded (dry inputs, file format, where projects go) is
+// set in the options' Record page.
+component RecordCard inherits Rectangle {
+    callback open-projects;
+
+    border-radius: Theme.radius;
+    background: Theme.surface-2;
+    border-width: 1px;
+    border-color: Recording.state == 1 ? Theme.danger : Theme.border-strong;
+    height: card.preferred-height;
+
+    card := VerticalLayout {
+        padding: 6px;
+        padding-left: Theme.pad;
+        spacing: 4px;
+        HorizontalLayout {
+            spacing: 6px;
+            height: Theme.touch;
+            // The project: tap to pick, make or close one.
+            Rectangle {
+                horizontal-stretch: 1;
+                border-radius: Theme.radius - 2px;
+                background: project-touch.pressed ? Theme.pressed : transparent;
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: Recording.state == 1 ? "Recording · " + Recording.time
+                            : Recording.state == 2 ? "Paused · " + Recording.time
+                            : "Record";
+                        font-size: Theme.font-small;
+                        font-weight: Theme.regular;
+                        color: Recording.state == 1 ? Theme.danger : Recording.state == 2 ? Theme.warn : Theme.text-dim;
+                    }
+                    Text {
+                        text: (Recording.project == "" ? "No project" : Recording.project) + (Recording.state == 0 ? "  ▾" : "");
+                        font-size: Theme.font;
+                        color: Recording.project == "" ? Theme.text-faint : Theme.text;
+                        overflow: elide;
+                    }
+                }
+                project-touch := TouchArea {
+                    enabled: Recording.state == 0;
+                    clicked => { root.open-projects(); }
+                }
+                Tip {
+                    text: Recording.project == "" ? "Pick or make a project to record into" : "Recording into " + Recording.project + ": tap to pick another";
+                    hover: project-touch.has-hover;
+                    pressed: project-touch.pressed;
+                }
+            }
+            if Recording.project == "": BigButton {
+                text: "Project…";
+                primary: true;
+                tip: "Pick or make a project to record into";
+                clicked => { root.open-projects(); }
+            }
+            if Recording.project != "": BigButton {
+                width: 64px;
+                icon-solid: Recording.state == 1 ? Icons.pause-solid : Icons.record-solid;
+                icon-line: Recording.state == 1 ? "" : Icons.record-line;
+                danger: Recording.state != 1;
+                enabled: Recording.available;
+                tip: !Recording.available ? Recording.unavailable-text
+                    : Recording.state == 1 ? "Pause the take; recording again goes on in the same files"
+                    : Recording.state == 2 ? "Go on recording this take"
+                    : "Record a new take into " + Recording.project + ": one file per track";
+                clicked => {
+                    if Recording.state == 1 { Recording.pause(); } else { Recording.record(); }
+                }
+            }
+            if Recording.project != "": BigButton {
+                width: 64px;
+                icon-solid: Icons.stop-solid;
+                enabled: Recording.state != 0;
+                tip: "Stop: end the take and close its files";
+                clicked => { Recording.stop(); }
+            }
+        }
+        if !Recording.available: Text {
+            text: Recording.unavailable-text;
+            color: Theme.warn;
+            font-size: Theme.font-small;
+            font-weight: Theme.regular;
+            wrap: word-wrap;
+        }
+        if Recording.status != "": Text {
+            text: Recording.status;
+            color: Recording.status-error ? Theme.danger : Theme.text-dim;
+            font-size: Theme.font-small;
+            font-weight: Theme.regular;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// Picks, makes or closes the project takes are recorded into.
+component ProjectsPage inherits Rectangle {
+    callback close;
+
+    background: Theme.popup.with-alpha(1);
+    TouchArea {
+        moved => {
+            if self.mouse-x - self.pressed-x < -60px {
+                root.close();
+            }
+        }
+    }
+
+    VerticalLayout {
+        padding: Theme.pad;
+        spacing: 10px;
+        HorizontalLayout {
+            spacing: 10px;
+            Text {
+                text: "Recording projects";
+                font-size: Theme.font-title;
+                color: Theme.text;
+                overflow: elide;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            CollapseButton {
+                icon: Icons.chevron-left;
+                tip: "Back to the chain";
+                clicked => { root.close(); }
+            }
+        }
+        Text {
+            text: "Takes go into a project: a folder in " + Recording.location + ", one file per track. Where projects go, the file format and dry inputs are set in Options › Record.";
+            font-size: Theme.font-small;
+            font-weight: Theme.regular;
+            color: Theme.text-dim;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            BigButton {
+                horizontal-stretch: 1;
+                text: "New project…";
+                primary: Recording.project == "";
+                tip: "Name a project: a folder in " + Recording.location;
+                clicked => {
+                    Recording.new-project();
+                    root.close();
+                }
+            }
+            if Recording.project != "": BigButton {
+                horizontal-stretch: 1;
+                text: "Close project";
+                tip: "Stop recording into " + Recording.project;
+                clicked => {
+                    Recording.close-project();
+                    root.close();
+                }
+            }
+        }
+        if Recording.projects.length > 0: SectionTitle { text: "PROJECTS"; }
+        Flickable {
+            vertical-stretch: 1;
+            content-height: list.preferred-height;
+            interactive: self.content-height > self.height;
+            list := VerticalLayout {
+                spacing: 6px;
+                alignment: start;
+                for p in Recording.projects: Rectangle {
+                    height: Theme.row - 8px;
+                    border-radius: Theme.radius;
+                    background: row-touch.pressed ? Theme.pressed : Theme.surface-2;
+                    border-width: p == Recording.project ? 2px : 1px;
+                    border-color: p == Recording.project ? Theme.paint : row-touch.has-hover ? Theme.border-hover : Theme.border-strong;
+                    Text {
+                        x: Theme.pad;
+                        width: parent.width - 2 * Theme.pad;
+                        text: p;
+                        font-size: Theme.font;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    row-touch := TouchArea {
+                        clicked => {
+                            Recording.open-project(p);
+                            root.close();
+                        }
+                    }
+                    Tip {
+                        text: "Record into \"" + p + "\"";
+                        hover: row-touch.has-hover;
+                        pressed: row-touch.pressed;
+                    }
+                }
+            }
+        }
+    }
+}
+
 export component ChainPanel inherits Rectangle {
     in property <[SlotItem]> slots;
     in property <float> in-left;
@@ -532,6 +730,8 @@ export component ChainPanel inherits Rectangle {
     property <int> drag-index: -1;
     // The page that picks the track's inputs covers the chain.
     property <bool> io-open: false;
+    // The page that picks the recording project covers the chain.
+    property <bool> projects-open: false;
     changed io-open => { TrackIo.probe(self.io-open); }
     property <length> drag-offset: 0;
     property <length> content-h: root.slots.length == 0 ? 0 : root.slots[root.slots.length - 1].y + root.slots[root.slots.length - 1].h;
@@ -789,6 +989,10 @@ export component ChainPanel inherits Rectangle {
             }
         }
 
+        RecordCard {
+            open-projects => { root.projects-open = true; }
+        }
+
         BigButton {
             text: "Add plugin";
             tip: "Pick a plugin to add to the end of this track";
@@ -797,6 +1001,12 @@ export component ChainPanel inherits Rectangle {
             height: 60px;
             clicked => { root.add-plugin(); }
         }
+    }
+
+    if root.projects-open: ProjectsPage {
+        width: root.width;
+        height: root.height;
+        close => { root.projects-open = false; }
     }
 
     if root.io-open: TrackIoPage {

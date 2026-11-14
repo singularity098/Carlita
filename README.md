@@ -27,17 +27,18 @@ touchscreen.
 * Swipe in from the **left** edge for the chain and from the **right** edge
   for options (audio, presets, MIDI learn, WiFi, Bluetooth, display, system),
   and up from the **bottom** edge for the on-screen piano. With a mouse, a
-  tab shows when the pointer is at an edge. Each panel has a button that
-  folds it away again.
+  tab shows when the pointer is at an edge (in a window with a frame, just
+  inside the resize border). Each panel has a button that folds it away
+  again.
 * The selected plugin's editor is shown inside Carlita's window, in the main
   area (editors that can resize fill it).
 * A flat dark look and a choice of themes (Display options).
 * Each plugin can run in its own process, so a crashing plugin is swapped for
   a pass-through and the rest of the chain keeps playing.
-* Stem recording (under JACK/PipeWire): open or name a project in options →
-  Record (projects go in `~/Music/Carlita` unless you pick another folder),
-  then record, pause, resume and stop there or with the record button in the
-  top bar. Each take is a `Take NN` folder holding one file per track (what
+* Stem recording (under JACK/PipeWire): at the foot of the chain sidebar,
+  open or name a project (projects go in `~/Music/Carlita` unless you pick
+  another folder in options → Record), then record, pause, resume and stop
+  there or with the record button in the top bar. Each take is a `Take NN` folder holding one file per track (what
   the track plays, after its plugins), all starting at the same sample, and
   optionally each track's dry inputs for re-amping. Files are 32-bit float
   WAV (RF64 past 4 GB, so takes can run as long as the disk allows) or

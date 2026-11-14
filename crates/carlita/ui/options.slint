@@ -508,86 +508,12 @@ component RecordPage inherits VerticalLayout {
         font-size: Theme.font-small;
         wrap: word-wrap;
     }
-    // The project and the transport.
-    Rectangle {
-        border-radius: Theme.radius;
-        background: Theme.surface-2;
-        border-width: 1px;
-        border-color: Recording.state == 1 ? Theme.danger : Theme.border-strong;
-        VerticalLayout {
-            padding: Theme.pad;
-            spacing: 10px;
-            Text {
-                text: Recording.project == "" ? "No project open" : Recording.project;
-                font-size: Theme.font-title;
-                color: Recording.project == "" ? Theme.text-faint : Theme.text;
-                overflow: elide;
-            }
-            if Recording.project != "": Text {
-                text: Recording.project-path;
-                font-size: Theme.font-small;
-                font-weight: Theme.regular;
-                color: Theme.text-dim;
-                overflow: elide;
-            }
-            if Recording.project != "": HorizontalLayout {
-                spacing: 8px;
-                BigButton {
-                    horizontal-stretch: 1;
-                    icon-solid: Icons.record-solid;
-                    icon-line: Icons.record-line;
-                    text: Recording.state == 2 ? "Resume" : Recording.state == 1 ? "Recording" : "Record";
-                    danger: true;
-                    enabled: Recording.available && Recording.state != 1;
-                    tip: Recording.state == 2 ? "Go on recording this take" : "Record a new take: one file per track";
-                    clicked => { Recording.record(); }
-                }
-                BigButton {
-                    horizontal-stretch: 1;
-                    text: "Pause";
-                    enabled: Recording.state == 1;
-                    tip: "Pause the take; Resume goes on in the same files";
-                    clicked => { Recording.pause(); }
-                }
-                BigButton {
-                    horizontal-stretch: 1;
-                    text: "Stop";
-                    enabled: Recording.state != 0;
-                    tip: "End the take and close its files";
-                    clicked => { Recording.stop(); }
-                }
-            }
-            if Recording.state != 0: Text {
-                text: (Recording.state == 2 ? "Paused · " : "Recording · ") + Recording.time;
-                color: Recording.state == 1 ? Theme.danger : Theme.warn;
-                font-size: Theme.font;
-            }
-            if Recording.status != "": Text {
-                text: Recording.status;
-                color: Recording.status-error ? Theme.danger : Theme.text-dim;
-                font-size: Theme.font-small;
-                font-weight: Theme.regular;
-                wrap: word-wrap;
-            }
-        }
-    }
-    HorizontalLayout {
-        spacing: 8px;
-        BigButton {
-            horizontal-stretch: 1;
-            text: "New project…";
-            primary: Recording.project == "";
-            enabled: Recording.state == 0;
-            tip: "Name a project: a folder in " + Recording.location;
-            clicked => { Recording.new-project(); }
-        }
-        if Recording.project != "": BigButton {
-            horizontal-stretch: 1;
-            text: "Close project";
-            enabled: Recording.state == 0;
-            tip: "Stop recording into " + Recording.project;
-            clicked => { Recording.close-project(); }
-        }
+    Text {
+        text: "How takes are recorded. To record, pick a project and press record at the foot of the chain (swipe in from the left edge).";
+        color: Theme.text-dim;
+        font-size: Theme.font-small;
+        font-weight: Theme.regular;
+        wrap: word-wrap;
     }
     SettingRow {
         label: "Record dry inputs too";
@@ -624,15 +550,6 @@ component RecordPage inherits VerticalLayout {
             tip: "Change the projects folder";
             enabled: Recording.state == 0;
             clicked => { Recording.change-location(); }
-        }
-    }
-    if Recording.projects.length > 0: SectionTitle { text: "PROJECTS"; }
-    for p in Recording.projects: ListRow {
-        title: p;
-        highlight: p == Recording.project;
-        tip: "Open \"" + p + "\": new takes go into it";
-        clicked => {
-            if Recording.state == 0 { Recording.open-project(p); }
         }
     }
 }

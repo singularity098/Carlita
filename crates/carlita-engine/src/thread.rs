@@ -758,6 +758,7 @@ impl Engine {
         PluginRuntimeInfo {
             has_custom_ui: hints & sys::PLUGIN_HAS_CUSTOM_UI != 0,
             can_embed: hints & sys::PLUGIN_HAS_CUSTOM_EMBED_UI != 0,
+            resizable_ui: hints & sys::PLUGIN_HAS_CUSTOM_RESIZABLE_UI != 0,
             can_drywet: hints & sys::PLUGIN_CAN_DRYWET != 0,
             is_bridge: hints & sys::PLUGIN_IS_BRIDGE != 0,
             parameter_count: self.host.parameter_count(id),

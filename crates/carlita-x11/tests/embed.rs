@@ -110,6 +110,7 @@ fn embeds_hides_and_hands_back() {
         key: 42,
         title: "carlita-editor-42".into(),
         parent: main,
+        resizable: false,
     });
     let size = wait(&host, |e| match e {
         HostEvent::Attached { key, width, height } => Some((key, width, height)),
@@ -222,6 +223,7 @@ fn embeds_hides_and_hands_back() {
         key: 43,
         title: "carlita-editor-43".into(),
         parent: main,
+        resizable: false,
     });
     wait(&host, |e| {
         matches!(e, HostEvent::Attached { key: 43, .. }).then_some(())
@@ -235,6 +237,31 @@ fn embeds_hides_and_hands_back() {
     wait(&host, |e| {
         matches!(e, HostEvent::Lost { key: 43 }).then_some(())
     });
+
+    // A JUCE editor's window claims one fixed size (minimum = maximum =
+    // its size), but the plugin says it can be resized: it fills the area.
+    let editor3 = window(&conn, root, 300, 200, b"carlita-editor-44");
+    let mut fixed = WmSizeHints::new();
+    fixed.min_size = Some((300, 200));
+    fixed.max_size = Some((300, 200));
+    fixed.set_normal_hints(&conn, editor3).unwrap();
+    conn.map_window(editor3).unwrap();
+    conn.flush().unwrap();
+    host.send(HostCommand::Attach {
+        key: 44,
+        title: "carlita-editor-44".into(),
+        parent: main,
+        resizable: true,
+    });
+    wait(&host, |e| {
+        matches!(e, HostEvent::Attached { key: 44, .. }).then_some(())
+    });
+    until(|| {
+        let g = conn.get_geometry(editor3).unwrap().reply().unwrap();
+        (g.width, g.height) == (760, 500)
+    });
+    host.send(HostCommand::Detach { key: 44 });
+    until(|| parent_of(&conn, editor3) == root);
 }
 
 /// An editor that does not use the title Carla gives it is still found: it
@@ -270,6 +297,7 @@ fn finds_an_editor_with_its_own_title() {
         key: 7,
         title: "carlita-editor-7".into(),
         parent: main,
+        resizable: false,
     });
     std::thread::sleep(Duration::from_millis(200));
     let editor = window(&conn, root, 240, 160, b"Xythos");
@@ -345,6 +373,7 @@ fn edges_f11_and_focus() {
         key: 7,
         title: "carlita-editor-7".into(),
         parent: main,
+        resizable: false,
     });
     wait(&host, |e| match e {
         HostEvent::Attached { .. } => Some(()),
@@ -355,6 +384,7 @@ fn edges_f11_and_focus() {
     // the left half of the window, and so the editor's left half.
     host.send(HostCommand::SetEdges {
         parent: main,
+        resizable: false,
         edges: vec![Area {
             x: 0,
             y: 0,
