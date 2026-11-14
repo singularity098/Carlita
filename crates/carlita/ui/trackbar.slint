@@ -5,6 +5,7 @@ import { Theme } from "theme.slint";
 import { TrackItem } from "types.slint";
 import { Icon, Icons } from "icons.slint";
 import { Tip } from "tooltip.slint";
+import { Recording } from "options.slint";
 
 component TrackTab inherits Rectangle {
     in property <TrackItem> item;
@@ -236,6 +237,96 @@ component WindowButton inherits Rectangle {
     }
 }
 
+// Record / pause and stop, while a recording project is open.
+component RecordControl inherits HorizontalLayout {
+    spacing: 4px;
+    padding-top: 4px;
+    padding-bottom: 4px;
+    Rectangle {
+        width: Recording.state == 0 ? 44px : 108px;
+        border-radius: 10px;
+        background: rec-touch.pressed ? Theme.surface-3
+            : Recording.state == 1 ? Theme.danger.transparentize(75%)
+            : transparent;
+        border-width: 1px;
+        border-color: Recording.state == 0 ? transparent : Theme.danger.transparentize(40%);
+        HorizontalLayout {
+            alignment: center;
+            spacing: 8px;
+            // A dot to record, two bars to pause.
+            Rectangle {
+                width: 14px;
+                if Recording.state != 1: Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    width: 14px;
+                    height: 14px;
+                    border-radius: 7px;
+                    background: Recording.available ? Theme.danger : Theme.text-faint;
+                }
+                if Recording.state == 1: Rectangle {
+                    x: 1px;
+                    y: (parent.height - self.height) / 2;
+                    width: 4px;
+                    height: 14px;
+                    background: Theme.danger;
+                }
+                if Recording.state == 1: Rectangle {
+                    x: 9px;
+                    y: (parent.height - self.height) / 2;
+                    width: 4px;
+                    height: 14px;
+                    background: Theme.danger;
+                }
+            }
+            if Recording.state != 0: Text {
+                text: Recording.time;
+                font-size: Theme.font-small;
+                color: Recording.state == 1 ? Theme.danger : Theme.warn;
+                vertical-alignment: center;
+            }
+        }
+        rec-touch := TouchArea {
+            enabled: Recording.available;
+            clicked => {
+                if Recording.state == 1 {
+                    Recording.pause();
+                } else {
+                    Recording.record();
+                }
+            }
+        }
+        Tip {
+            text: !Recording.available ? Recording.unavailable-text
+                : Recording.state == 1 ? "Pause recording"
+                : Recording.state == 2 ? "Resume recording"
+                : "Record a take into " + Recording.project;
+            hover: rec-touch.has-hover;
+            pressed: rec-touch.pressed;
+        }
+    }
+    if Recording.state != 0: Rectangle {
+        width: 44px;
+        border-radius: 10px;
+        background: stop-touch.pressed ? Theme.surface-3 : transparent;
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+            background: Theme.text;
+        }
+        stop-touch := TouchArea {
+            clicked => { Recording.stop(); }
+        }
+        Tip {
+            text: "Stop: end the take and close its files";
+            hover: stop-touch.has-hover;
+            pressed: stop-touch.pressed;
+        }
+    }
+}
+
 export component TrackBar inherits Rectangle {
     in property <[TrackItem]> tracks;
     in property <bool> fullscreen;
@@ -358,6 +449,8 @@ export component TrackBar inherits Rectangle {
                 }
             }
         }
+
+        if Recording.project != "": RecordControl { }
 
         // The same window controls in a window and in fullscreen; in
         // fullscreen there is also a button that hides the bar again.

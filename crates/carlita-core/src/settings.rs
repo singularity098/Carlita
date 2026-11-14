@@ -111,10 +111,21 @@ pub struct MidiSettings {
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
+pub struct RecordingSettings {
+    /// Folder new recording projects are made in ("" = the default,
+    /// `AppPaths::default_projects_dir`).
+    pub projects_dir: String,
+    /// Also record each track's inputs before its plugins.
+    pub record_dry: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub audio: AudioSettings,
     pub display: DisplaySettings,
     pub midi: MidiSettings,
+    pub recording: RecordingSettings,
     /// Preset loaded at startup.
     pub default_preset: Option<String>,
     /// Preset that was last loaded or saved (shown in the UI).

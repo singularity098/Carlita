@@ -18,6 +18,11 @@ log.workspace = true
 env_logger.workspace = true
 crossbeam-channel.workspace = true
 midir = "0.10"
+# Stem recording: our own JACK client (libjack is loaded at run time, as
+# Carla does), lock-free buffers from the audio thread, WAV files.
+jack = "0.14"
+rtrb = "0.4"
+hound = "3.5"
 slint = { version = "1.14", default-features = false, features = [
     "std",
     "compat-1-2",
@@ -35,6 +40,9 @@ slint = { version = "1.14", default-features = false, features = [
     # Moving and resizing the frameless window with the window manager.
     "unstable-winit-030",
 ] }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [build-dependencies]
 slint-build = "1.14"

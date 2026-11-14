@@ -34,6 +34,12 @@ touchscreen.
 * A flat dark look and a choice of themes (Display options).
 * Each plugin can run in its own process, so a crashing plugin is swapped for
   a pass-through and the rest of the chain keeps playing.
+* Stem recording (under JACK/PipeWire): open or name a project in options →
+  Record (projects go in `~/Music/Carlita` unless you pick another folder),
+  then record, pause, resume and stop there or with the record button in the
+  top bar. Each take is a `Take NN` folder holding one 32-bit float WAV per
+  track (what the track plays, after its plugins), all starting at the same
+  sample, and optionally each track's dry inputs for re-amping.
 
 The full requirements are in [docs/requirements.md](docs/requirements.md).
 [docs/architecture.md](docs/architecture.md) describes the design and
@@ -98,7 +104,7 @@ Both tests skip themselves when JACK or X is not available, unless
 | `--no-preset` | Do not load the default preset at startup |
 | `CARLITA_HOME=dir` | Keep settings, presets and the plugin cache below `dir` |
 | `SLINT_BACKEND=winit-software` | Software rendering on machines without OpenGL |
-| `SLINT_BACKEND=winit-femtovg` | The lighter femtovg GPU renderer instead of the default Skia (rougher edges on curves) |
+| `SLINT_BACKEND=winit-femtovg` | The lighter femtovg GPU renderer instead of the default Skia over OpenGL (rougher edges on curves) |
 
 Files are stored in `~/.config/carlita/settings.json`,
 `~/.local/share/carlita/presets/*.json` and `~/.cache/carlita/plugins.json`.

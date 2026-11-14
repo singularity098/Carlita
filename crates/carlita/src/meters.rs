@@ -29,10 +29,10 @@ impl<const N: usize> MeterBars<N> {
 
     /// The latest levels from the engine (linear, 1.0 = full scale).
     pub fn set(&mut self, levels: [f32; N]) {
-        for i in 0..N {
-            self.target[i] = levels[i];
-            if levels[i] > self.shown[i] {
-                self.shown[i] = levels[i];
+        for ((target, shown), level) in self.target.iter_mut().zip(&mut self.shown).zip(levels) {
+            *target = level;
+            if level > *shown {
+                *shown = level;
             }
         }
     }
@@ -40,7 +40,10 @@ impl<const N: usize> MeterBars<N> {
     /// Lets the bars fall for the time since the last step. Returns the
     /// levels to draw, or None when no bar moved (so nothing is redrawn).
     pub fn step(&mut self, now: Instant) -> Option<[f32; N]> {
-        let dt = now.saturating_duration_since(self.last).as_secs_f32().min(0.25);
+        let dt = now
+            .saturating_duration_since(self.last)
+            .as_secs_f32()
+            .min(0.25);
         self.last = now;
         let fall = 10f32.powf(-FALL_DB_PER_SEC * dt / 20.0);
         for i in 0..N {
