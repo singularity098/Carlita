@@ -42,10 +42,50 @@ fn main() -> anyhow::Result<()> {
     use_x11()?;
     let ui = MainWindow::new()?;
     icons::install(&ui);
+    if std::env::var_os("CARLITA_LAZY_REDRAW").is_none() {
+        redraw_every_frame(&ui);
+    }
     let app = app::App::new(&ui, opts)?;
     ui.run()?;
     app.borrow_mut().shutdown();
     Ok(())
+}
+
+/// Draws the window on every display frame, not only when something on it
+/// changed. Drawn on demand, frames came whenever Carlita's poll timer or the
+/// meters asked for one, out of step with the display: at 120 Hz an open
+/// sidebar stuttered (and the pointer with it) until the two happened to
+/// fall into step. Drawing every frame keeps the window in step with the
+/// display, as Slint's `SLINT_DEBUG_PERFORMANCE=refresh_full_speed` did.
+/// The buffer swap waits for the display, so this draws at its rate; should a
+/// driver not wait, frames are still kept at least 4 ms apart (240 Hz).
+/// `CARLITA_LAZY_REDRAW=1` goes back to drawing on demand.
+fn redraw_every_frame(ui: &MainWindow) {
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+    const MIN_FRAME: Duration = Duration::from_micros(4_150);
+    let weak = ui.as_weak();
+    let last = Cell::new(Instant::now());
+    let result = ui.window().set_rendering_notifier(move |state, _| {
+        if !matches!(state, slint::RenderingState::AfterRendering) {
+            return;
+        }
+        let since = last.replace(Instant::now()).elapsed();
+        let weak = weak.clone();
+        let redraw = move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.window().request_redraw();
+            }
+        };
+        if since >= MIN_FRAME {
+            redraw();
+        } else {
+            slint::Timer::single_shot(MIN_FRAME - since, redraw);
+        }
+    });
+    if let Err(e) = result {
+        log::warn!("cannot draw every frame ({e:?}); drawing on demand");
+    }
 }
 
 /// Opens the main window as an X11 window (through XWayland on a Wayland

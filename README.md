@@ -111,6 +111,7 @@ Both tests skip themselves when JACK or X is not available, unless
 | `CARLITA_HOME=dir` | Keep settings, presets and the plugin cache below `dir` |
 | `SLINT_BACKEND=winit-software` | Software rendering on machines without OpenGL |
 | `SLINT_BACKEND=winit-femtovg` | The lighter femtovg GPU renderer instead of the default Skia over OpenGL (rougher edges on curves) |
+| `CARLITA_LAZY_REDRAW=1` | Draw the window only when something on it changes, instead of on every display frame (less GPU work while idle, but sidebars may stutter on high-refresh displays) |
 
 Files are stored in `~/.config/carlita/settings.json`,
 `~/.local/share/carlita/presets/*.json` and `~/.cache/carlita/plugins.json`.
