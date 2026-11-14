@@ -684,6 +684,12 @@ export component OptionsPanel inherits Rectangle {
     callback close;
     callback page-opened(int);
 
+    // Drawn once into a layer and reused while nothing on it changes. The
+    // window is redrawn at the display's rate whenever the meters move, and
+    // drawing every row, box and text of a page again each time cost a
+    // high-refresh display its frame rate while this panel was out.
+    cache-rendering-hint: true;
+
     background: Theme.popup;
     border-width: 1px;
     border-color: Theme.border;
