@@ -90,39 +90,27 @@ component EdgeStrip inherits Rectangle {
     }
 }
 
-// The strip along the top edge in fullscreen: swipe down (or tap the tab
-// that shows while the mouse hovers it) to bring in the track bar.
+// The strip along the top edge in fullscreen: resting the mouse there, or
+// swiping down (or tapping it), brings in the track bar.
 component TopStrip inherits Rectangle {
     in property <length> bar-height;
     callback drag(float);
     callback release(bool);
     callback tap;
-    out property <bool> hovered: self.visible && (strip.has-hover || tab-touch.has-hover);
-    out property <length> tab-height: tab.height;
+    // The mouse came to rest on the strip (no button held).
+    callback hover;
+    out property <bool> hovered: self.visible && strip.has-hover;
+    // No tab: the bar itself comes in as soon as the mouse is there.
+    out property <length> tab-height: 0;
 
     property <float> amount: 0;
 
-    tab := Rectangle {
-        visible: strip.has-hover || tab-touch.has-hover;
-        width: 120px;
-        height: 36px;
-        x: (root.width - self.width) / 2;
-        y: 0;
-        border-radius: 10px;
-        background: tab-touch.pressed ? Theme.paint : #00000073;
-        border-width: 1px;
-        border-color: tab-touch.pressed ? transparent : Theme.border-hover;
-        Text {
-            text: "Tracks";
-            font-size: Theme.font-small;
-            font-weight: Theme.regular;
-            color: tab-touch.pressed ? #000 : Theme.text;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
-        tab-touch := TouchArea {
-            clicked => { root.tap(); }
-        }
+    // A moment's rest, so the pointer passing the top edge on its way
+    // somewhere does not bring the bar down.
+    Timer {
+        interval: 80ms;
+        running: strip.has-hover && !strip.pressed;
+        triggered => { root.hover(); }
     }
 
     strip := TouchArea {
@@ -241,6 +229,9 @@ export component MainWindow inherits Window {
     // Track bar: docked in a window; in fullscreen 0 = hidden, 1 = shown.
     in property <bool> window-maximized;
     in-out property <float> top-pos: 0;
+    // The fullscreen track bar came down because the mouse rested at the
+    // top edge: it goes again when the mouse leaves it.
+    property <bool> top-by-hover;
     property <bool> top-dragging;
     property <length> bar-height: 52px;
     // How far the fullscreen track bar reaches down, following the slide.
@@ -390,8 +381,8 @@ export component MainWindow inherits Window {
     changed uncovered-height => { root.area-changed(); }
 
     function open-left() { root.left-pos = 1; root.right-pos = 0; root.top-pos = 0; }
-    function open-top() { root.top-pos = 1; root.left-pos = 0; root.right-pos = 0; }
-    function close-top() { root.top-pos = 0; }
+    function open-top() { root.top-pos = 1; root.left-pos = 0; root.right-pos = 0; root.top-by-hover = false; }
+    function close-top() { root.top-pos = 0; root.top-by-hover = false; }
     function close-left() { root.left-pos = 0; }
     function open-right() { root.right-pos = 1; root.left-pos = 0; root.top-pos = 0; }
     function close-right() { root.right-pos = 0; }
@@ -731,8 +722,15 @@ export component MainWindow inherits Window {
     // below it that closes it on a tap.
     if !root.docked && root.top-pos > 0: Rectangle {
         background: Colors.rgba(0, 0, 0, 0.45 * root.top-pos);
+        // Below the bar, so the mouse over the bar's empty parts is not
+        // taken for the mouse leaving it.
         TouchArea {
+            y: root.bar-height;
+            height: parent.height - self.y;
             clicked => { root.close-top(); }
+            changed has-hover => {
+                if self.has-hover && root.top-by-hover { root.close-top(); }
+            }
         }
     }
     if !root.docked: TrackBar {
@@ -753,6 +751,8 @@ export component MainWindow inherits Window {
             root.close-top();
             root.close-track(id);
         }
+        // Typing a name: the bar stays when the mouse wanders off.
+        rename-started(id) => { root.top-by-hover = false; }
         rename-track(id, name) => { root.rename-track-to(id, name); }
         rename-ended => { keys.focus(); }
         minimize => { root.minimize-window(); }
@@ -837,6 +837,13 @@ export component MainWindow inherits Window {
             if open { root.open-top(); } else { root.close-top(); }
         }
         tap => { root.open-top(); }
+        // Not while a sidebar is out: passing the top edge would close it.
+        hover => {
+            if root.left-pos == 0 && root.right-pos == 0 && root.top-pos == 0 {
+                root.open-top();
+                root.top-by-hover = true;
+            }
+        }
     }
 
     // ------------------------------------------------------------- overlays

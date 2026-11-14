@@ -22,8 +22,9 @@ touchscreen.
   options set how many inputs the interface has.
 * Add, remove, reorder, split and bypass plugins while audio keeps running.
 * Tracks are tabs in the top bar, which Carlita draws itself in place of the
-  window manager's title bar. In fullscreen, swipe down from the **top** edge
-  to bring it in.
+  window manager's title bar. In fullscreen, it comes down when the mouse
+  rests at the **top** edge (and goes when the mouse leaves it), or swipe
+  down from the top edge.
 * Swipe in from the **left** edge for the chain and from the **right** edge
   for options (audio, presets, MIDI learn, WiFi, Bluetooth, display, system),
   and up from the **bottom** edge for the on-screen piano. With a mouse, a
