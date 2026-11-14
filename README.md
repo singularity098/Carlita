@@ -52,7 +52,8 @@ the current state of each requirement.
 Ubuntu 24.04 / Debian:
 
 ```bash
-sudo apt install carla carla-dev clang libclang-dev libasound2-dev libxkbcommon-dev libfontconfig-dev
+sudo apt install carla carla-dev clang libclang-dev libasound2-dev libxkbcommon-dev libfontconfig-dev \
+  pkg-config libjack-jackd2-dev
 ```
 
 ```bash
@@ -60,6 +61,8 @@ cargo run --release -- --windowed
 ```
 
 Carla's headers and library are found with `pkg-config` (`carla-standalone`).
+The `jack` crate's build also needs `jack.pc` (from `libjack-jackd2-dev`, or
+PipeWire's `pipewire-jack` dev package), even though libjack is loaded at run time.
 To use a Carla you built yourself (≥ 2.6 is needed for CLAP), set
 `CARLA_INCLUDE_DIR=/opt/carla/include/carla` and
 `CARLA_LIB_DIR=/opt/carla/lib/carla`.
