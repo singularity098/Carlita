@@ -32,8 +32,15 @@ off-screen with XComposite and forwarded synthetic input) was dropped
 4. Carlita creates a *holder* window, a child of the main window, and
    reparents the editor into it. The holder sits in the middle of the main
    area, as large as the editor but no larger than the area, so a larger
-   editor is cut off at the right and bottom. Editors whose
-   `WM_NORMAL_HINTS` allow resizing are resized to fill the area.
+   editor is cut off at the right and bottom. Editors that can be resized
+   are resized to fill the area (within their limits) once the area has
+   kept its size for 300 ms. An editor can be resized when its
+   `WM_NORMAL_HINTS` allow it, or when the plugin says so
+   (`PLUGIN_HAS_CUSTOM_RESIZABLE_UI`: VST3 `canResize`, CLAP `can_resize`,
+   LV2 without `ui:noUserResize`). The plugin's word is needed for JUCE
+   plugins: JUCE gives an embedded editor's window a minimum and maximum of
+   its current size, and Carla copies those onto the editor window, so the
+   hints alone say that a resizable JUCE editor (Kaia, for one) cannot be.
 5. The editor draws itself and gets real pointer and touch input from the X
    server, so it works with every toolkit (Wine and yabridge included).
    Many toolkits move their window when they resize it (a plugin's own

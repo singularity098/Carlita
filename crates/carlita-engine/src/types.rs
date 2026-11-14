@@ -158,6 +158,9 @@ pub fn recorder_port(track: TrackId, dry: bool, channel: usize) -> String {
 pub struct PluginRuntimeInfo {
     pub has_custom_ui: bool,
     pub can_embed: bool,
+    /// The plugin says its editor can be resized (VST3 `canResize`, CLAP
+    /// `can_resize`, LV2 without `ui:noUserResize`).
+    pub resizable_ui: bool,
     pub can_drywet: bool,
     pub is_bridge: bool,
     pub parameter_count: u32,

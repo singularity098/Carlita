@@ -222,6 +222,14 @@ export component MainWindow inherits Window {
 
     // ---------------------------------------------------------- properties
     in property <length> strip-width: 6px;
+    // In a window with a frame, the resize handles take the outermost
+    // pixels of each edge, which left a strip under them hardly anything to
+    // grab: the strips then start inside the handles, and are a little wider
+    // (a window's edge is not a screen's edge, where the pointer stops).
+    property <bool> framed: root.docked && !root.window-maximized;
+    property <length> resize-border: 5px;
+    out property <length> edge-inset: root.framed ? root.resize-border : 0;
+    out property <length> edge-width: root.framed ? root.strip-width + 8px : root.strip-width;
 
     // Sidebars: 0 = closed, 1 = open.
     in-out property <float> left-pos: 0;
@@ -281,14 +289,14 @@ export component MainWindow inherits Window {
     // While the mouse hovers an edge strip, its tab shows over the editor's
     // snapshot.
     property <length> uncovered-left: max(editor-area.x,
-        left-strip.hovered ? left-strip.tab-width : 0);
+        left-strip.hovered ? left-strip.x + left-strip.tab-width : 0);
     property <length> uncovered-right: min(editor-area.x + editor-area.width,
-        right-strip.hovered ? root.width - right-strip.tab-width : root.width);
+        right-strip.hovered ? right-strip.x + right-strip.width - right-strip.tab-width : root.width);
     property <length> uncovered-top: max(editor-area.y,
         top-strip.hovered ? top-strip.tab-height : 0);
     property <length> uncovered-bottom: min(editor-area.y + editor-area.height,
         root.toast != "" ? toast-box.y : root.height,
-        bottom-strip.hovered ? root.height - bottom-strip.tab-height : root.height);
+        bottom-strip.hovered ? bottom-strip.y + bottom-strip.height - bottom-strip.tab-height : root.height);
     out property <length> uncovered-x: root.uncovered-left;
     out property <length> uncovered-y: root.uncovered-top;
     out property <length> uncovered-width: root.editor-hidden ? 0 : max(0, root.uncovered-right - root.uncovered-left);
@@ -603,10 +611,10 @@ export component MainWindow inherits Window {
     }
     bottom-strip := BottomStrip {
         visible: !root.keyboard-visible;
-        x: root.strip-width;
-        width: root.width - 2 * root.strip-width;
-        y: root.height - root.strip-width;
-        height: root.strip-width;
+        x: root.edge-inset + root.edge-width;
+        width: root.width - 2 * self.x;
+        y: root.height - root.edge-inset - root.edge-width;
+        height: root.edge-width;
         open => { Options.set-keyboard(true); }
     }
 
@@ -770,9 +778,9 @@ export component MainWindow inherits Window {
     // strip is gone while its own panel is open.
     left-strip := EdgeStrip {
         visible: root.left-pos == 0 || root.left-dragging;
-        x: 0;
+        x: root.edge-inset;
         y: max(root.top-inset, !root.docked ? root.top-shown : 0);
-        width: root.strip-width;
+        width: root.edge-width;
         height: root.height - self.y;
         icon: Icons.menu-line;
         panel-width: root.left-width;
@@ -790,9 +798,9 @@ export component MainWindow inherits Window {
     }
     right-strip := EdgeStrip {
         visible: root.right-pos == 0 || root.right-dragging;
-        x: root.width - root.strip-width;
+        x: root.width - root.edge-inset - root.edge-width;
         y: max(root.top-inset, !root.docked ? root.top-shown : 0);
-        width: root.strip-width;
+        width: root.edge-width;
         height: root.height - self.y;
         right-side: true;
         icon: Icons.system-line;

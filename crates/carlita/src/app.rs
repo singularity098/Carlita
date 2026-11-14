@@ -143,6 +143,9 @@ pub struct App {
     toast_at: Option<Instant>,
     options_page: i32,
     last_sys_refresh: Instant,
+    /// The chain sidebar was out at the last poll (its recording card lists
+    /// the projects, read again each time it comes out).
+    chain_open: bool,
     slots_model: Rc<VecModel<SlotItem>>,
     tracks_model: Rc<VecModel<TrackItem>>,
     meters: Meters,
@@ -315,6 +318,7 @@ impl App {
             toast_at: None,
             options_page: 0,
             last_sys_refresh: Instant::now(),
+            chain_open: false,
             slots_model,
             tracks_model,
             meters: Meters::default(),
@@ -1001,6 +1005,11 @@ impl App {
             self.toast_at = None;
             self.ui().set_toast(ss(""));
         }
+        let chain_open = self.ui().get_left_pos() > 0.0;
+        if chain_open && !self.chain_open {
+            self.refresh_recording();
+        }
+        self.chain_open = chain_open;
         if (self.options_page == 3 || self.options_page == 4)
             && self.last_sys_refresh.elapsed() > Duration::from_secs(4)
         {
@@ -1973,6 +1982,7 @@ impl App {
                         key: slot.0,
                         title: editor_window_title(slot),
                         parent,
+                        resizable: info.resizable_ui,
                     });
                     self.engine.send(Command::ShowEditor { slot, show: true });
                     self.editor = Some(EditorView { slot });
@@ -2110,7 +2120,9 @@ impl App {
         let scale = ui.window().scale_factor();
         let size = ui.window().size();
         let (w, h) = (size.width as f32 / scale, size.height as f32 / scale);
-        let sw = ui.get_strip_width();
+        // Inside the resize handles in a window with a frame (see
+        // `edge-inset` in main.slint).
+        let (inset, sw) = (ui.get_edge_inset(), ui.get_edge_width());
         let (top, bottom) = (ui.get_edge_top(), ui.get_edge_bottom());
         let rect = |x: f32, y: f32, rw: f32, rh: f32| {
             let (x0, y0) = ((x * scale).round(), (y * scale).round());
@@ -2124,16 +2136,17 @@ impl App {
             }
         };
         let none = Area::default();
+        let side = inset + sw;
         let edges = vec![
-            rect(0.0, top, sw, bottom - top),
-            rect(w - sw, top, sw, bottom - top),
+            rect(inset, top, sw, bottom - top),
+            rect(w - side, top, sw, bottom - top),
             if ui.get_edge_top_strip() {
-                rect(sw, 0.0, w - 2.0 * sw, sw)
+                rect(side, inset, w - 2.0 * side, sw)
             } else {
                 none
             },
             if ui.get_edge_bottom_strip() {
-                rect(sw, h - sw, w - 2.0 * sw, sw)
+                rect(side, h - side, w - 2.0 * side, sw)
             } else {
                 none
             },

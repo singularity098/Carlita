@@ -79,6 +79,11 @@ pub enum HostCommand {
         key: u64,
         title: String,
         parent: u32,
+        /// The plugin says its editor can be resized. Its window's size
+        /// hints may still claim a fixed size: JUCE gives an embedded
+        /// editor's window a minimum and maximum of its current size, and
+        /// Carla copies them onto the editor window.
+        resizable: bool,
     },
     /// Stop showing the editor and hand its window back.
     Detach {
@@ -250,6 +255,9 @@ struct Embedder {
     /// When resizable editors should next be fitted to the area (set while
     /// the area keeps changing size).
     fit_due: Option<Instant>,
+    /// Editors whose plugin says they can be resized, whatever their
+    /// window's size hints say.
+    resizable: HashSet<u64>,
 }
 
 impl Embedder {
@@ -288,6 +296,7 @@ impl Embedder {
             f11: None,
             last_f11: None,
             fit_due: None,
+            resizable: HashSet::new(),
         })
     }
 
@@ -332,9 +341,19 @@ impl Embedder {
 
     fn handle(&mut self, cmd: HostCommand) -> Result<()> {
         match cmd {
-            HostCommand::Attach { key, title, parent } => {
+            HostCommand::Attach {
+                key,
+                title,
+                parent,
+                resizable,
+            } => {
                 self.withdrawing.remove(&key);
                 self.release(key);
+                if resizable {
+                    self.resizable.insert(key);
+                } else {
+                    self.resizable.remove(&key);
+                }
                 let known = self.client_windows().into_iter().collect();
                 self.pending.insert(
                     key,
@@ -349,6 +368,7 @@ impl Embedder {
                 self.search_pending();
             }
             HostCommand::Detach { key } => {
+                self.resizable.remove(&key);
                 self.pending.remove(&key);
                 self.withdrawing.remove(&key);
                 self.release(key);
@@ -411,12 +431,20 @@ impl Embedder {
             .is_some_and(|a| a.map_state != MapState::UNMAPPED)
     }
 
-    /// The editor's size limits, if it can be resized.
-    fn size_limits(&self, w: Window) -> Option<((u32, u32), (u32, u32))> {
-        let hints = WmSizeHints::get_normal_hints(&self.conn, w)
-            .ok()?
-            .reply()
-            .ok()?;
+    /// The editor's size limits, if it can be resized. `declared` is whether
+    /// the plugin says it can: then hints that pin the window to one size
+    /// are not believed (JUCE sets them on every embedded editor, and Carla
+    /// copies them onto the editor window), and the plugin itself keeps the
+    /// size within its own limits.
+    fn size_limits(&self, w: Window, declared: bool) -> Option<((u32, u32), (u32, u32))> {
+        let unlimited = ((1, 1), (u32::MAX, u32::MAX));
+        let hints = match WmSizeHints::get_normal_hints(&self.conn, w)
+            .ok()
+            .and_then(|c| c.reply().ok())
+        {
+            Some(h) => h,
+            None => return declared.then_some(unlimited),
+        };
         match hints {
             Some(h) => {
                 let min = h
@@ -425,9 +453,13 @@ impl Embedder {
                 let max = h
                     .max_size
                     .map_or((u32::MAX, u32::MAX), |(w, h)| (w as u32, h as u32));
-                (min != max).then_some((min, max))
+                if min != max {
+                    Some((min, max))
+                } else {
+                    declared.then_some(unlimited)
+                }
             }
-            None => Some(((1, 1), (u32::MAX, u32::MAX))),
+            None => Some(unlimited),
         }
     }
 
@@ -735,7 +767,8 @@ impl Embedder {
             return;
         };
         // Read every time: a plugin may change its mind.
-        let Some((min, max)) = self.size_limits(e.window) else {
+        let declared = self.resizable.contains(&key);
+        let Some((min, max)) = self.size_limits(e.window, declared) else {
             return;
         };
         if self.area.width == 0 || self.area.height == 0 {
