@@ -2,6 +2,7 @@
 
 mod app;
 mod icons;
+mod meters;
 mod midi_in;
 mod scan;
 mod system;

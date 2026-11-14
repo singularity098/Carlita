@@ -475,9 +475,12 @@ export component Dropdown inherits Rectangle {
                         overflow: elide;
                     }
                     row-touch := TouchArea {
+                        // Report the pick before closing: closing destroys
+                        // this row, and Slint skips the rest of the handler
+                        // (the pick was lost, so e.g. the theme never changed).
                         clicked => {
-                            popup.close();
                             root.picked(o);
+                            popup.close();
                         }
                     }
                 }

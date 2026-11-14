@@ -1941,7 +1941,6 @@ dependencies = [
  "cfg_aliases",
  "i-slint-common",
  "i-slint-core",
- "i-slint-renderer-skia",
  "i-slint-renderer-software",
  "vtable",
 ]

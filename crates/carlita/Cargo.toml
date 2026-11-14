@@ -25,7 +25,10 @@ slint = { version = "1.14", default-features = false, features = [
     # Skia antialiases curves and thin lines (round buttons, icons) far
     # better than femtovg, so it is the default; femtovg and software stay
     # available through SLINT_BACKEND (winit-femtovg, winit-software).
-    "renderer-skia",
+    # Skia over OpenGL only: plain "renderer-skia" also builds Skia over
+    # wgpu and prefers it, which on a discrete GPU ran with a "massive
+    # performance footgun" warning and dropped frames.
+    "renderer-skia-opengl",
     "renderer-femtovg",
     "renderer-software",
     "accessibility",

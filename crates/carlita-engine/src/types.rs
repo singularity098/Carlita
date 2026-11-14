@@ -132,7 +132,25 @@ pub enum Command {
         input_client: String,
         output_client: String,
     },
+    /// How often to send [`Event::Meters`]: the display's frame time, so
+    /// meters move at the display's rate (clamped to 4..=50 ms).
+    SetMeterInterval(std::time::Duration),
+    /// The JACK client that records stems (JACK only), or None. Its input
+    /// ports named by [`recorder_port`] are wired to each track's output
+    /// and to the hardware inputs the track takes.
+    SetRecorder(Option<String>),
     Shutdown,
+}
+
+/// Name of a stem recorder input port: channel `channel` (0-based) of
+/// `track`'s output, or of its dry input when `dry`.
+pub fn recorder_port(track: TrackId, dry: bool, channel: usize) -> String {
+    format!(
+        "t{}_{}_{}",
+        track.0,
+        if dry { "dry" } else { "out" },
+        channel + 1
+    )
 }
 
 /// Static facts about a loaded plugin.

@@ -28,6 +28,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use crate::meters::MeterBars;
+
 const UNDO_TIMEOUT: Duration = Duration::from_secs(6);
 /// Row heights of the chain list.
 const ROW_PLUGIN: f32 = 68.0;
@@ -140,6 +142,11 @@ pub struct App {
     slots_model: Rc<VecModel<SlotItem>>,
     tracks_model: Rc<VecModel<TrackItem>>,
     meters: Meters,
+    /// The chain panel's meters as drawn: input, output and track, left
+    /// and right of each.
+    bars: MeterBars<6>,
+    /// The DSP load and latency texts last shown, and when.
+    meter_texts: ((String, String), Instant),
     /// Port names of the hardware inputs tracks can take, in order.
     hw_inputs: Vec<String>,
     /// MIDI devices tracks can take.
@@ -297,6 +304,8 @@ impl App {
             slots_model,
             tracks_model,
             meters: Meters::default(),
+            bars: MeterBars::new(),
+            meter_texts: (Default::default(), Instant::now()),
             hw_inputs: Vec::new(),
             midi_devices: Vec::new(),
             merged_midi: false,
@@ -884,6 +893,7 @@ impl App {
         while let Ok(e) = self.engine.events().try_recv() {
             self.on_engine_event(e);
         }
+        self.animate_meters();
         let host_events: Vec<HostEvent> = self
             .editor_host
             .as_ref()
@@ -1302,31 +1312,34 @@ impl App {
             .iter()
             .find(|(t, _)| *t == self.view_track)
             .map_or(m.input, |(_, l)| *l);
-        ui.set_in_left(input[0]);
-        ui.set_in_right(input[1]);
-        ui.set_out_left(m.output[0]);
-        ui.set_out_right(m.output[1]);
-        self.show_signals(&m.hardware_inputs);
-        let load = format!("{:.0}%", m.dsp_load);
-        let latency = format!("{:.1} ms", m.total_latency_ms());
-        ui.set_dsp_load(ss(&load));
-        ui.set_latency(ss(&latency));
-        if m.xruns != self.meters.xruns
-            || (m.dsp_load - self.meters.dsp_load).abs() >= 1.0
-            || m.latencies != self.meters.latencies
-        {
-            let o = ui.global::<Options>();
-            o.set_dsp_load(ss(&load));
-            o.set_latency(ss(&latency));
-            o.set_xruns(m.xruns as i32);
-        }
-        let level = m
+        let track = m
             .tracks
             .iter()
             .find(|(t, _)| *t == self.view_track)
             .map_or([0.0; 2], |(_, l)| *l);
-        ui.set_track_left(level[0]);
-        ui.set_track_right(level[1]);
+        // Drawn by `animate_meters`, once per display frame.
+        self.bars.set([
+            input[0], input[1], m.output[0], m.output[1], track[0], track[1],
+        ]);
+        self.show_signals(&m.hardware_inputs);
+        let load = format!("{:.0}%", m.dsp_load);
+        let latency = format!("{:.1} ms", m.total_latency_ms());
+        // Only when they change, and a few times a second at most: the load
+        // changes with nearly every report, and each change redraws the
+        // whole window.
+        if self.meter_texts.0 != (load.clone(), latency.clone())
+            && self.meter_texts.1.elapsed() >= Duration::from_millis(250)
+        {
+            ui.set_dsp_load(ss(&load));
+            ui.set_latency(ss(&latency));
+            let o = ui.global::<Options>();
+            o.set_dsp_load(ss(&load));
+            o.set_latency(ss(&latency));
+            self.meter_texts = ((load.clone(), latency.clone()), Instant::now());
+        }
+        if m.xruns != self.meters.xruns {
+            ui.global::<Options>().set_xruns(m.xruns as i32);
+        }
         // Level bars on the track tabs; only redraw tabs whose level moved.
         for i in 0..self.tracks_model.row_count() {
             let Some(mut item) = self.tracks_model.row_data(i) else {
@@ -1355,6 +1368,21 @@ impl App {
         if changed {
             self.refresh_slots();
         }
+    }
+
+    /// Draws the chain panel's meters, falling smoothly between the
+    /// engine's reports. Called once per display frame.
+    fn animate_meters(&mut self) {
+        let Some(l) = self.bars.step(Instant::now()) else {
+            return;
+        };
+        let ui = self.ui();
+        ui.set_in_left(l[0]);
+        ui.set_in_right(l[1]);
+        ui.set_out_left(l[2]);
+        ui.set_out_right(l[3]);
+        ui.set_track_left(l[4]);
+        ui.set_track_right(l[5]);
     }
 
     // ================================================================ chain
@@ -2696,6 +2724,7 @@ impl App {
             let interval = Duration::from_micros(1_000_000_000 / mhz as u64);
             log::info!("display refresh {:.1} Hz", mhz as f64 / 1000.0);
             self.poll_timer.set_interval(interval);
+            self.engine.send(Command::SetMeterInterval(interval));
         }
     }
 
