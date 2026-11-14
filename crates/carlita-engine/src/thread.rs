@@ -224,6 +224,11 @@ fn clean_name(name: &str, max: usize) -> String {
         .to_string()
 }
 
+/// Carla 2.6's `PLUGIN_HAS_CUSTOM_RESIZABLE_UI`: the plugin says its editor
+/// can be resized. Not in Carla 2.5's headers (nor set by it; the bit is
+/// unused there).
+const PLUGIN_HAS_CUSTOM_RESIZABLE_UI: u32 = 0x8000;
+
 fn is_input(hints: u32) -> bool {
     hints & sys::PATCHBAY_PORT_IS_INPUT != 0
 }
@@ -758,7 +763,7 @@ impl Engine {
         PluginRuntimeInfo {
             has_custom_ui: hints & sys::PLUGIN_HAS_CUSTOM_UI != 0,
             can_embed: hints & sys::PLUGIN_HAS_CUSTOM_EMBED_UI != 0,
-            resizable_ui: hints & sys::PLUGIN_HAS_CUSTOM_RESIZABLE_UI != 0,
+            resizable_ui: hints & PLUGIN_HAS_CUSTOM_RESIZABLE_UI != 0,
             can_drywet: hints & sys::PLUGIN_CAN_DRYWET != 0,
             is_bridge: hints & sys::PLUGIN_IS_BRIDGE != 0,
             parameter_count: self.host.parameter_count(id),

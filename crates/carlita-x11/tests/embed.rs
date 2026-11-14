@@ -384,7 +384,6 @@ fn edges_f11_and_focus() {
     // the left half of the window, and so the editor's left half.
     host.send(HostCommand::SetEdges {
         parent: main,
-        resizable: false,
         edges: vec![Area {
             x: 0,
             y: 0,
