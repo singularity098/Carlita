@@ -22,8 +22,9 @@ touchscreen.
   options set how many inputs the interface has.
 * Add, remove, reorder, split and bypass plugins while audio keeps running.
 * Tracks are tabs in the top bar, which Carlita draws itself in place of the
-  window manager's title bar. In fullscreen, swipe down from the **top** edge
-  to bring it in.
+  window manager's title bar. In fullscreen, it comes down when the mouse
+  rests at the **top** edge (and goes when the mouse leaves it), or swipe
+  down from the top edge.
 * Swipe in from the **left** edge for the chain and from the **right** edge
   for options (audio, presets, MIDI learn, WiFi, Bluetooth, display, system),
   and up from the **bottom** edge for the on-screen piano. With a mouse, a
@@ -111,6 +112,7 @@ Both tests skip themselves when JACK or X is not available, unless
 | `CARLITA_HOME=dir` | Keep settings, presets and the plugin cache below `dir` |
 | `SLINT_BACKEND=winit-software` | Software rendering on machines without OpenGL |
 | `SLINT_BACKEND=winit-femtovg` | The lighter femtovg GPU renderer instead of the default Skia over OpenGL (rougher edges on curves) |
+| `CARLITA_LAZY_REDRAW=1` | Draw the window only when something on it changes, instead of on every display frame (less GPU work while idle, but sidebars may stutter on high-refresh displays) |
 
 Files are stored in `~/.config/carlita/settings.json`,
 `~/.local/share/carlita/presets/*.json` and `~/.cache/carlita/plugins.json`.

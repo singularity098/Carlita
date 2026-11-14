@@ -38,7 +38,7 @@ The tracks are picked from a bar along the top of the screen, which also holds t
 - Browser-style tabs, one per track, with a level bar and a mute badge, and a "+" tab to add a track
 - Tapping a tab shows that track's chain and the plugin last shown for it; tapping the selected tab opens the chain sidebar
 - Windowed: the bar is docked at the top and replaces the window manager's title bar (drag to move, double-tap to maximize, fullscreen / minimize / maximize / close buttons, resize from the window border)
-- Fullscreen: the bar is hidden and slides down with a swipe from the top edge (or the tab that shows while the mouse hovers there); it closes with a swipe up, a tap outside, or after picking a track
+- Fullscreen: the bar is hidden and slides down with a swipe from the top edge, or as soon as the mouse rests at the top edge (not while a sidebar is out); it closes with a swipe up, a tap outside, after picking a track, or, when the mouse brought it, when the mouse leaves it
 
 ## Left sidebar: the chain
 
@@ -65,7 +65,7 @@ Swiping in from the right edge opens settings, including WiFi and Bluetooth.
 - **WiFi:** on/off toggle, list of networks, connect with an on-screen keyboard (via NetworkManager over D-Bus)
 - **Bluetooth:** on/off toggle, list of paired and nearby devices, pair and connect (via BlueZ over D-Bus)
 - **Display:** theme, fullscreen / windowed, plugin editor size (100–200% on top of the desktop's scale, for touchscreens), brightness if the hardware supports it
-- **System:** icon buttons at the top of the sidebar whatever the page (rescan plugins, restart app, reboot, shut down), with Quit in the top right corner, where windows have their close button; the app version under the page title (decided 2026-11-12: no System page)
+- **System:** icon buttons at the top of the sidebar whatever the page (rescan plugins, restart app, reboot, shut down) (decided 2026-11-14: no Quit button there; the track bar's close button quits); the app version under the page title (decided 2026-11-12: no System page)
 - Toggles apply immediately; no separate Save step
 - Almost everything that can be pressed has a short hover tip (shown after the mouse rests on it ~0.6 s); the edge-strip tabs and the sidebar's page tabs do not need one
 - Also has a button which can toggle on/off a virtual musical keyboard on the bottom of the screen, which may be used to send midi notes to the plugins

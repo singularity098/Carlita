@@ -138,7 +138,6 @@ export global Options {
     in property <string> version;
     callback reboot;
     callback shutdown;
-    callback quit;
 }
 
 component ListRow inherits Rectangle {
@@ -692,8 +691,7 @@ export component OptionsPanel inherits Rectangle {
 
         VerticalLayout {
             // The header stays at the top whatever the page: the page's
-            // title, then the app and computer buttons, with Quit in the
-            // top right corner, where windows have their close button.
+            // title, then the computer's reboot and power buttons.
             HorizontalLayout {
                 padding-left: Theme.pad;
                 padding-right: Theme.pad;
@@ -744,17 +742,6 @@ export component OptionsPanel inherits Rectangle {
                             danger: true;
                             tip: "Shut down the computer (asks first)";
                             clicked => { Options.shutdown(); }
-                        }
-                    }
-                    // A gap, so Quit is not tapped by mistake for its neighbour.
-                    Rectangle { width: 8px; }
-                    VerticalLayout {
-                        alignment: center;
-                        IconButton {
-                            icon: Icons.close;
-                            danger: true;
-                            tip: "Quit Carlita (asks first)";
-                            clicked => { Options.quit(); }
                         }
                     }
                 }

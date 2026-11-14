@@ -77,7 +77,6 @@ enum Confirm {
     DeleteTrack(TrackId),
     Reboot,
     Shutdown,
-    Quit,
 }
 
 /// The plugin editor shown (or about to be shown) in the main area.
@@ -922,8 +921,6 @@ impl App {
         });
 
         // ---- options: system
-        on!(o, on_quit, |a| a
-            .open_confirm(Confirm::Quit, "Quit Carlita?".into()));
         on!(o, on_reboot, |a| a.open_confirm(
             Confirm::Reboot,
             "Reboot the computer?".into()
@@ -2433,7 +2430,6 @@ impl App {
             }
             Confirm::Reboot => self.system.send(SysCmd::Reboot),
             Confirm::Shutdown => self.system.send(SysCmd::PowerOff),
-            Confirm::Quit => self.quit(),
         }
     }
 
