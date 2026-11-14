@@ -1,6 +1,7 @@
 //! Stem recording (JACK only): Carlita's own JACK client, with an input
 //! for each channel of each track's output (and, if asked, of the hardware
-//! inputs the track takes), writes one WAV file per track and take.
+//! inputs the track takes), writes one file per track and take (WAV or
+//! FLAC, see `stem_file`).
 //!
 //! The engine wires the client up (`Command::SetRecorder`); its ports are
 //! named by `carlita_engine::recorder_port`. All ports belong to this one
@@ -8,7 +9,9 @@
 //! to the sample. The audio thread only copies samples into ring buffers;
 //! a writer thread writes the files.
 
+use crate::stem_file::{self, StemFile};
 use anyhow::{bail, Context, Result};
+use carlita_core::settings::RecordFormat;
 use carlita_core::TrackId;
 use carlita_engine::recorder_port;
 use jack::{AudioIn, Client, ClientOptions, Control, Port, ProcessScope};
@@ -25,7 +28,7 @@ pub const CLIENT_NAME: &str = "Carlita.recorder";
 const MAX_CHANNELS: usize = 8;
 /// How much audio the ring buffers hold while the writer catches up.
 const BUFFER_SECONDS: usize = 4;
-/// How often the WAV headers are brought up to date, so a crash or power
+/// How often the files' headers are brought up to date, so a crash or power
 /// loss leaves files that play up to there.
 const FLUSH_EVERY: Duration = Duration::from_secs(2);
 
@@ -119,7 +122,8 @@ type WriterResult = std::result::Result<(), String>;
 
 struct Take {
     dir: PathBuf,
-    writer: Option<std::thread::JoinHandle<WriterResult>>,
+    /// One per file, so FLAC encoding spreads over the cores.
+    writers: Vec<std::thread::JoinHandle<WriterResult>>,
 }
 
 /// The recorder's JACK client, open while a project is.
@@ -224,7 +228,7 @@ impl Recorder {
     }
 
     /// Starts a new take in a new "Take NN" folder of `project`.
-    pub fn start(&mut self, project: &Path) -> Result<PathBuf> {
+    pub fn start(&mut self, project: &Path, format: RecordFormat) -> Result<PathBuf> {
         if self.take.is_some() {
             bail!("already recording");
         }
@@ -239,28 +243,36 @@ impl Recorder {
         let mut prods = Vec::new();
         let mut sinks = Vec::new();
         for (track, dry, channels) in stream_layout(&self.tracks) {
+            let ext = stem_file::extension(format);
             let file = dir.join(if dry {
-                format!("{} (dry).wav", names[track])
+                format!("{} (dry).{ext}", names[track])
             } else {
-                format!("{}.wav", names[track])
+                format!("{}.{ext}", names[track])
             });
-            let spec = hound::WavSpec {
-                channels: channels as u16,
-                sample_rate: self.sample_rate,
-                bits_per_sample: 32,
-                sample_format: hound::SampleFormat::Float,
-            };
-            let wav = hound::WavWriter::create(&file, spec)
+            let stem = StemFile::create(&file, format, channels, self.sample_rate)
                 .with_context(|| format!("could not create {}", file.display()))?;
             let (p, c) = RingBuffer::new(self.sample_rate as usize * channels * BUFFER_SECONDS);
             prods.push(p);
-            sinks.push((c, wav, file));
+            sinks.push((c, stem, file));
         }
-        write_take_info(&dir, self.sample_rate, &self.tracks);
-        let writer = std::thread::Builder::new()
-            .name("carlita-recorder".into())
-            .spawn(move || write_files(sinks))
-            .context("could not start the writer")?;
+        write_take_info(&dir, self.sample_rate, format, &self.tracks);
+        let mut writers = Vec::new();
+        for sink in sinks {
+            let w = std::thread::Builder::new()
+                .name("carlita-recorder".into())
+                .spawn(move || write_files(vec![sink]));
+            match w {
+                Ok(w) => writers.push(w),
+                Err(e) => {
+                    // The ones started end once `prods` is dropped.
+                    drop(prods);
+                    for w in writers {
+                        let _ = w.join();
+                    }
+                    bail!("could not start the writer: {e}");
+                }
+            }
+        }
         self.shared.frames.store(0, Ordering::Relaxed);
         self.shared.dropped.store(0, Ordering::Relaxed);
         self.shared.paused.store(false, Ordering::Relaxed);
@@ -269,7 +281,7 @@ impl Recorder {
         }
         self.take = Some(Take {
             dir: dir.clone(),
-            writer: Some(writer),
+            writers,
         });
         Ok(dir)
     }
@@ -301,11 +313,16 @@ impl Recorder {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        let result = take
-            .writer
-            .take()
-            .and_then(|w| w.join().ok())
-            .unwrap_or_else(|| Err("the writer stopped".into()));
+        // Every writer finishes its file; the first error is reported.
+        let mut result: WriterResult = Ok(());
+        for w in take.writers.drain(..) {
+            let r = w
+                .join()
+                .unwrap_or_else(|_| Err("the writer stopped".into()));
+            if result.is_ok() {
+                result = r;
+            }
+        }
         self.shared.paused.store(false, Ordering::Relaxed);
         match result {
             Ok(()) => Ok(take.dir),
@@ -346,31 +363,20 @@ fn stream_layout(tracks: &[TrackSpec]) -> Vec<(usize, bool, usize)> {
 
 /// Writes what the audio thread sends until every buffer is dropped and
 /// empty.
-fn write_files(
-    mut sinks: Vec<(
-        Consumer<f32>,
-        hound::WavWriter<std::io::BufWriter<std::fs::File>>,
-        PathBuf,
-    )>,
-) -> WriterResult {
+fn write_files(mut sinks: Vec<(Consumer<f32>, StemFile, PathBuf)>) -> WriterResult {
     let mut error: Option<String> = None;
     let mut last_flush = Instant::now();
     loop {
         let mut done = true;
-        for (c, wav, file) in sinks.iter_mut() {
-            // Read whole frames' worth only matters for the header; hound
-            // counts samples, and the audio thread writes whole frames.
+        for (c, stem, file) in sinks.iter_mut() {
             let abandoned = c.is_abandoned();
             let n = c.slots();
             if n > 0 {
                 if let Ok(chunk) = c.read_chunk(n) {
                     let (a, b) = chunk.as_slices();
                     if error.is_none() {
-                        for s in a.iter().chain(b) {
-                            if let Err(e) = wav.write_sample(*s) {
-                                error = Some(format!("{}: {e}", file.display()));
-                                break;
-                            }
+                        if let Err(e) = stem.write(a).and_then(|()| stem.write(b)) {
+                            error = Some(format!("{}: {e}", file.display()));
                         }
                     }
                     chunk.commit_all();
@@ -385,16 +391,16 @@ fn write_files(
         }
         if last_flush.elapsed() >= FLUSH_EVERY {
             last_flush = Instant::now();
-            for (_, wav, file) in sinks.iter_mut() {
-                if let Err(e) = wav.flush() {
+            for (_, stem, file) in sinks.iter_mut() {
+                if let Err(e) = stem.flush() {
                     error.get_or_insert_with(|| format!("{}: {e}", file.display()));
                 }
             }
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    for (_, wav, file) in sinks {
-        if let Err(e) = wav.finalize() {
+    for (_, stem, file) in sinks {
+        if let Err(e) = stem.finish() {
             error.get_or_insert_with(|| format!("{}: {e}", file.display()));
         }
     }
@@ -453,14 +459,19 @@ pub fn safe_name(name: &str) -> String {
 }
 
 /// A note next to the files, for whoever opens the take in a DAW.
-fn write_take_info(dir: &Path, sample_rate: u32, tracks: &[TrackSpec]) {
+fn write_take_info(dir: &Path, sample_rate: u32, format: RecordFormat, tracks: &[TrackSpec]) {
     let names = file_names(tracks);
     let mut text = format!(
-        "Recorded by Carlita {}\nSample rate: {sample_rate} Hz, 32-bit float WAV\n\
+        "Recorded by Carlita {}\nSample rate: {sample_rate} Hz, {}{}\n\
          Every file starts at the same moment. Track files are what the track \
          played (after its plugins); \"(dry)\" files are its inputs before any \
          plugin, so they are ahead of the track file by the chain's latency.\n\nTracks:\n",
-        env!("CARGO_PKG_VERSION")
+        env!("CARGO_PKG_VERSION"),
+        stem_file::describe(format),
+        match format {
+            RecordFormat::Wav => " (files over 4 GB are RF64, the 64-bit WAV)",
+            RecordFormat::Flac => "",
+        },
     );
     for (n, t) in names.iter().zip(tracks) {
         text += &format!(
@@ -505,13 +516,7 @@ mod tests {
     fn writer_writes_interleaved_frames() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("a.wav");
-        let spec = hound::WavSpec {
-            channels: 2,
-            sample_rate: 48_000,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        };
-        let wav = hound::WavWriter::create(&file, spec).unwrap();
+        let wav = StemFile::create(&file, RecordFormat::Wav, 2, 48_000).unwrap();
         let (mut p, c) = RingBuffer::new(64);
         for s in [0.1f32, -0.1, 0.2, -0.2] {
             p.push(s).unwrap();

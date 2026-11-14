@@ -11,7 +11,7 @@ use crate::{
 use carlita_core::midi::{self, BypassChange, MidiAction, MidiMapping, MidiMessage};
 use carlita_core::paths::AppPaths;
 use carlita_core::rig::{self, Location, Row, RowKind, Spot};
-use carlita_core::settings::DisplaySettings;
+use carlita_core::settings::{DisplaySettings, RecordFormat};
 use carlita_core::{
     CatalogFilter, ChainSlot, PluginCatalog, PluginCategory, PluginFormat, Preset, PresetStore,
     Rig, Settings, SlotId, TrackId, TrackMidi,
@@ -719,6 +719,15 @@ impl App {
             a.settings.recording.record_dry = v;
             a.save_settings();
             a.sync_recorder();
+            a.refresh_recording();
+        });
+        on!(r, on_set_format, |a, v: i32| {
+            a.settings.recording.format = if v == 1 {
+                RecordFormat::Flac
+            } else {
+                RecordFormat::Wav
+            };
+            a.save_settings();
             a.refresh_recording();
         });
         on!(r, on_record, |a| a.record());
@@ -3080,7 +3089,7 @@ impl App {
         let Some(r) = self.recorder.as_mut() else {
             return;
         };
-        let result = r.start(&project);
+        let result = r.start(&project, self.settings.recording.format);
         match result {
             Ok(dir) => {
                 self.rec_dropped = 0;
@@ -3186,6 +3195,10 @@ impl App {
             r.set_time(ss(&self.rec_time));
         }
         r.set_dry(self.settings.recording.record_dry);
+        r.set_format(match self.settings.recording.format {
+            RecordFormat::Wav => 0,
+            RecordFormat::Flac => 1,
+        });
     }
 }
 
