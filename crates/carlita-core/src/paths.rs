@@ -11,6 +11,9 @@ pub struct AppPaths {
     pub data_dir: PathBuf,
     /// `~/.cache/carlita` – plugin scan cache.
     pub cache_dir: PathBuf,
+    /// `~/Music/Carlita` – recording projects, unless the user picks
+    /// another folder.
+    pub default_projects_dir: PathBuf,
 }
 
 impl AppPaths {
@@ -26,6 +29,14 @@ impl AppPaths {
                 config_dir: dirs.config_dir().to_path_buf(),
                 data_dir: dirs.data_dir().to_path_buf(),
                 cache_dir: dirs.cache_dir().to_path_buf(),
+                default_projects_dir: directories::UserDirs::new()
+                    .map(|u| {
+                        u.audio_dir()
+                            .map(|a| a.to_path_buf())
+                            .unwrap_or_else(|| u.home_dir().join("Music"))
+                    })
+                    .unwrap_or_else(|| dirs.data_dir().to_path_buf())
+                    .join("Carlita"),
             },
             None => Self::rooted(std::env::temp_dir().join("carlita")),
         }
@@ -37,6 +48,7 @@ impl AppPaths {
             config_dir: root.join("config"),
             data_dir: root.join("data"),
             cache_dir: root.join("cache"),
+            default_projects_dir: root.join("projects"),
         }
     }
 

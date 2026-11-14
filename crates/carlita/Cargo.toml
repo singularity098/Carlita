@@ -18,6 +18,11 @@ log.workspace = true
 env_logger.workspace = true
 crossbeam-channel.workspace = true
 midir = "0.10"
+# Stem recording: our own JACK client (libjack is loaded at run time, as
+# Carla does), lock-free buffers from the audio thread, WAV files.
+jack = "0.14"
+rtrb = "0.4"
+hound = "3.5"
 slint = { version = "1.14", default-features = false, features = [
     "std",
     "compat-1-2",
@@ -25,13 +30,19 @@ slint = { version = "1.14", default-features = false, features = [
     # Skia antialiases curves and thin lines (round buttons, icons) far
     # better than femtovg, so it is the default; femtovg and software stay
     # available through SLINT_BACKEND (winit-femtovg, winit-software).
-    "renderer-skia",
+    # Skia over OpenGL only: plain "renderer-skia" also builds Skia over
+    # wgpu and prefers it, which on a discrete GPU ran with a "massive
+    # performance footgun" warning and dropped frames.
+    "renderer-skia-opengl",
     "renderer-femtovg",
     "renderer-software",
     "accessibility",
     # Moving and resizing the frameless window with the window manager.
     "unstable-winit-030",
 ] }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [build-dependencies]
 slint-build = "1.14"

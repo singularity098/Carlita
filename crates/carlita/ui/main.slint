@@ -20,13 +20,13 @@ import { BigButton, BigSlider, Toggle, SectionTitle } from "widgets.slint";
 import { SlotItem, TrackItem, PluginItem, ParamItem, WifiItem, BtItem, MappingItem, IoChoice } from "types.slint";
 import { ChainPanel, TrackIo } from "chain.slint";
 import { PluginBrowser } from "browser.slint";
-import { OptionsPanel, Options } from "options.slint";
+import { OptionsPanel, Options, Recording } from "options.slint";
 import { TextPrompt, Piano, TextUtil } from "keyboards.slint";
 import { TrackBar } from "trackbar.slint";
 import { Icon, Icons, IconArt } from "icons.slint";
 import { Tips, TooltipLayer } from "tooltip.slint";
 
-export { Theme, ThemeLook, Options, TextUtil, IconArt, TrackIo, SlotItem, TrackItem, PluginItem, ParamItem, WifiItem, BtItem, MappingItem, IoChoice }
+export { Theme, ThemeLook, Options, Recording, TextUtil, IconArt, TrackIo, SlotItem, TrackItem, PluginItem, ParamItem, WifiItem, BtItem, MappingItem, IoChoice }
 
 // A sidebar that follows the finger and snaps open or closed.
 component EdgeStrip inherits Rectangle {

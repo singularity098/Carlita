@@ -5,8 +5,8 @@ use crate::midi_in::MidiListener;
 use crate::scan::{self, ScanMsg};
 use crate::system::{SysCmd, SysEvent, SystemWorker};
 use crate::{
-    BtItem, IoChoice, MainWindow, MappingItem, Options, ParamItem, PluginItem, SlotItem, TextUtil,
-    Theme, TrackIo, TrackItem, WifiItem,
+    BtItem, IoChoice, MainWindow, MappingItem, Options, ParamItem, PluginItem, Recording, SlotItem,
+    TextUtil, Theme, TrackIo, TrackItem, WifiItem,
 };
 use carlita_core::midi::{self, BypassChange, MidiAction, MidiMapping, MidiMessage};
 use carlita_core::paths::AppPaths;
@@ -27,6 +27,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
+
+use crate::meters::MeterBars;
+use crate::recorder::{safe_name, Recorder, TrackSpec};
+use std::path::{Path, PathBuf};
 
 const UNDO_TIMEOUT: Duration = Duration::from_secs(6);
 /// Row heights of the chain list.
@@ -64,6 +68,8 @@ enum Prompt {
     WifiPassword(String),
     Search,
     RenameTrack(TrackId),
+    NewProject,
+    ProjectsFolder,
 }
 
 enum Confirm {
@@ -140,6 +146,11 @@ pub struct App {
     slots_model: Rc<VecModel<SlotItem>>,
     tracks_model: Rc<VecModel<TrackItem>>,
     meters: Meters,
+    /// The chain panel's meters as drawn: input, output and track, left
+    /// and right of each.
+    bars: MeterBars<6>,
+    /// The DSP load and latency texts last shown, and when.
+    meter_texts: ((String, String), Instant),
     /// Port names of the hardware inputs tracks can take, in order.
     hw_inputs: Vec<String>,
     /// MIDI devices tracks can take.
@@ -157,6 +168,16 @@ pub struct App {
     signal_model: Rc<VecModel<bool>>,
     /// The timer that runs `poll`, paced to the display's refresh rate.
     poll_timer: Rc<slint::Timer>,
+    /// The driver the engine runs on ("" while it is stopped).
+    engine_driver: String,
+    /// The recording project's folder, while one is open.
+    project: Option<PathBuf>,
+    /// The stem recorder's JACK client, while a project is open and the
+    /// engine runs on JACK.
+    recorder: Option<Recorder>,
+    /// The take's length last shown, and the gaps last reported.
+    rec_time: String,
+    rec_dropped: u64,
     /// When the window's size and place were last noted.
     last_window_check: Instant,
 }
@@ -297,6 +318,8 @@ impl App {
             slots_model,
             tracks_model,
             meters: Meters::default(),
+            bars: MeterBars::new(),
+            meter_texts: (Default::default(), Instant::now()),
             hw_inputs: Vec::new(),
             midi_devices: Vec::new(),
             merged_midi: false,
@@ -305,6 +328,11 @@ impl App {
             signal_until: Vec::new(),
             signal_model: Rc::new(VecModel::default()),
             poll_timer: Rc::new(slint::Timer::default()),
+            engine_driver: String::new(),
+            project: None,
+            recorder: None,
+            rec_time: String::new(),
+            rec_dropped: 0,
             last_window_check: Instant::now(),
         }));
 
@@ -665,9 +693,37 @@ impl App {
                 2 => a.refresh_midi_options(),
                 3 => a.system.send(SysCmd::RefreshWifi),
                 4 => a.system.send(SysCmd::RefreshBt),
+                6 => a.refresh_recording(),
                 _ => {}
             }
         });
+
+        // ---- recording
+        let r = ui.global::<Recording>();
+        on!(r, on_new_project, |a| a.open_prompt(
+            Prompt::NewProject,
+            "Name of the new project",
+            String::new(),
+            false
+        ));
+        on!(r, on_open_project, |a, name: SharedString| {
+            let path = a.projects_dir().join(name.as_str());
+            a.open_project(path);
+        });
+        on!(r, on_close_project, |a| a.close_project());
+        on!(r, on_change_location, |a| {
+            let text = a.projects_dir().display().to_string();
+            a.open_prompt(Prompt::ProjectsFolder, "Projects folder", text, false);
+        });
+        on!(r, on_set_dry, |a, v: bool| {
+            a.settings.recording.record_dry = v;
+            a.save_settings();
+            a.sync_recorder();
+            a.refresh_recording();
+        });
+        on!(r, on_record, |a| a.record());
+        on!(r, on_pause, |a| a.pause_recording());
+        on!(r, on_stop, |a| a.stop_recording());
 
         // ---- options: audio
         let o = ui.global::<Options>();
@@ -884,6 +940,8 @@ impl App {
         while let Ok(e) = self.engine.events().try_recv() {
             self.on_engine_event(e);
         }
+        self.animate_meters();
+        self.show_take_time();
         let host_events: Vec<HostEvent> = self
             .editor_host
             .as_ref()
@@ -1052,16 +1110,18 @@ impl App {
         self.rig.slots().map(load_of).collect()
     }
 
-    fn load_rig(&self) {
+    fn load_rig(&mut self) {
         self.engine.send(Command::LoadRig {
             loads: self.loads(),
             layout: self.rig.layout(),
         });
+        self.sync_recorder();
     }
 
     /// Sends the rig's structure to the engine and redraws the chain.
     fn rig_changed(&mut self) {
         self.engine.send(Command::SetLayout(self.rig.layout()));
+        self.sync_recorder();
         self.refresh_slots();
     }
 
@@ -1092,6 +1152,7 @@ impl App {
                 buffer_size,
             } => {
                 self.engine_running = true;
+                self.engine_driver = driver.clone();
                 let ui = self.ui();
                 let o = ui.global::<Options>();
                 o.set_engine_running(true);
@@ -1118,9 +1179,14 @@ impl App {
                 self.engine.send(Command::QueryDrivers);
                 self.probe_sent = None;
                 self.update_probe();
+                self.sync_recorder();
+                self.refresh_recording();
             }
             Event::StartFailed(err) => {
                 self.engine_running = false;
+                self.engine_driver.clear();
+                self.drop_recorder();
+                self.refresh_recording();
                 let ui = self.ui();
                 let o = ui.global::<Options>();
                 o.set_engine_running(false);
@@ -1146,6 +1212,9 @@ impl App {
             }
             Event::Stopped => {
                 self.engine_running = false;
+                self.engine_driver.clear();
+                self.drop_recorder();
+                self.refresh_recording();
                 self.ui().global::<Options>().set_engine_running(false);
             }
             Event::Drivers(drivers) => {
@@ -1302,31 +1371,39 @@ impl App {
             .iter()
             .find(|(t, _)| *t == self.view_track)
             .map_or(m.input, |(_, l)| *l);
-        ui.set_in_left(input[0]);
-        ui.set_in_right(input[1]);
-        ui.set_out_left(m.output[0]);
-        ui.set_out_right(m.output[1]);
-        self.show_signals(&m.hardware_inputs);
-        let load = format!("{:.0}%", m.dsp_load);
-        let latency = format!("{:.1} ms", m.total_latency_ms());
-        ui.set_dsp_load(ss(&load));
-        ui.set_latency(ss(&latency));
-        if m.xruns != self.meters.xruns
-            || (m.dsp_load - self.meters.dsp_load).abs() >= 1.0
-            || m.latencies != self.meters.latencies
-        {
-            let o = ui.global::<Options>();
-            o.set_dsp_load(ss(&load));
-            o.set_latency(ss(&latency));
-            o.set_xruns(m.xruns as i32);
-        }
-        let level = m
+        let track = m
             .tracks
             .iter()
             .find(|(t, _)| *t == self.view_track)
             .map_or([0.0; 2], |(_, l)| *l);
-        ui.set_track_left(level[0]);
-        ui.set_track_right(level[1]);
+        // Drawn by `animate_meters`, once per display frame.
+        self.bars.set([
+            input[0],
+            input[1],
+            m.output[0],
+            m.output[1],
+            track[0],
+            track[1],
+        ]);
+        self.show_signals(&m.hardware_inputs);
+        let load = format!("{:.0}%", m.dsp_load);
+        let latency = format!("{:.1} ms", m.total_latency_ms());
+        // Only when they change, and a few times a second at most: the load
+        // changes with nearly every report, and each change redraws the
+        // whole window.
+        if self.meter_texts.0 != (load.clone(), latency.clone())
+            && self.meter_texts.1.elapsed() >= Duration::from_millis(250)
+        {
+            ui.set_dsp_load(ss(&load));
+            ui.set_latency(ss(&latency));
+            let o = ui.global::<Options>();
+            o.set_dsp_load(ss(&load));
+            o.set_latency(ss(&latency));
+            self.meter_texts = ((load.clone(), latency.clone()), Instant::now());
+        }
+        if m.xruns != self.meters.xruns {
+            ui.global::<Options>().set_xruns(m.xruns as i32);
+        }
         // Level bars on the track tabs; only redraw tabs whose level moved.
         for i in 0..self.tracks_model.row_count() {
             let Some(mut item) = self.tracks_model.row_data(i) else {
@@ -1355,6 +1432,21 @@ impl App {
         if changed {
             self.refresh_slots();
         }
+    }
+
+    /// Draws the chain panel's meters, falling smoothly between the
+    /// engine's reports. Called once per display frame.
+    fn animate_meters(&mut self) {
+        let Some(l) = self.bars.step(Instant::now()) else {
+            return;
+        };
+        let ui = self.ui();
+        ui.set_in_left(l[0]);
+        ui.set_in_right(l[1]);
+        ui.set_out_left(l[2]);
+        ui.set_out_right(l[3]);
+        ui.set_track_left(l[4]);
+        ui.set_track_right(l[5]);
     }
 
     // ================================================================ chain
@@ -2246,6 +2338,25 @@ impl App {
                 }
                 self.refresh_slots();
             }
+            Prompt::NewProject => {
+                if text.trim().is_empty() {
+                    self.toast("Please enter a name", true);
+                } else {
+                    let path = self.projects_dir().join(safe_name(&text));
+                    self.open_project(path);
+                }
+            }
+            Prompt::ProjectsFolder => {
+                let path = expand_home(text.trim());
+                match std::fs::create_dir_all(&path) {
+                    Ok(()) => {
+                        self.settings.recording.projects_dir = path.display().to_string();
+                        self.save_settings();
+                        self.refresh_recording();
+                    }
+                    Err(e) => self.toast(format!("Could not use {}: {e}", path.display()), true),
+                }
+            }
             Prompt::Search => {
                 self.ui().set_browser_search(ss(&text));
                 self.filter.text = text;
@@ -2696,6 +2807,7 @@ impl App {
             let interval = Duration::from_micros(1_000_000_000 / mhz as u64);
             log::info!("display refresh {:.1} Hz", mhz as f64 / 1000.0);
             self.poll_timer.set_interval(interval);
+            self.engine.send(Command::SetMeterInterval(interval));
         }
     }
 
@@ -2724,6 +2836,8 @@ impl App {
     pub fn shutdown(&mut self) {
         self.note_window_state();
         self.save_settings();
+        // Finishes a take that is still being recorded.
+        self.drop_recorder();
         self.release_editors();
         self.engine.send(Command::Stop);
     }
@@ -2835,5 +2949,322 @@ mod text_tests {
         assert_eq!(edit_text("aÄb", 3, 3, "", true), ("ab".into(), 1));
         // Offsets out of range are clamped.
         assert_eq!(edit_text("ab", 99, 99, "c", false), ("abc".into(), 3));
+    }
+}
+
+// ============================================================== recording
+
+impl App {
+    /// Where new projects are made.
+    fn projects_dir(&self) -> PathBuf {
+        match self.settings.recording.projects_dir.trim() {
+            "" => self.paths.default_projects_dir.clone(),
+            d => expand_home(d),
+        }
+    }
+
+    /// Why recording is not possible now, if it is not.
+    fn recording_blocked(&self) -> Option<&'static str> {
+        if !self.engine_running {
+            Some("Recording needs the audio engine, which is not running.")
+        } else if !self.engine_driver.to_ascii_lowercase().starts_with("jack") {
+            Some("Recording needs the JACK driver (also PipeWire's): pick it in Options → Audio.")
+        } else {
+            None
+        }
+    }
+
+    /// What to record of each track.
+    fn track_specs(&self) -> Vec<TrackSpec> {
+        let dry = self.settings.recording.record_dry;
+        self.rig
+            .tracks
+            .iter()
+            .map(|t| TrackSpec {
+                id: t.id,
+                name: t.name.clone(),
+                dry_channels: if dry { t.input.channels().len() } else { 0 },
+            })
+            .collect()
+    }
+
+    /// Opens, rebuilds or closes the recorder's JACK client to match the
+    /// project, the engine and the tracks. A take being recorded keeps the
+    /// tracks it started with.
+    fn sync_recorder(&mut self) {
+        if self.recorder.as_ref().is_some_and(|r| r.recording()) {
+            return;
+        }
+        if self.project.is_none() || self.recording_blocked().is_some() {
+            self.drop_recorder();
+            return;
+        }
+        let specs = self.track_specs();
+        if let Some(r) = self.recorder.as_mut() {
+            if r.fits(&specs) {
+                r.set_tracks(specs);
+                return;
+            }
+        }
+        self.drop_recorder();
+        match Recorder::open(specs) {
+            Ok(r) => {
+                self.engine
+                    .send(Command::SetRecorder(Some(r.client_name().to_string())));
+                self.recorder = Some(r);
+            }
+            Err(e) => self.set_rec_status(format!("The recorder could not start: {e:#}"), true),
+        }
+    }
+
+    /// Closes the recorder, finishing a take that is being recorded.
+    fn drop_recorder(&mut self) {
+        let Some(mut r) = self.recorder.take() else {
+            return;
+        };
+        if r.recording() {
+            let dir = r.take_dir().map(Path::to_path_buf);
+            match r.stop() {
+                Ok(_) => self.set_rec_status(
+                    format!(
+                        "Recording stopped (the audio engine stopped); {} was saved.",
+                        dir.as_deref().map(display_name).unwrap_or_default()
+                    ),
+                    true,
+                ),
+                Err(e) => self.set_rec_status(format!("The take could not be saved: {e:#}"), true),
+            }
+        }
+        drop(r);
+        self.engine.send(Command::SetRecorder(None));
+    }
+
+    fn open_project(&mut self, path: PathBuf) {
+        if self.recorder.as_ref().is_some_and(|r| r.recording()) {
+            return;
+        }
+        if let Err(e) = std::fs::create_dir_all(&path) {
+            self.toast(format!("Could not create {}: {e}", path.display()), true);
+            return;
+        }
+        self.set_rec_status(String::new(), false);
+        self.project = Some(path);
+        self.sync_recorder();
+        self.refresh_recording();
+    }
+
+    fn close_project(&mut self) {
+        self.drop_recorder();
+        self.project = None;
+        self.set_rec_status(String::new(), false);
+        self.refresh_recording();
+    }
+
+    /// Starts a take, or goes on with a paused one.
+    fn record(&mut self) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        if let Some(r) = &self.recorder {
+            if r.recording() {
+                r.set_paused(false);
+                self.refresh_recording();
+                return;
+            }
+        }
+        if let Some(why) = self.recording_blocked() {
+            self.toast(why, true);
+            return;
+        }
+        self.sync_recorder();
+        let Some(r) = self.recorder.as_mut() else {
+            return;
+        };
+        let result = r.start(&project);
+        match result {
+            Ok(dir) => {
+                self.rec_dropped = 0;
+                self.set_rec_status(format!("Recording {}", display_name(&dir)), false);
+            }
+            Err(e) => self.set_rec_status(format!("Could not record: {e:#}"), true),
+        }
+        self.refresh_recording();
+    }
+
+    fn pause_recording(&mut self) {
+        if let Some(r) = &self.recorder {
+            if r.recording() {
+                r.set_paused(true);
+            }
+        }
+        self.refresh_recording();
+    }
+
+    fn stop_recording(&mut self) {
+        let Some(r) = self.recorder.as_mut() else {
+            return;
+        };
+        if !r.recording() {
+            return;
+        }
+        let length = take_time(r.elapsed());
+        let result = r.stop();
+        match result {
+            Ok(dir) => self.set_rec_status(
+                format!(
+                    "Saved {} ({length}) in {}",
+                    display_name(&dir),
+                    dir.display()
+                ),
+                false,
+            ),
+            Err(e) => self.set_rec_status(format!("The take could not be saved: {e:#}"), true),
+        }
+        // Tracks added or changed during the take are recorded from the
+        // next one.
+        self.sync_recorder();
+        self.refresh_recording();
+    }
+
+    fn set_rec_status(&self, text: String, error: bool) {
+        let ui = self.ui();
+        let r = ui.global::<Recording>();
+        r.set_status(ss(text));
+        r.set_status_error(error);
+    }
+
+    /// Shows the take's length as it grows, and warns of gaps.
+    fn show_take_time(&mut self) {
+        let Some(r) = self.recorder.as_ref().filter(|r| r.recording()) else {
+            return;
+        };
+        let time = take_time(r.elapsed());
+        let dropped = r.dropped();
+        if time != self.rec_time {
+            self.rec_time = time.clone();
+            self.ui().global::<Recording>().set_time(ss(time));
+        }
+        if dropped > self.rec_dropped {
+            self.rec_dropped = dropped;
+            self.set_rec_status(
+                format!(
+                    "The disk could not keep up: {dropped} short gap(s) in this take, in every track alike."
+                ),
+                true,
+            );
+        }
+    }
+
+    /// Everything the Record page and the record button show.
+    fn refresh_recording(&mut self) {
+        let ui = self.ui();
+        let r = ui.global::<Recording>();
+        let blocked = self.recording_blocked();
+        r.set_available(blocked.is_none());
+        r.set_unavailable_text(ss(blocked.unwrap_or("")));
+        r.set_project(ss(self
+            .project
+            .as_deref()
+            .map(display_name)
+            .unwrap_or_default()));
+        r.set_project_path(ss(self
+            .project
+            .as_deref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()));
+        let location = self.projects_dir();
+        r.set_location(ss(location.display().to_string()));
+        r.set_projects(strings(list_projects(&location)));
+        let state = match &self.recorder {
+            Some(rec) if rec.recording() && rec.paused() => 2,
+            Some(rec) if rec.recording() => 1,
+            _ => 0,
+        };
+        r.set_state(state);
+        if state == 0 {
+            self.rec_time = take_time(Duration::ZERO);
+            r.set_time(ss(&self.rec_time));
+        }
+        r.set_dry(self.settings.recording.record_dry);
+    }
+}
+
+/// The last part of a path, for showing.
+fn display_name(p: &Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.display().to_string())
+}
+
+/// "~/x" as a path below the home folder.
+fn expand_home(path: &str) -> PathBuf {
+    match (path.strip_prefix("~"), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
+            PathBuf::from(home).join(rest.trim_start_matches('/'))
+        }
+        _ => PathBuf::from(path),
+    }
+}
+
+/// The projects in `dir`: its folders, most recently changed first.
+fn list_projects(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut v: Vec<(std::time::SystemTime, String)> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            if name.starts_with('.') {
+                return None;
+            }
+            let modified = e.metadata().and_then(|m| m.modified()).ok()?;
+            Some((modified, name))
+        })
+        .collect();
+    v.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    v.into_iter().map(|(_, n)| n).collect()
+}
+
+/// "02:14", or "1:02:14" past an hour.
+fn take_time(d: Duration) -> String {
+    let s = d.as_secs();
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+    } else {
+        format!("{:02}:{:02}", s / 60, s % 60)
+    }
+}
+
+#[cfg(test)]
+mod recording_tests {
+    use super::*;
+
+    #[test]
+    fn take_times() {
+        assert_eq!(take_time(Duration::from_secs(0)), "00:00");
+        assert_eq!(take_time(Duration::from_secs(134)), "02:14");
+        assert_eq!(take_time(Duration::from_secs(3734)), "1:02:14");
+    }
+
+    #[test]
+    fn home_is_expanded() {
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        assert_eq!(expand_home("~/Music"), home.join("Music"));
+        assert_eq!(expand_home("~"), home);
+        assert_eq!(expand_home("/srv/x"), PathBuf::from("/srv/x"));
+        assert_eq!(expand_home("~user/x"), PathBuf::from("~user/x"));
+    }
+
+    #[test]
+    fn projects_are_listed_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("Old")).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::create_dir(dir.path().join("New")).unwrap();
+        std::fs::create_dir(dir.path().join(".hidden")).unwrap();
+        std::fs::write(dir.path().join("file.txt"), "").unwrap();
+        assert_eq!(list_projects(dir.path()), vec!["New", "Old"]);
     }
 }

@@ -264,6 +264,9 @@ struct Engine {
     dirty: bool,
     connect_at: Option<Instant>,
     last_meters: Instant,
+    meter_interval: Duration,
+    /// The stem recorder's JACK client name (see `Command::SetRecorder`).
+    recorder: Option<String>,
     state_dir: tempfile::TempDir,
 }
 
@@ -293,6 +296,8 @@ impl Engine {
             dirty: false,
             connect_at: None,
             last_meters: Instant::now(),
+            meter_interval: METER_INTERVAL,
+            recorder: None,
             state_dir: tempfile::Builder::new()
                 .prefix("carlita-state")
                 .tempdir()
@@ -306,7 +311,7 @@ impl Engine {
 
     fn run(mut self, rx: Receiver<Command>) {
         loop {
-            match rx.recv_timeout(TICK) {
+            match rx.recv_timeout(TICK.min(self.meter_interval)) {
                 Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
                 Ok(cmd) => {
                     self.handle(cmd);
@@ -348,7 +353,7 @@ impl Engine {
         if self.dirty {
             self.rewire();
         }
-        if self.last_meters.elapsed() >= METER_INTERVAL {
+        if self.last_meters.elapsed() >= self.meter_interval {
             self.last_meters = Instant::now();
             self.emit(Event::Meters(self.meters()));
         }
@@ -443,6 +448,14 @@ impl Engine {
             } => {
                 self.config.input_client = input_client;
                 self.config.output_client = output_client;
+                self.dirty = true;
+            }
+            Command::SetMeterInterval(interval) => {
+                self.meter_interval =
+                    interval.clamp(Duration::from_millis(4), Duration::from_millis(50));
+            }
+            Command::SetRecorder(name) => {
+                self.recorder = name;
                 self.dirty = true;
             }
             Command::DescribeGraph { reply } => {
@@ -1472,11 +1485,51 @@ impl Engine {
                 }
             }
         }
+        // The stem recorder: each track's output, and the inputs it takes.
+        let recorder = self.recorder_group();
+        if let Some(rec) = recorder {
+            let ins = self.routing().ports_of(rec, |h| is_audio(h) && is_input(h));
+            let named = |prefix: &str| -> Vec<(u32, u32)> {
+                let mut v: Vec<(&str, u32)> = ins
+                    .iter()
+                    .map(|(p, n)| (n.rsplit(':').next().unwrap_or(n), *p))
+                    .filter(|(n, _)| n.starts_with(prefix))
+                    .collect();
+                v.sort();
+                v.into_iter().map(|(_, p)| (rec, p)).collect()
+            };
+            for t in &self.layout.tracks {
+                if let Some(bus) = self.group(Owner::TrackBus(t.id)) {
+                    let to = named(&format!("t{}_out_", t.id.0));
+                    audio(&mut out, &self.endpoints(bus, false, true), &to);
+                }
+                let to = named(&format!("t{}_dry_", t.id.0));
+                let from = self.sources(Node::Input, PortSel::Only(t.input.mask()), true);
+                for (f, t) in from.iter().zip(&to) {
+                    out.insert((f.0, f.1, t.0, t.1));
+                }
+            }
+        }
         // In the JACK graph, only ever connect Carlita's own clients.
         if self.multi {
-            out.retain(|(og, _, ig, _)| self.is_own_group(*og) || self.is_own_group(*ig));
+            out.retain(|(og, _, ig, _)| {
+                self.is_own_group(*og) || self.is_own_group(*ig) || Some(*ig) == recorder
+            });
         }
         out
+    }
+
+    /// The stem recorder's client in the JACK graph, once it is there.
+    fn recorder_group(&self) -> Option<u32> {
+        let name = self.recorder.as_deref()?;
+        if !self.multi {
+            return None;
+        }
+        self.external
+            .clients
+            .iter()
+            .find(|(_, n)| client_matches(n, name))
+            .map(|(id, _)| *id)
     }
 
     /// Whether Carlita looks after this connection. In the JACK graph, that
@@ -1489,6 +1542,7 @@ impl Engine {
         }
         let (og, _, ig, _) = *c;
         self.is_own_group(ig)
+            || Some(ig) == self.recorder_group()
             || (self.is_own_group(og) && self.device_client(&self.config.output_client) == Some(ig))
     }
 
