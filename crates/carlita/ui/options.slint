@@ -1,6 +1,6 @@
 // Right sidebar: options. Every toggle applies immediately.
 import { Theme } from "theme.slint";
-import { BigButton, Toggle, Chip, SectionTitle, SettingRow, BigSlider, CollapseButton, Dropdown, IconButton, Tip } from "widgets.slint";
+import { BigButton, Toggle, Chip, SectionTitle, SettingRow, Segmented, BigSlider, CollapseButton, Dropdown, IconButton, Tip } from "widgets.slint";
 import { WifiItem, BtItem, MappingItem } from "types.slint";
 import { Icon, Icons } from "icons.slint";
 
@@ -24,11 +24,14 @@ export global Recording {
     in property <bool> status-error;
     // Also record each track's inputs before its plugins.
     in property <bool> dry;
+    // File format: 0 WAV, 1 FLAC.
+    in property <int> format;
     callback new-project;
     callback open-project(string);
     callback close-project;
     callback change-location;
     callback set-dry(bool);
+    callback set-format(int);
     // Start a take, or go on with a paused one.
     callback record;
     callback pause;
@@ -594,6 +597,21 @@ component RecordPage inherits VerticalLayout {
             checked: Recording.dry;
             enabled: Recording.state == 0;
             toggled(v) => { Recording.set-dry(v); }
+        }
+    }
+    SettingRow {
+        label: "File format";
+        detail: Recording.format == 1
+            ? "24-bit FLAC: about half the size; peaks over 0 dB are clipped"
+            : "32-bit float WAV: keeps peaks over 0 dB; no length limit";
+        Segmented {
+            options: ["WAV", "FLAC"];
+            tips: [
+                "32-bit float WAV: exactly what the tracks played. Past 4 GB a file becomes RF64 (64-bit WAV), which most audio programs open.",
+                "24-bit FLAC: lossless and about half the size of WAV, but anything over 0 dBFS is clipped.",
+            ];
+            selected: Recording.format;
+            picked(i) => { Recording.set-format(i); }
         }
     }
     SectionTitle { text: "PROJECTS FOLDER"; }

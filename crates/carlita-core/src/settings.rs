@@ -117,6 +117,21 @@ pub struct RecordingSettings {
     pub projects_dir: String,
     /// Also record each track's inputs before its plugins.
     pub record_dry: bool,
+    /// File format of the stems.
+    pub format: RecordFormat,
+}
+
+/// File format of recorded stems.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecordFormat {
+    /// 32-bit float WAV (RF64 past 4 GB): exactly what the tracks played,
+    /// peaks over 0 dBFS included.
+    #[default]
+    Wav,
+    /// 24-bit FLAC: about half the size, lossless below 0 dBFS (louder
+    /// peaks are clipped).
+    Flac,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]

@@ -6,6 +6,7 @@ mod meters;
 mod midi_in;
 mod recorder;
 mod scan;
+mod stem_file;
 mod system;
 
 slint::include_modules!();
