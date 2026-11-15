@@ -411,6 +411,19 @@ impl App {
         o.set_keyboard_visible(self.settings.show_keyboard);
         self.refresh_audio_options();
         self.refresh_presets();
+        // The chain starts empty, so no preset is current until one loads.
+        // Without a default preset to load, the main area lists the presets.
+        let default_loads = !self.skip_default_preset
+            && self
+                .settings
+                .default_preset
+                .as_deref()
+                .is_some_and(|name| self.presets.exists(name));
+        if !default_loads {
+            self.settings.current_preset = None;
+            o.set_current_preset(ss(""));
+        }
+        ui.set_preset_picker(!default_loads);
         self.refresh_midi_options();
         self.refresh_browser();
         self.refresh_slots();
@@ -2288,6 +2301,7 @@ impl App {
             .collect();
         self.settings.current_preset = Some(preset.name.clone());
         self.save_settings();
+        self.ui().set_preset_picker(false);
         if self.engine_running {
             self.load_rig();
         } else {

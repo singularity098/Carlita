@@ -23,14 +23,6 @@ pub fn extension(format: RecordFormat) -> &'static str {
     }
 }
 
-/// How a format is described to people ("32-bit float WAV").
-pub fn describe(format: RecordFormat) -> &'static str {
-    match format {
-        RecordFormat::Wav => "32-bit float WAV",
-        RecordFormat::Flac => "24-bit FLAC",
-    }
-}
-
 /// One stem being written: interleaved frames in, a file out.
 pub enum StemFile {
     Wav(WavFile),
