@@ -85,6 +85,23 @@
   `track_selections` for the other tracks), which is shown again on load.
   File writes are atomic. Version 1 presets (a single chain) load as a
   one-track rig.
+* **REAPER import** (`carlita-core/src/reaper.rs`) parses a `.rpp` file
+  into a preset, which loads like any other but is not saved until the user
+  saves it. Each track with plugins becomes a track (name, volume, mute,
+  record input; MIDI from every device, since REAPER's device numbers mean
+  nothing here); FX marked `PARALLEL` join the previous FX as lanes.
+  Plugins are matched in the catalog by VST3 class id (REAPER's `{GUID}`
+  is Carla's label, `0x…,0x…,0x…,0x…`), VST2 unique id, LV2 URI or CLAP id,
+  then by binary file name. Settings become a Carla state: for VST3 the
+  component state from REAPER's blob (after its header of pin mappings and
+  sizes), which is what Carla's own chunk holds; for VST2 the chunk; for
+  LV2 the `P` control values by symbol and the `S`/`P`/`I` state properties
+  as custom data (nested objects are left out). CLAP plugins load with
+  default settings. The state has no `<Options>`, and the engine fills in
+  the plugin's current options before loading it (Carla applies a state's
+  options and would otherwise switch chunk saving off). What could not come
+  across (plugins not installed, JSFX and other unsupported FX, settings
+  left at defaults) is listed on the Presets page and in a toast.
 * **Scanning** runs `carla-discovery-native` once per binary, in a separate
   process with a timeout. The results are cached in `plugins.json`.
   yabridge's `~/.vst/yabridge` and `~/.vst3/yabridge` folders are part of the
@@ -119,6 +136,7 @@
 | Plugin scan, remembered list | Done |
 | yabridge plugins | Done (they appear as native plugins) |
 | Named presets, default preset at startup | Done. The default is optional: without one, the empty main area lists the presets at launch, one tap to load one. |
+| Import from REAPER | Done for VST3, VST2 (plugins that save a chunk) and LV2 settings; CLAP plugins come in with default settings. Checked against REAPER 7 projects on Linux; the engine test `reaper_import` loads imported LSP plugin settings into the real plugins. VST2 and CLAP projects are untested. |
 | Crash/hang isolation | Done with bridges. The crash is detected from Carla's error callbacks. |
 | Level meters, DSP load, per-plugin PDC | Done. The meters read the input and output buses, and each track's bus, once per display frame (`Command::SetMeterInterval`); the bars jump up and fall back smoothly between reports (`src/meters.rs`). The DSP load and latency texts change at most four times a second, since any property change redraws the whole window on the GPU renderers. Total latency uses the longest path. |
 | MIDI learn for bypass | Done: toggle or momentary, CC, note or program change, saved per preset |

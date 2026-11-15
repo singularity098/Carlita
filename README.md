@@ -31,6 +31,9 @@ touchscreen.
   tab shows when the pointer is at an edge (in a window with a frame, just
   inside the resize border). Each panel has a button that folds it away
   again.
+* Import a REAPER project (options → Presets): its tracks with plugins come
+  in with their plugins' settings (VST3, VST2 and LV2), ready to save as a
+  preset.
 * A preset can be starred to load at startup. Without one, the start screen
   lists the presets: tap one to load it.
 * The selected plugin's editor is shown inside Carlita's window, in the main

@@ -62,6 +62,7 @@ Swiping in from the right edge opens settings, including WiFi and Bluetooth.
 - Opens with a swipe from a host-owned strip on the right screen edge, or a visible button
 - **Audio:** device, sample rate, buffer size, current latency
 - **Presets:** save, save as, load, rename, delete; a preset remembers which plugin was shown (and each track's last shown plugin) and shows it again when loaded
+- **Import from REAPER** (on the Presets page, added 2026-11-15): open a REAPER project (`.rpp`) from a chosen folder; its tracks that have plugins come in as the chain (name, volume, mute, input, plugins with their settings, bypass, FX run in parallel as lanes), and tracks without plugins and everything else (items, sends, folders, automation, master track) are left out. The project itself is never written; the result is saved as an ordinary Carlita preset
 - **WiFi:** on/off toggle, list of networks, connect with an on-screen keyboard (via NetworkManager over D-Bus)
 - **Bluetooth:** on/off toggle, list of paired and nearby devices, pair and connect (via BlueZ over D-Bus)
 - **Display:** theme, fullscreen / windowed, plugin editor size (100–200% on top of the desktop's scale, for touchscreens), brightness if the hardware supports it
