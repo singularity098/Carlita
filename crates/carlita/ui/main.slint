@@ -20,7 +20,7 @@ import { BigButton, BigSlider, Toggle, SectionTitle } from "widgets.slint";
 import { SlotItem, TrackItem, PluginItem, ParamItem, WifiItem, BtItem, MappingItem, IoChoice } from "types.slint";
 import { ChainPanel, TrackIo } from "chain.slint";
 import { PluginBrowser } from "browser.slint";
-import { OptionsPanel, Options, Recording } from "options.slint";
+import { OptionsPanel, Options, Recording, ListRow } from "options.slint";
 import { TextPrompt, Piano, TextUtil } from "keyboards.slint";
 import { TrackBar } from "trackbar.slint";
 import { Icon, Icons, IconArt } from "icons.slint";
@@ -266,6 +266,11 @@ export component MainWindow inherits Window {
     in property <string> editor-mode: "empty"; // empty | embedded | params | waiting | message
     in property <string> editor-title;
     in property <string> editor-message;
+    // Set at launch when no default preset loads: the empty main area then
+    // lists the presets, one tap to load one, until the chain has plugins.
+    in property <bool> preset-picker;
+    property <bool> show-presets: root.preset-picker && root.editor-mode == "empty"
+        && root.slots.length == 0 && Options.presets.length > 0;
     // Where a plugin's own editor window is placed. It sits above everything
     // drawn here, so it is cut down to the part of the area that the
     // sidebars, the fullscreen track bar and the toast leave uncovered
@@ -563,8 +568,25 @@ export component MainWindow inherits Window {
                 color: Theme.text;
                 horizontal-alignment: center;
             }
+            if root.show-presets: HorizontalLayout {
+                alignment: center;
+                Flickable {
+                    width: min(520px, editor-area.width - 2 * Theme.pad);
+                    height: min(picker.preferred-height, max(Theme.row, editor-area.height - 320px));
+                    content-height: picker.preferred-height;
+                    picker := VerticalLayout {
+                        spacing: 8px;
+                        for p in Options.presets: ListRow {
+                            title: p;
+                            tip: "Load \"" + p + "\"";
+                            clicked => { Options.load-preset(p); }
+                        }
+                    }
+                }
+            }
             Text {
-                text: root.editor-mode == "empty" ? "Swipe in from the left edge for the chain,\nfrom the right edge for options." : root.editor-message;
+                text: root.show-presets ? "Tap a preset to load it, or swipe in from the left edge\nto build a chain from scratch."
+                    : root.editor-mode == "empty" ? "Swipe in from the left edge for the chain,\nfrom the right edge for options." : root.editor-message;
                 font-size: Theme.font-large;
                 color: Theme.text-dim;
                 horizontal-alignment: center;

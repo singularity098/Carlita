@@ -31,6 +31,8 @@ touchscreen.
   tab shows when the pointer is at an edge (in a window with a frame, just
   inside the resize border). Each panel has a button that folds it away
   again.
+* A preset can be starred to load at startup. Without one, the start screen
+  lists the presets: tap one to load it.
 * The selected plugin's editor is shown inside Carlita's window, in the main
   area (editors that can resize fill it).
 * A flat dark look and a choice of themes (Display options).
@@ -108,7 +110,7 @@ Both tests skip themselves when JACK or X is not available, unless
 | --- | --- |
 | `--windowed` / `--fullscreen` | Override the saved window mode (F11 toggles it) |
 | `--kiosk` | Fullscreen, for boot-to-app setups (see `packaging/kiosk/`) |
-| `--no-preset` | Do not load the default preset at startup |
+| `--no-preset` | Do not load the default preset at startup (the start screen lists the presets instead) |
 | `CARLITA_HOME=dir` | Keep settings, presets and the plugin cache below `dir` |
 | `SLINT_BACKEND=winit-software` | Software rendering on machines without OpenGL |
 | `SLINT_BACKEND=winit-femtovg` | The lighter femtovg GPU renderer instead of the default Skia over OpenGL (rougher edges on curves) |

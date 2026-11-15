@@ -255,7 +255,6 @@ impl Recorder {
             prods.push(p);
             sinks.push((c, stem, file));
         }
-        write_take_info(&dir, self.sample_rate, format, &self.tracks);
         let mut writers = Vec::new();
         for sink in sinks {
             let w = std::thread::Builder::new()
@@ -455,32 +454,6 @@ pub fn safe_name(name: &str) -> String {
         "Untitled".into()
     } else {
         s
-    }
-}
-
-/// A note next to the files, for whoever opens the take in a DAW.
-fn write_take_info(dir: &Path, sample_rate: u32, format: RecordFormat, tracks: &[TrackSpec]) {
-    let names = file_names(tracks);
-    let mut text = format!(
-        "Recorded by Carlita {}\nSample rate: {sample_rate} Hz, {}{}\n\
-         Every file starts at the same moment. Track files are what the track \
-         played (after its plugins); \"(dry)\" files are its inputs before any \
-         plugin, so they are ahead of the track file by the chain's latency.\n\nTracks:\n",
-        env!("CARGO_PKG_VERSION"),
-        stem_file::describe(format),
-        match format {
-            RecordFormat::Wav => " (files over 4 GB are RF64, the 64-bit WAV)",
-            RecordFormat::Flac => "",
-        },
-    );
-    for (n, t) in names.iter().zip(tracks) {
-        text += &format!(
-            "  {n}{}\n",
-            if t.dry_channels > 0 { " (+ dry)" } else { "" }
-        );
-    }
-    if let Err(e) = std::fs::write(dir.join("take.txt"), text) {
-        log::warn!("could not write take.txt: {e}");
     }
 }
 
