@@ -77,6 +77,7 @@ enum Confirm {
     DeleteTrack(TrackId),
     Reboot,
     Shutdown,
+    Restart,
 }
 
 /// The plugin editor shown (or about to be shown) in the main area.
@@ -182,6 +183,9 @@ pub struct App {
     rec_dropped: u64,
     /// When the window's size and place were last noted.
     last_window_check: Instant,
+    /// Set by System → Restart Carlita: `main` starts Carlita again once
+    /// this one has shut down.
+    restart_requested: bool,
 }
 
 /// Runs `f` on the app, deferring it if the app is already borrowed
@@ -337,6 +341,7 @@ impl App {
             rec_time: String::new(),
             rec_dropped: 0,
             last_window_check: Instant::now(),
+            restart_requested: false,
         }));
 
         Self::wire(ui, &app);
@@ -941,6 +946,10 @@ impl App {
         on!(o, on_shutdown, |a| a.open_confirm(
             Confirm::Shutdown,
             "Shut down the computer?".into()
+        ));
+        on!(o, on_restart_app, |a| a.open_confirm(
+            Confirm::Restart,
+            "Restart Carlita? Audio stops for a few seconds.".into()
         ));
     }
 
@@ -2444,6 +2453,10 @@ impl App {
             }
             Confirm::Reboot => self.system.send(SysCmd::Reboot),
             Confirm::Shutdown => self.system.send(SysCmd::PowerOff),
+            Confirm::Restart => {
+                self.restart_requested = true;
+                self.quit();
+            }
         }
     }
 
@@ -2863,6 +2876,11 @@ impl App {
         // Dropping the host waits until every window has been handed back.
         self.editor_host = None;
         self.embed_available = false;
+    }
+
+    /// Whether Carlita should start again after it shuts down.
+    pub fn restart_requested(&self) -> bool {
+        self.restart_requested
     }
 
     pub fn shutdown(&mut self) {

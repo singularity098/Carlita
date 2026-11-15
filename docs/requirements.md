@@ -65,7 +65,7 @@ Swiping in from the right edge opens settings, including WiFi and Bluetooth.
 - **WiFi:** on/off toggle, list of networks, connect with an on-screen keyboard (via NetworkManager over D-Bus)
 - **Bluetooth:** on/off toggle, list of paired and nearby devices, pair and connect (via BlueZ over D-Bus)
 - **Display:** theme, fullscreen / windowed, plugin editor size (100–200% on top of the desktop's scale, for touchscreens), brightness if the hardware supports it
-- **System:** icon buttons at the top of the sidebar whatever the page (rescan plugins, restart app, reboot, shut down) (decided 2026-11-14: no Quit button there; the track bar's close button quits); the app version under the page title (decided 2026-11-12: no System page)
+- **System:** a page of its own (decided 2026-11-15, replacing the icon buttons at the top of every page): Restart Carlita, Restart computer and Shut down computer, each an icon with its name, each asking first; no Quit button (the track bar's close button quits); the app version under the page title
 - Toggles apply immediately; no separate Save step
 - Almost everything that can be pressed has a short hover tip (shown after the mouse rests on it ~0.6 s); the edge-strip tabs and the sidebar's page tabs do not need one
 - Also has a button which can toggle on/off a virtual musical keyboard on the bottom of the screen, which may be used to send midi notes to the plugins

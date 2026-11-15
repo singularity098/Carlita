@@ -27,6 +27,12 @@ const WITHDRAW_TIMEOUT: Duration = Duration::from_secs(1);
 /// many times a second, and an editor resized at each step falls behind
 /// (it flickers, draws only part of itself, and some crash).
 const RESIZE_SETTLE: Duration = Duration::from_millis(300);
+
+/// How long after it is embedded an editor is still settling: if it changes
+/// its own size then, it is fitted to the area again. Carla 2.5 follows a
+/// plugin's own early resizes (JUCE's editors make some while they open)
+/// and undid the first fit.
+const EMBED_SETTLE: Duration = Duration::from_secs(2);
 /// How often to put an editor back if something (a window manager) takes it
 /// out of Carlita's window again.
 const MAX_REEMBED: u32 = 5;
@@ -216,6 +222,8 @@ struct Embedded {
     width: u32,
     height: u32,
     reembeds: u32,
+    /// When it was embedded (see `EMBED_SETTLE`).
+    embedded_at: Instant,
     /// While the holder is mapped: where the whole editor is, and the part
     /// of it the holder shows (the rest is under an overlay).
     shown: Option<(Area, Area)>,
@@ -733,6 +741,7 @@ impl Embedder {
                 width: geo.width as u32,
                 height: geo.height as u32,
                 reembeds: 0,
+                embedded_at: Instant::now(),
                 shown: None,
             },
         );
@@ -756,9 +765,11 @@ impl Embedder {
             .change_window_attributes(window, &mask(EventMask::NO_EVENT));
         let _ = self.conn.reparent_window(window, holder, 0, 0);
         let _ = self.conn.map_window(window);
-        let _ = self
-            .conn
-            .change_window_attributes(window, &mask(EventMask::STRUCTURE_NOTIFY));
+        // Property changes for its size hints (see `PropertyNotify`).
+        let _ = self.conn.change_window_attributes(
+            window,
+            &mask(EventMask::STRUCTURE_NOTIFY | EventMask::PROPERTY_CHANGE),
+        );
     }
 
     /// Gives an editor that can resize the whole area (within its limits).
@@ -1158,6 +1169,9 @@ impl Embedder {
                             if let Some((full, _)) = e.shown {
                                 e.shown = Some((full, Area::default()));
                             }
+                            if e.embedded_at.elapsed() < EMBED_SETTLE {
+                                self.fit_due = Some(Instant::now() + RESIZE_SETTLE);
+                            }
                             self.place(k);
                         } else if let Some((x, y)) = e.offset() {
                             // Many toolkits move their window when they
@@ -1177,6 +1191,16 @@ impl Embedder {
                                 );
                             }
                         }
+                    }
+                }
+                // The editor's size limits changed. Carla 2.5 copies the
+                // plugin's own hints onto its editor window only after
+                // showing it, with a fixed size until then, so a resizable
+                // editor (Kaia's) would otherwise keep its first size until
+                // the area next changed.
+                XEvent::PropertyNotify(p) if p.atom == u32::from(AtomEnum::WM_NORMAL_HINTS) => {
+                    if let Some(k) = self.key_for_window(p.window) {
+                        self.fit_resizable(k);
                     }
                 }
                 XEvent::DestroyNotify(d) if d.event == d.window => {
