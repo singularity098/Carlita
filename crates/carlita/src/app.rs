@@ -78,6 +78,7 @@ enum Confirm {
     Reboot,
     Shutdown,
     Restart,
+    Quit,
 }
 
 /// The plugin editor shown (or about to be shown) in the main area.
@@ -947,6 +948,9 @@ impl App {
             Confirm::Shutdown,
             "Shut down the computer?".into()
         ));
+        on!(o, on_rescan_plugins, |a| a.start_scan());
+        on!(o, on_quit, |a| a
+            .open_confirm(Confirm::Quit, "Quit Carlita?".into()));
         on!(o, on_restart_app, |a| a.open_confirm(
             Confirm::Restart,
             "Restart Carlita? Audio stops for a few seconds.".into()
@@ -2457,6 +2461,7 @@ impl App {
                 self.restart_requested = true;
                 self.quit();
             }
+            Confirm::Quit => self.quit(),
         }
     }
 
@@ -2483,6 +2488,10 @@ impl App {
         ui.set_browser_format(ss(self.filter.format.map(|f| f.label()).unwrap_or("")));
         ui.set_browser_category(ss(self.filter.category.map(|c| c.label()).unwrap_or("")));
         ui.set_browser_favorites(self.filter.favorites_only);
+        ui.global::<Options>().set_plugin_count(ss(format!(
+            "{} plugins in the library",
+            self.catalog.plugins.len()
+        )));
     }
 
     fn start_scan(&mut self) {
@@ -2500,6 +2509,7 @@ impl App {
         self.scan = Some(scan::start(tool));
         let ui = self.ui();
         ui.set_scanning(true);
+        ui.global::<Options>().set_scanning(true);
         ui.set_scan_status(ss("Scanning for plugins…"));
     }
 
@@ -2520,6 +2530,7 @@ impl App {
                 self.save_catalog();
                 let ui = self.ui();
                 ui.set_scanning(false);
+                ui.global::<Options>().set_scanning(false);
                 let failed = if report.failures.is_empty() {
                     String::new()
                 } else {
