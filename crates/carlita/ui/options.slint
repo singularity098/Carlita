@@ -134,8 +134,9 @@ export global Options {
     in property <bool> keyboard-visible;
     callback set-keyboard(bool);
 
-    // ---- system (the buttons at the top of the panel)
+    // ---- system (the System page)
     in property <string> version;
+    callback restart-app;
     callback reboot;
     callback shutdown;
 }
@@ -595,6 +596,32 @@ component DisplayPage inherits VerticalLayout {
     }
 }
 
+// Restarting Carlita and the computer's reboot and power buttons. Each asks
+// first.
+component SystemPage inherits VerticalLayout {
+    spacing: 12px;
+    BigButton {
+        text: "Restart Carlita";
+        icon-line: Icons.restart-line;
+        tip: "Close Carlita and start it again (asks first). The chain is kept.";
+        clicked => { Options.restart-app(); }
+    }
+    BigButton {
+        text: "Restart computer";
+        icon-line: Icons.reboot-line;
+        danger: true;
+        tip: "Reboot the computer (asks first)";
+        clicked => { Options.reboot(); }
+    }
+    BigButton {
+        text: "Shut down computer";
+        icon-line: Icons.power-line;
+        danger: true;
+        tip: "Shut down the computer (asks first)";
+        clicked => { Options.shutdown(); }
+    }
+}
+
 export component OptionsPanel inherits Rectangle {
     in-out property <int> page: 0;
     callback close;
@@ -618,6 +645,7 @@ export component OptionsPanel inherits Rectangle {
         { solid: Icons.bluetooth-solid, line: Icons.bluetooth-line, label: "Bluetooth" },
         { solid: Icons.display-solid, line: Icons.display-line, label: "Display" },
         { solid: Icons.record-solid, line: Icons.record-line, label: "Record" },
+        { solid: Icons.system-solid, line: Icons.system-line, label: "System" },
     ];
 
     // Under everything: keeps taps on the panel's empty space from reaching
@@ -690,8 +718,8 @@ export component OptionsPanel inherits Rectangle {
         }
 
         VerticalLayout {
-            // The header stays at the top whatever the page: the page's
-            // title, then the computer's reboot and power buttons.
+            // The header stays at the top whatever the page: the close
+            // button and the page's title.
             HorizontalLayout {
                 padding-left: Theme.pad;
                 padding-right: Theme.pad;
@@ -723,28 +751,6 @@ export component OptionsPanel inherits Rectangle {
                         overflow: elide;
                     }
                 }
-                HorizontalLayout {
-                    alignment: end;
-                    spacing: 6px;
-                    VerticalLayout {
-                        alignment: center;
-                        IconButton {
-                            icon: Icons.reboot-line;
-                            danger: true;
-                            tip: "Reboot the computer (asks first)";
-                            clicked => { Options.reboot(); }
-                        }
-                    }
-                    VerticalLayout {
-                        alignment: center;
-                        IconButton {
-                            icon: Icons.power-line;
-                            danger: true;
-                            tip: "Shut down the computer (asks first)";
-                            clicked => { Options.shutdown(); }
-                        }
-                    }
-                }
             }
             Rectangle {
                 height: 1px;
@@ -766,6 +772,7 @@ export component OptionsPanel inherits Rectangle {
                     if root.page == 4: BluetoothPage { }
                     if root.page == 5: DisplayPage { }
                     if root.page == 6: RecordPage { }
+                    if root.page == 7: SystemPage { }
                 }
             }
         }

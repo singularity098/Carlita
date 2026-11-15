@@ -41,6 +41,15 @@ off-screen with XComposite and forwarded synthetic input) was dropped
    plugins: JUCE gives an embedded editor's window a minimum and maximum of
    its current size, and Carla copies those onto the editor window, so the
    hints alone say that a resizable JUCE editor (Kaia, for one) cannot be.
+   Carla 2.5 (the version Carlita builds against) has no such flag, so there
+   the hints decide: Kaia patches JUCE so its editor window carries none.
+   Carla 2.5 copies the plugin's hints onto its editor window only once the
+   editor is showing, and follows the plugin's own resizes while it opens,
+   so the host fits an editor again when its `WM_NORMAL_HINTS` change, and
+   when it changes its own size within 2 s of being embedded. Carla 2.5
+   also tells a VST3 editor nothing when its window is resized (LV2 editors
+   get `ui:resize`): the editor has to follow its X window by itself, as
+   DPF's (Xythos) and Kaia's do.
 5. The editor draws itself and gets real pointer and touch input from the X
    server, so it works with every toolkit (Wine and yabridge included).
    Many toolkits move their window when they resize it (a plugin's own

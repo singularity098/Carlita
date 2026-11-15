@@ -48,7 +48,35 @@ fn main() -> anyhow::Result<()> {
     let app = app::App::new(&ui, opts)?;
     ui.run()?;
     app.borrow_mut().shutdown();
+    let restart = app.borrow().restart_requested();
+    // Drops the engine (which waits for its thread) and the window first, so
+    // the new Carlita finds the audio device free.
+    drop(app);
+    drop(ui);
+    if restart {
+        relaunch();
+    }
     Ok(())
+}
+
+/// Starts Carlita again with the same arguments: the AppImage when running
+/// from one (`APPIMAGE`), otherwise this executable.
+fn relaunch() {
+    let exe = std::env::var_os("APPIMAGE")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_exe().ok());
+    let Some(exe) = exe else {
+        log::error!("could not restart: executable not found");
+        return;
+    };
+    // Give the audio system a moment to let go of the device.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    if let Err(e) = std::process::Command::new(&exe)
+        .args(std::env::args_os().skip(1))
+        .spawn()
+    {
+        log::error!("could not restart {}: {e}", exe.display());
+    }
 }
 
 /// Draws the window on every display frame, not only when something on it
