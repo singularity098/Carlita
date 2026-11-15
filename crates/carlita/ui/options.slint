@@ -136,7 +136,11 @@ export global Options {
 
     // ---- system (the System page)
     in property <string> version;
+    in property <string> plugin-count;
+    in property <bool> scanning;
+    callback rescan-plugins;
     callback restart-app;
+    callback quit;
     callback reboot;
     callback shutdown;
 }
@@ -596,10 +600,23 @@ component DisplayPage inherits VerticalLayout {
     }
 }
 
-// Restarting Carlita and the computer's reboot and power buttons. Each asks
-// first.
+// Rescanning plugins, quitting or restarting Carlita, and the computer's
+// reboot and power buttons. All but the rescan ask first.
 component SystemPage inherits VerticalLayout {
     spacing: 12px;
+    BigButton {
+        text: Options.scanning ? "Scanning for plugins…" : "Rescan plugins";
+        icon-line: Icons.plug-line;
+        enabled: !Options.scanning;
+        tip: "Look for newly installed plugins (" + Options.plugin-count + ")";
+        clicked => { Options.rescan-plugins(); }
+    }
+    BigButton {
+        text: "Quit Carlita";
+        icon-line: Icons.close;
+        tip: "Close Carlita (asks first)";
+        clicked => { Options.quit(); }
+    }
     BigButton {
         text: "Restart Carlita";
         icon-line: Icons.restart-line;
