@@ -783,7 +783,8 @@ impl Engine {
                 .state_dir
                 .path()
                 .join(format!("load-{}.carxs", load.slot.0));
-            if std::fs::write(&path, state).is_ok() && !self.host.load_state(id, &path) {
+            let state = with_options(state, self.host.plugin_options(id));
+            if std::fs::write(&path, state.as_ref()).is_ok() && !self.host.load_state(id, &path) {
                 self.emit(Event::Error(format!(
                     "Could not restore the state of {}",
                     load.name
@@ -1696,6 +1697,28 @@ impl Engine {
     }
 }
 
+/// Carla sets a plugin's options from the state it loads, and turns off the
+/// ones the state does not list. A state without `<Options>` (one imported
+/// from another host) gets the options the plugin has now, so loading it
+/// keeps them (chunk saving among them).
+fn with_options(state: &str, options: u32) -> std::borrow::Cow<'_, str> {
+    if state.contains("<Options>") {
+        return state.into();
+    }
+    match state.find("<Data>") {
+        Some(i) => {
+            let at = i + "<Data>".len();
+            format!(
+                "{}\n   <Options>0x{options:x}</Options>{}",
+                &state[..at],
+                &state[at..]
+            )
+            .into()
+        }
+        None => state.into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1724,5 +1747,16 @@ mod tests {
             vec![(1, 10), (2, 10)],
             "a stereo source sums into a mono input"
         );
+    }
+
+    #[test]
+    fn imported_states_keep_the_plugin_options() {
+        let s = "<CARLA-PRESET>\n  <Data>\n   <Active>Yes</Active>\n  </Data>\n</CARLA-PRESET>\n";
+        assert_eq!(
+            with_options(s, 0x3a),
+            "<CARLA-PRESET>\n  <Data>\n   <Options>0x3a</Options>\n   <Active>Yes</Active>\n  </Data>\n</CARLA-PRESET>\n"
+        );
+        let saved = "<Data>\n   <Options>0x1</Options>\n</Data>";
+        assert_eq!(with_options(saved, 0x3a), saved);
     }
 }

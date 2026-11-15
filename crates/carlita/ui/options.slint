@@ -1,7 +1,7 @@
 // Right sidebar: options. Every toggle applies immediately.
 import { Theme } from "theme.slint";
 import { BigButton, Toggle, Chip, SectionTitle, SettingRow, Segmented, BigSlider, CollapseButton, Dropdown, IconButton, Tip } from "widgets.slint";
-import { WifiItem, BtItem, MappingItem } from "types.slint";
+import { WifiItem, BtItem, MappingItem, ReaperItem } from "types.slint";
 import { Icon, Icons } from "icons.slint";
 
 // Stem recording (the Record page and the record button in the track bar).
@@ -81,6 +81,14 @@ export global Options {
     callback rename-preset(string);
     callback delete-preset(string);
     callback set-default-preset(string);
+    // Importing REAPER projects: the folder searched ("" = none yet), the
+    // projects found there and what the last import could not bring in.
+    in property <string> reaper-folder;
+    in property <[ReaperItem]> reaper-projects;
+    in property <string> import-report;
+    in property <bool> import-problems;
+    callback change-reaper-folder;
+    callback import-reaper(int);
 
     // ---- midi
     in property <[string]> midi-ports;
@@ -348,6 +356,40 @@ component PresetsPage inherits VerticalLayout {
             tip: "Delete";
             clicked => { Options.delete-preset(p); }
         }
+    }
+    SectionTitle { text: "IMPORT FROM REAPER"; }
+    Text {
+        text: "Tracks with plugins come in as a new chain, with each plugin's settings. Save it as a preset to keep it.";
+        color: Theme.text-dim;
+        font-size: Theme.font-small;
+        wrap: word-wrap;
+    }
+    if Options.import-report != "": Text {
+        text: Options.import-report;
+        color: Options.import-problems ? Theme.warn : Theme.accent;
+        font-size: Theme.font-small;
+        wrap: word-wrap;
+    }
+    ListRow {
+        title: Options.reaper-folder == "" ? "Choose the folder of your REAPER projects" : Options.reaper-folder;
+        subtitle: "Searched for projects (.rpp)";
+        tip: "Change the folder searched for REAPER projects. A project file's path imports it straight away.";
+        clicked => { Options.change-reaper-folder(); }
+        BigButton {
+            icon-line: Icons.pencil-line;
+            tip: "Change the folder searched for REAPER projects";
+            clicked => { Options.change-reaper-folder(); }
+        }
+    }
+    if Options.reaper-folder != "" && Options.reaper-projects.length == 0: Text {
+        text: "No REAPER projects found in this folder.";
+        color: Theme.text-faint;
+    }
+    for p[i] in Options.reaper-projects: ListRow {
+        title: p.name;
+        subtitle: p.folder;
+        tip: "Import \"" + p.name + "\"";
+        clicked => { Options.import-reaper(i); }
     }
 }
 

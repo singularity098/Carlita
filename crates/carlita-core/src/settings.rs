@@ -146,6 +146,9 @@ pub struct Settings {
     /// Preset that was last loaded or saved (shown in the UI).
     pub current_preset: Option<String>,
     pub show_keyboard: bool,
+    /// Folder searched for REAPER projects to import ("" = REAPER's own
+    /// default, `~/Documents/REAPER Media`, when it exists).
+    pub reaper_folder: String,
 }
 
 impl Settings {

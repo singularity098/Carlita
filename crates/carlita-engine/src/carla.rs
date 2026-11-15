@@ -258,6 +258,19 @@ impl Host {
         }
     }
 
+    /// The options (`PLUGIN_OPTION_*`) enabled on a plugin.
+    pub fn plugin_options(&self, id: u32) -> u32 {
+        // SAFETY: valid handle; struct read immediately.
+        unsafe {
+            let info = sys::carla_get_plugin_info(self.h, id);
+            if info.is_null() {
+                0
+            } else {
+                (*info).optionsEnabled
+            }
+        }
+    }
+
     pub fn audio_ports(&self, id: u32) -> (u32, u32) {
         // SAFETY: valid handle.
         unsafe {
