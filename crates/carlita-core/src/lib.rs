@@ -10,7 +10,6 @@ pub mod midi;
 pub mod paths;
 pub mod plugin;
 pub mod preset;
-pub mod reaper;
 pub mod rig;
 pub mod settings;
 
