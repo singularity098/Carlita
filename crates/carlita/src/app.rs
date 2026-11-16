@@ -5,12 +5,11 @@ use crate::midi_in::MidiListener;
 use crate::scan::{self, ScanMsg};
 use crate::system::{SysCmd, SysEvent, SystemWorker};
 use crate::{
-    BtItem, IoChoice, MainWindow, MappingItem, Options, ParamItem, PluginItem, ReaperItem,
-    Recording, SlotItem, TextUtil, Theme, TrackIo, TrackItem, WifiItem,
+    BtItem, IoChoice, MainWindow, MappingItem, Options, ParamItem, PluginItem, Recording, SlotItem,
+    TextUtil, Theme, TrackIo, TrackItem, WifiItem,
 };
 use carlita_core::midi::{self, BypassChange, MidiAction, MidiMapping, MidiMessage};
 use carlita_core::paths::AppPaths;
-use carlita_core::reaper;
 use carlita_core::rig::{self, Location, Row, RowKind, Spot};
 use carlita_core::settings::{DisplaySettings, RecordFormat};
 use carlita_core::{
@@ -71,7 +70,6 @@ enum Prompt {
     RenameTrack(TrackId),
     NewProject,
     ProjectsFolder,
-    ReaperFolder,
 }
 
 enum Confirm {
@@ -101,11 +99,6 @@ pub struct App {
     catalog: PluginCatalog,
     filter: CatalogFilter,
     presets: PresetStore,
-    /// REAPER projects offered for import (Options → Presets).
-    reaper_projects: Vec<PathBuf>,
-    /// Name of the project last imported while the chain is not saved, offered
-    /// when saving it.
-    imported_name: Option<String>,
     rig: Rig,
     /// The track shown in the chain panel.
     view_track: TrackId,
@@ -297,8 +290,6 @@ impl App {
             catalog,
             filter: CatalogFilter::default(),
             presets,
-            reaper_projects: Vec::new(),
-            imported_name: None,
             rig,
             view_track,
             rows: Vec::new(),
@@ -426,7 +417,6 @@ impl App {
         o.set_keyboard_visible(self.settings.show_keyboard);
         self.refresh_audio_options();
         self.refresh_presets();
-        self.refresh_reaper();
         // The chain starts empty, so no preset is current until one loads.
         // Without a default preset to load, the main area lists the presets.
         let default_loads = !self.skip_default_preset
@@ -722,7 +712,6 @@ impl App {
             a.options_page = page;
             match page {
                 0 => a.engine.send(Command::QueryDrivers),
-                1 => a.refresh_reaper(),
                 2 => a.refresh_midi_options(),
                 3 => a.system.send(SysCmd::RefreshWifi),
                 4 => a.system.send(SysCmd::RefreshBt),
@@ -828,11 +817,7 @@ impl App {
         on!(o, on_save_preset_as, |a| a.open_prompt(
             Prompt::SaveAs,
             "Save preset as",
-            a.settings
-                .current_preset
-                .clone()
-                .or_else(|| a.imported_name.clone())
-                .unwrap_or_default(),
+            a.settings.current_preset.clone().unwrap_or_default(),
             false
         ));
         on!(o, on_load_preset, |a, name: SharedString| a
@@ -847,23 +832,6 @@ impl App {
             Confirm::DeletePreset(name.to_string()),
             format!("Delete the preset \"{name}\"?")
         ));
-        on!(o, on_change_reaper_folder, |a| {
-            let text = a.reaper_dir().map(|d| tilde(&d)).unwrap_or_default();
-            a.open_prompt(
-                Prompt::ReaperFolder,
-                "Folder of REAPER projects",
-                text,
-                false,
-            );
-        });
-        on!(o, on_import_reaper, |a, i: i32| {
-            if let Some(path) = usize::try_from(i)
-                .ok()
-                .and_then(|i| a.reaper_projects.get(i).cloned())
-            {
-                a.import_reaper(&path);
-            }
-        });
         on!(o, on_set_default_preset, |a, name: SharedString| {
             a.settings.default_preset = (!name.is_empty()).then(|| name.to_string());
             a.save_settings();
@@ -2309,7 +2277,6 @@ impl App {
         match self.presets.save(&preset) {
             Ok(()) => {
                 self.settings.current_preset = Some(preset.name.clone());
-                self.imported_name = None;
                 self.save_settings();
                 self.toast(format!("Saved \"{}\"", preset.name), false);
             }
@@ -2327,14 +2294,6 @@ impl App {
                 return;
             }
         };
-        let name = preset.name.clone();
-        self.apply_preset(preset, true);
-        self.toast(format!("Loaded \"{name}\""), false);
-    }
-
-    /// Replaces the rig with a preset's. A preset that is not saved (an
-    /// import) leaves no preset current.
-    fn apply_preset(&mut self, preset: Preset, saved: bool) {
         self.hide_editor();
         self.selected = None;
         self.undo = None;
@@ -2353,8 +2312,7 @@ impl App {
             .slots()
             .map(|s| (s.id, SlotRuntime::default()))
             .collect();
-        self.settings.current_preset = saved.then(|| preset.name.clone());
-        self.imported_name = (!saved).then(|| preset.name.clone());
+        self.settings.current_preset = Some(preset.name.clone());
         self.save_settings();
         self.ui().set_preset_picker(false);
         if self.engine_running {
@@ -2371,92 +2329,7 @@ impl App {
         self.refresh_presets();
         self.refresh_midi_options();
         self.update_editor_ui();
-    }
-
-    // ======================================================= REAPER import
-
-    /// The folder searched for REAPER projects, if there is one.
-    fn reaper_dir(&self) -> Option<PathBuf> {
-        match self.settings.reaper_folder.trim() {
-            "" => std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join("Documents/REAPER Media"))
-                .filter(|d| d.is_dir()),
-            d => Some(expand_home(d)),
-        }
-    }
-
-    /// Lists the projects in the REAPER folder.
-    fn refresh_reaper(&mut self) {
-        let dir = self.reaper_dir();
-        self.reaper_projects = dir
-            .as_deref()
-            .map(reaper::find_projects)
-            .unwrap_or_default();
-        let items: Vec<ReaperItem> = self
-            .reaper_projects
-            .iter()
-            .map(|p| ReaperItem {
-                name: ss(p
-                    .file_stem()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default()),
-                folder: ss(p
-                    .parent()
-                    .zip(dir.as_deref())
-                    .and_then(|(parent, dir)| parent.strip_prefix(dir).ok())
-                    .map(|rel| rel.display().to_string())
-                    .unwrap_or_default()),
-            })
-            .collect();
-        let ui = self.ui();
-        let o = ui.global::<Options>();
-        o.set_reaper_folder(ss(dir.map(|d| tilde(&d)).unwrap_or_default()));
-        o.set_reaper_projects(ModelRc::new(VecModel::from(items)));
-    }
-
-    /// Imports a REAPER project as the chain (not saved until the user saves
-    /// it as a preset).
-    fn import_reaper(&mut self, path: &Path) {
-        let ui = self.ui();
-        let o = ui.global::<Options>();
-        let imp = match reaper::import_file(path, &self.catalog.plugins) {
-            Ok(imp) => imp,
-            Err(e) => {
-                o.set_import_report(ss(format!("Could not import {}: {e:#}", path.display())));
-                o.set_import_problems(true);
-                self.toast(format!("Could not import: {e:#}"), true);
-                return;
-            }
-        };
-        let name = imp.preset.name.clone();
-        let mut problems = imp.report.problems();
-        if self.catalog.plugins.is_empty() {
-            problems.insert(
-                0,
-                "No plugins are scanned yet: scan them in System first.".into(),
-            );
-        }
-        if imp.report.tracks == 0 {
-            let mut lines = vec![format!(
-                "\"{name}\" has no tracks with plugins Carlita can load."
-            )];
-            lines.extend(problems);
-            o.set_import_report(ss(lines.join("\n")));
-            o.set_import_problems(true);
-            self.toast(format!("Nothing to import from \"{name}\""), true);
-            return;
-        }
-        let mut lines = vec![format!("Imported \"{name}\": {}.", imp.report.counts())];
-        lines.extend(problems.iter().cloned());
-        o.set_import_report(ss(lines.join("\n")));
-        o.set_import_problems(!problems.is_empty());
-        self.apply_preset(imp.preset, false);
-        let mut toast = format!("Imported \"{name}\" ({})", imp.report.counts());
-        if !problems.is_empty() {
-            toast.push('\n');
-            toast.push_str(&problems.join("\n"));
-        }
-        self.toast(toast, !problems.is_empty());
+        self.toast(format!("Loaded \"{}\"", preset.name), false);
     }
 
     // =========================================================== text input
@@ -2528,24 +2401,6 @@ impl App {
                         self.refresh_recording();
                     }
                     Err(e) => self.toast(format!("Could not use {}: {e}", path.display()), true),
-                }
-            }
-            Prompt::ReaperFolder => {
-                let path = expand_home(text.trim());
-                if path.is_file() {
-                    // A project's own path: import it, and offer its folder.
-                    if let Some(dir) = path.parent() {
-                        self.settings.reaper_folder = dir.display().to_string();
-                        self.save_settings();
-                    }
-                    self.refresh_reaper();
-                    self.import_reaper(&path);
-                } else if path.is_dir() || text.trim().is_empty() {
-                    self.settings.reaper_folder = path.display().to_string();
-                    self.save_settings();
-                    self.refresh_reaper();
-                } else {
-                    self.toast(format!("There is no folder {}", path.display()), true);
                 }
             }
             Prompt::Search => {
@@ -3407,15 +3262,6 @@ fn display_name(p: &Path) -> String {
 }
 
 /// "~/x" as a path below the home folder.
-/// A path for display, with the home folder written as `~`.
-fn tilde(path: &Path) -> String {
-    match std::env::var_os("HOME").and_then(|h| path.strip_prefix(h).ok().map(Path::to_path_buf)) {
-        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
-        Some(rest) => format!("~/{}", rest.display()),
-        None => path.display().to_string(),
-    }
-}
-
 fn expand_home(path: &str) -> PathBuf {
     match (path.strip_prefix("~"), std::env::var_os("HOME")) {
         (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {

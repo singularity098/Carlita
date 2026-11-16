@@ -15,7 +15,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y carla carla-dev libclang-dev clang jackd2 xvfb \
             libasound2-dev libxkbcommon-dev libfontconfig-dev \
-            pkg-config libjack-jackd2-dev lsp-plugins-lv2
+            pkg-config libjack-jackd2-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
