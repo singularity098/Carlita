@@ -13,6 +13,10 @@ use std::time::{Duration, Instant};
 const TICK: Duration = Duration::from_millis(16);
 const METER_INTERVAL: Duration = Duration::from_millis(33);
 const CONNECT_DELAY: Duration = Duration::from_millis(400);
+/// PipeWire's per-client settings for libjack. Carlita sets the first two for
+/// its own client while the engine starts; if the user set any of them, it
+/// leaves them alone.
+const PW_ENV: [&str; 3] = ["PIPEWIRE_LATENCY", "PIPEWIRE_RATE", "PIPEWIRE_QUANTUM"];
 /// Carla's internal stereo gain at unity: a pass-through placeholder for
 /// plugins that failed to load or crashed, so their path keeps sounding, and
 /// the bus that meters the rig input, the rig output and each track.
@@ -615,15 +619,20 @@ impl Engine {
             Some(&lv2),
         );
 
-        if config.driver.eq_ignore_ascii_case("jack")
-            && std::env::var_os("PIPEWIRE_QUANTUM").is_none()
-        {
-            // When libjack is PipeWire's, this requests the buffer size and
-            // sample rate for our client. Real JACK ignores it.
+        let pw_request = config.driver.eq_ignore_ascii_case("jack")
+            && PW_ENV.iter().all(|v| std::env::var_os(v).is_none());
+        if pw_request {
+            // When libjack is PipeWire's, these ask for the buffer size and
+            // sample rate for our client; real JACK ignores them. They are
+            // requests, not PIPEWIRE_QUANTUM: that forces the quantum and
+            // rate on the whole graph, the interface and the desktop's sink
+            // with it, and fighting another app's request (a DAW's) over a
+            // forced rate could stall the interface for every app.
             std::env::set_var(
-                "PIPEWIRE_QUANTUM",
+                "PIPEWIRE_LATENCY",
                 format!("{}/{}", config.buffer_size, config.sample_rate),
             );
+            std::env::set_var("PIPEWIRE_RATE", format!("1/{}", config.sample_rate));
         }
 
         self.internal.clear();
@@ -631,7 +640,16 @@ impl Engine {
         self.view = View::Internal;
         self.hardware = None;
         self.config = config.clone();
-        match self.host.init(&config.driver, &config.client_name) {
+        let init = self.host.init(&config.driver, &config.client_name);
+        if pw_request {
+            // Only Carla's own client asks. Left set, every plugin bridge and
+            // a restarted Carlita would inherit the values (and a restart
+            // would keep them even after the options changed).
+            for v in PW_ENV {
+                std::env::remove_var(v);
+            }
+        }
+        match init {
             Ok(()) => {
                 self.running = true;
                 self.multi = multi;

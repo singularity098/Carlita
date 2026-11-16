@@ -103,7 +103,9 @@
   "output device" the client the output bus feeds. The default is the
   physical `system` ports. The MIDI devices tracks pick from are the ports
   of `system`, PipeWire's `Midi-Bridge` and a2jmidid's `a2j`. Sample rate
-  and buffer size are requested with `PIPEWIRE_QUANTUM` under PipeWire, or
+  and buffer size are requested (not forced, so other apps such as a DAW can
+  share the interface) with `PIPEWIRE_LATENCY` and `PIPEWIRE_RATE` for
+  Carla's own client under PipeWire, or
   passed to the driver under ALSA. A plain JACK server sets its own values.
 
 ## Status against the requirements
