@@ -38,11 +38,21 @@ component EdgeStrip inherits Rectangle {
     callback drag(float);
     callback release(float, bool);
     callback tap;
+    // The mouse came to rest on the strip (no button held).
+    callback hover;
     // The mouse is over the strip (its tab shows).
     out property <bool> hovered: self.visible && (strip.has-hover || tab-touch.has-hover);
     out property <length> tab-width: tab.width;
 
     property <float> amount: 0;
+
+    // A moment's rest, so the pointer passing the edge on its way somewhere
+    // does not bring the sidebar in.
+    Timer {
+        interval: 80ms;
+        running: root.hovered && !strip.pressed && !tab-touch.pressed;
+        triggered => { root.hover(); }
+    }
 
     // Visible tab, only while the mouse hovers the edge (so editors can use
     // the full screen otherwise).
@@ -224,6 +234,11 @@ export component MainWindow inherits Window {
     in-out property <float> right-pos: 0;
     property <bool> left-dragging;
     property <bool> right-dragging;
+    // A sidebar came in because the mouse rested on its edge strip: it goes
+    // again when the mouse leaves it, until something in it is clicked
+    // (then it stays until a click outside it, or its collapse button).
+    property <bool> left-by-hover;
+    property <bool> right-by-hover;
     property <length> left-width: min(460px, root.width * 0.9);
 
     // Track bar: docked in a window; in fullscreen 0 = hidden, 1 = shown.
@@ -385,12 +400,38 @@ export component MainWindow inherits Window {
     changed uncovered-width => { root.area-changed(); }
     changed uncovered-height => { root.area-changed(); }
 
-    function open-left() { root.left-pos = 1; root.right-pos = 0; root.top-pos = 0; }
-    function open-top() { root.top-pos = 1; root.left-pos = 0; root.right-pos = 0; root.top-by-hover = false; }
+    function open-left() { root.left-pos = 1; root.right-pos = 0; root.top-pos = 0; root.left-by-hover = false; root.right-by-hover = false; }
+    function open-top() { root.top-pos = 1; root.left-pos = 0; root.right-pos = 0; root.top-by-hover = false; root.left-by-hover = false; root.right-by-hover = false; }
     function close-top() { root.top-pos = 0; root.top-by-hover = false; }
-    function close-left() { root.left-pos = 0; }
-    function open-right() { root.right-pos = 1; root.left-pos = 0; root.top-pos = 0; }
-    function close-right() { root.right-pos = 0; }
+    function close-left() { root.left-pos = 0; root.left-by-hover = false; }
+    function open-right() { root.right-pos = 1; root.left-pos = 0; root.top-pos = 0; root.left-by-hover = false; root.right-by-hover = false; }
+    function close-right() { root.right-pos = 0; root.right-by-hover = false; }
+
+    // Where the sidebars sit once fully out (window coordinates). Measured
+    // against where they end up, not where they are mid-slide, so the
+    // pointer resting on the edge is inside the sidebar from the start.
+    function over-left(x: length, y: length) -> bool { x < root.left-width && y >= root.top-inset }
+    function over-right(x: length, y: length) -> bool { x >= root.width - root.right-width && y >= root.top-inset }
+    // Something over the sidebars: the pointer moving over it is not the
+    // pointer leaving a sidebar.
+    property <bool> overlay-open: root.browser-open || root.prompt-open || root.confirm-text != "";
+
+    // Every pointer move and press in the window, called from the window's
+    // event filter before any element sees it (a click on a button inside a
+    // sidebar never reaches anything but that button).
+    public function pointer-moved(x: length, y: length) {
+        if root.overlay-open { return; }
+        if root.left-by-hover && root.left-pos > 0 && !root.left-dragging && !root.over-left(x, y) {
+            root.close-left();
+        }
+        if root.right-by-hover && root.right-pos > 0 && !root.right-dragging && !root.over-right(x, y) {
+            root.close-right();
+        }
+    }
+    public function pointer-pressed(x: length, y: length) {
+        if root.left-by-hover && root.over-left(x, y) { root.left-by-hover = false; }
+        if root.right-by-hover && root.over-right(x, y) { root.right-by-hover = false; }
+    }
 
     // Typing goes back to the window's own key handling when the text
     // prompt (whose field has the focus while open) or the browser (whose
@@ -817,6 +858,14 @@ export component MainWindow inherits Window {
             if open { root.open-left(); } else { root.close-left(); }
         }
         tap => { root.open-left(); }
+        // Not while something else is out (the fullscreen track bar that came
+        // in by hover goes as the pointer leaves it anyway).
+        hover => {
+            if root.left-pos == 0 && root.right-pos == 0 && (root.top-pos == 0 || root.top-by-hover) && !root.overlay-open {
+                root.open-left();
+                root.left-by-hover = true;
+            }
+        }
     }
     right-strip := EdgeStrip {
         visible: root.right-pos == 0 || root.right-dragging;
@@ -838,6 +887,12 @@ export component MainWindow inherits Window {
             if open { root.open-right(); } else { root.close-right(); }
         }
         tap => { root.open-right(); }
+        hover => {
+            if root.left-pos == 0 && root.right-pos == 0 && (root.top-pos == 0 || root.top-by-hover) && !root.overlay-open {
+                root.open-right();
+                root.right-by-hover = true;
+            }
+        }
     }
 
     // Clear of an open sidebar, so it does not cover the sidebar's top.
