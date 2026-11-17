@@ -67,9 +67,16 @@ cargo run --release -- --windowed
 Carla's headers and library are found with `pkg-config` (`carla-standalone`).
 The `jack` crate's build also needs `jack.pc` (from `libjack-jackd2-dev`, or
 PipeWire's `pipewire-jack` dev package), even though libjack is loaded at run time.
-To use a Carla you built yourself (≥ 2.6 is needed for CLAP), set
-`CARLA_INCLUDE_DIR=/opt/carla/include/carla` and
-`CARLA_LIB_DIR=/opt/carla/lib/carla`.
+
+Ubuntu's Carla (2.5.8) has no CLAP support and fails to scan some native
+VST3 plugins. The AppImage and CI use Carla's main branch instead, built by
+`packaging/build-carla.sh` (it needs the Carla build dependencies listed in
+the CI workflow). To build against it:
+
+```bash
+prefix="$(packaging/build-carla.sh)"
+export CARLA_INCLUDE_DIR="$prefix/include/carla" CARLA_LIB_DIR="$prefix/lib/carla"
+```
 
 ### AppImage
 
@@ -81,9 +88,10 @@ CI builds the AppImage on every push and pull request (download it from the
 run's *Carlita-AppImage* artifact) and attaches it to a release for `v*` tags.
 
 This bundles Carla (engine, plugin bridges and the scanner) next to
-Carlita. Carla's plugin bridge is rebuilt from the same Carla release with
-the patches in `packaging/appimage/carla-patches` (it needs Carla's build
-dependencies, listed in the CI workflow). When PipeWire is running, the AppImage uses PipeWire's JACK
+Carlita: a pinned commit of Carla's main branch, built by
+`packaging/build-carla.sh` with the patches in
+`packaging/appimage/carla-patches`. `CARLA_PREFIX=/usr` bundles an
+installed Carla instead. When PipeWire is running, the AppImage uses PipeWire's JACK
 library, so Carlita talks to PipeWire directly and no `jackd` is needed.
 
 ### Tests
