@@ -212,6 +212,24 @@ struct Withdrawing {
     since: Instant,
 }
 
+/// A size Carlita gave a resizable editor (see `Embedder::fit_resizable`).
+#[derive(Debug, Clone, Copy)]
+struct Fit {
+    /// The editor's size before.
+    from: (u32, u32),
+    /// The size it was given.
+    to: (u32, u32),
+    /// The size of what it draws in before (see `Embedder::content_size`).
+    content: Option<(u32, u32)>,
+}
+
+/// How far `a` is from `b`, in pixels.
+fn distance(a: (u32, u32), b: (u32, u32)) -> u32 {
+    a.0.abs_diff(b.0) + a.1.abs_diff(b.1)
+}
+
+type Limits = ((u32, u32), (u32, u32));
+
 struct Embedded {
     /// The editor's window.
     window: Window,
@@ -227,6 +245,23 @@ struct Embedded {
     /// While the holder is mapped: where the whole editor is, and the part
     /// of it the holder shows (the rest is under an overlay).
     shown: Option<(Area, Area)>,
+    /// The size limits it was last fitted with: Carla rewrites the same
+    /// `WM_NORMAL_HINTS` whenever the plugin's window changes size, and
+    /// only a real change should fit the editor again.
+    limits: Option<Limits>,
+    /// The last size Carlita gave it, while it is settling.
+    fit: Option<Fit>,
+    /// The size Carlita just asked for: the next size change is Carlita's
+    /// own, not the editor's.
+    requested: Option<(u32, u32)>,
+    /// A size it was given and the size it took instead (it keeps its
+    /// shape): it is not given that size again while it has that one.
+    answered: Option<((u32, u32), (u32, u32))>,
+    /// When to look at what it draws in, once it has kept its size.
+    content_due: Option<Instant>,
+    /// The plugin did not follow a size it was given (see `check_content`):
+    /// it is not fitted to the area again.
+    no_fit: bool,
 }
 
 impl Embedded {
@@ -332,6 +367,16 @@ impl Embedder {
             }
             if !self.withdrawing.is_empty() {
                 self.check_withdrawing();
+            }
+            let due: Vec<u64> = self
+                .embedded
+                .iter()
+                .filter(|(_, e)| e.content_due.is_some_and(|t| Instant::now() >= t))
+                .map(|(k, _)| *k)
+                .collect();
+            for key in due {
+                self.check_content(key);
+                let _ = self.conn.flush();
             }
             if self.fit_due.is_some_and(|t| Instant::now() >= t) {
                 self.fit_due = None;
@@ -444,7 +489,7 @@ impl Embedder {
     /// are not believed (JUCE sets them on every embedded editor, and Carla
     /// copies them onto the editor window), and the plugin itself keeps the
     /// size within its own limits.
-    fn size_limits(&self, w: Window, declared: bool) -> Option<((u32, u32), (u32, u32))> {
+    fn size_limits(&self, w: Window, declared: bool) -> Option<Limits> {
         let unlimited = ((1, 1), (u32::MAX, u32::MAX));
         let hints = match WmSizeHints::get_normal_hints(&self.conn, w)
             .ok()
@@ -743,8 +788,15 @@ impl Embedder {
                 reembeds: 0,
                 embedded_at: Instant::now(),
                 shown: None,
+                limits: None,
+                fit: None,
+                requested: None,
+                answered: None,
+                content_due: Some(Instant::now() + RESIZE_SETTLE),
+                no_fit: false,
             },
         );
+        self.paint_wrappers(window);
         self.fit_resizable(key);
         self.place(key);
         self.conn.flush()?;
@@ -779,21 +831,159 @@ impl Embedder {
         };
         // Read every time: a plugin may change its mind.
         let declared = self.resizable.contains(&key);
-        let Some((min, max)) = self.size_limits(e.window, declared) else {
+        let limits = self.size_limits(e.window, declared);
+        let window = e.window;
+        let content = self.content_size(window);
+        let e = self.embedded.get_mut(&key).unwrap();
+        e.limits = limits;
+        let Some((min, max)) = limits else {
             return;
         };
-        if self.area.width == 0 || self.area.height == 0 {
+        if e.no_fit || self.area.width == 0 || self.area.height == 0 {
             return;
         }
         let w = self.area.width.clamp(min.0, max.0.max(min.0));
         let h = self.area.height.clamp(min.1, max.1.max(min.1));
-        if (w, h) != (e.width, e.height) {
+        if (w, h) != (e.width, e.height) && e.answered != Some(((w, h), (e.width, e.height))) {
+            e.fit = Some(Fit {
+                from: (e.width, e.height),
+                to: (w, h),
+                content,
+            });
+            e.requested = Some((w, h));
             let mut aux = ConfigureWindowAux::new().width(w).height(h);
             if let Some((x, y)) = e.offset() {
                 aux = aux.x(x).y(y);
             }
             let _ = self.conn.configure_window(e.window, &aux);
         }
+    }
+
+    /// The size of what an editor draws in: following its only child (and
+    /// that child's only child...) while it sits in the corner, the deepest
+    /// one. Carla's editor window holds the plugin's own window, and a
+    /// yabridge editor's holds a wrapper with Wine's window in it. Carla
+    /// resizes the window it holds along with its own, but a plugin that
+    /// does not follow (Superior Drummer through yabridge) keeps drawing at
+    /// its old size in the top-left corner.
+    fn content_size(&self, window: Window) -> Option<(u32, u32)> {
+        self.content_chain(window)
+            .last()
+            .and_then(|&w| self.conn.get_geometry(w).ok()?.reply().ok())
+            .map(|g| (g.width as u32, g.height as u32))
+    }
+
+    /// The windows from `window` down to what the editor draws in (see
+    /// `content_size`), not including `window`.
+    fn content_chain(&self, window: Window) -> Vec<Window> {
+        let mut chain = Vec::new();
+        let mut w = window;
+        for _ in 0..4 {
+            let Some(tree) = self.conn.query_tree(w).ok().and_then(|c| c.reply().ok()) else {
+                break;
+            };
+            let shown: Vec<Window> = tree
+                .children
+                .iter()
+                .copied()
+                .filter(|&c| {
+                    self.conn
+                        .get_window_attributes(c)
+                        .ok()
+                        .and_then(|c| c.reply().ok())
+                        .is_some_and(|a| {
+                            a.map_state != MapState::UNMAPPED
+                                && a.class == WindowClass::INPUT_OUTPUT
+                        })
+                })
+                .collect();
+            let [child] = shown.as_slice() else {
+                break;
+            };
+            let in_corner = self
+                .conn
+                .get_geometry(*child)
+                .ok()
+                .and_then(|c| c.reply().ok())
+                .is_some_and(|g| g.x == 0 && g.y == 0);
+            if !in_corner {
+                break;
+            }
+            chain.push(*child);
+            w = *child;
+        }
+        chain
+    }
+
+    /// Gives an editor's window, and the wrappers inside it, Carlita's
+    /// background. Carla's editor window (and yabridge's wrapper) has none,
+    /// so wherever the plugin does not draw (while it catches up with a new
+    /// size, or when it is smaller) the X server left whatever was there
+    /// before: the plugin's old picture, frozen behind it. The window the
+    /// plugin draws in is left alone.
+    fn paint_wrappers(&self, window: Window) {
+        let chain = self.content_chain(window);
+        if chain.is_empty() {
+            return;
+        }
+        let wrappers = std::iter::once(window).chain(chain[..chain.len() - 1].iter().copied());
+        for w in wrappers {
+            let depth = self
+                .conn
+                .get_geometry(w)
+                .ok()
+                .and_then(|c| c.reply().ok())
+                .map_or(24, |g| g.depth);
+            let background = if depth == 32 {
+                0xff00_0000 | HOLDER_RGB
+            } else {
+                HOLDER_RGB
+            };
+            let _ = self.conn.change_window_attributes(
+                w,
+                &ChangeWindowAttributesAux::new().background_pixel(background),
+            );
+            let _ = self.conn.clear_area(false, w, 0, 0, 0, 0);
+        }
+    }
+
+    /// Once an editor has kept its size for a while: if Carlita gave it a
+    /// size and what the plugin draws in did not follow, gives it back the
+    /// size of what the plugin draws, so that is centred (rather than drawn
+    /// in the top-left corner of a larger window), and stops fitting it.
+    fn check_content(&mut self, key: u64) {
+        let Some(e) = self.embedded.get_mut(&key) else {
+            return;
+        };
+        e.content_due = None;
+        // Settled: whatever happens next is not an answer to this fit.
+        let (window, size, fit) = (e.window, (e.width, e.height), e.fit.take());
+        self.paint_wrappers(window);
+        let Some(fit) = fit else {
+            return;
+        };
+        let Some(content) = self.content_size(window) else {
+            return;
+        };
+        if content == size || Some(content) != fit.content || content.0 < 32 || content.1 < 32 {
+            return;
+        }
+        log::info!(
+            "editor did not follow its new size {}x{} (it draws at {}x{}); giving it that size",
+            size.0,
+            size.1,
+            content.0,
+            content.1
+        );
+        let e = self.embedded.get_mut(&key).unwrap();
+        e.no_fit = true;
+        e.fit = None;
+        e.requested = Some(content);
+        let mut aux = ConfigureWindowAux::new().width(content.0).height(content.1);
+        if let Some((x, y)) = e.offset() {
+            aux = aux.x(x).y(y);
+        }
+        let _ = self.conn.configure_window(window, &aux);
     }
 
     /// Puts the editor in the middle of the area, as large as it is but no
@@ -1162,16 +1352,36 @@ impl Embedder {
                 XEvent::ConfigureNotify(c) if c.event == c.window => {
                     if let Some(k) = self.key_for_window(c.window) {
                         let e = self.embedded.get_mut(&k).unwrap();
-                        if (e.width, e.height) != (c.width as u32, c.height as u32) {
-                            e.width = c.width as u32;
-                            e.height = c.height as u32;
+                        let size = (c.width as u32, c.height as u32);
+                        if (e.width, e.height) != size {
+                            e.width = size.0;
+                            e.height = size.1;
                             // Placed anew below, wherever it moved itself.
                             if let Some((full, _)) = e.shown {
                                 e.shown = Some((full, Area::default()));
                             }
-                            if e.embedded_at.elapsed() < EMBED_SETTLE {
-                                self.fit_due = Some(Instant::now() + RESIZE_SETTLE);
+                            // Carlita's own resize, or the editor's. Right
+                            // after being embedded, an editor that goes back
+                            // to its old size (JUCE's, in Carla 2.5) is
+                            // fitted again; one that goes nearer the size it
+                            // was given keeps its size: the plugin keeps
+                            // its own shape (Modometer keeps 16:9), and
+                            // fitting it again would make it flip between
+                            // the two sizes.
+                            let own = e.requested.take() == Some(size);
+                            let reverted = e
+                                .fit
+                                .is_none_or(|f| distance(size, f.to) >= distance(f.from, f.to));
+                            if !own {
+                                match e.fit {
+                                    Some(f) if !reverted => e.answered = Some((f.to, size)),
+                                    _ if e.embedded_at.elapsed() < EMBED_SETTLE => {
+                                        self.fit_due = Some(Instant::now() + RESIZE_SETTLE);
+                                    }
+                                    _ => {}
+                                }
                             }
+                            e.content_due = Some(Instant::now() + RESIZE_SETTLE);
                             self.place(k);
                         } else if let Some((x, y)) = e.offset() {
                             // Many toolkits move their window when they
@@ -1200,7 +1410,11 @@ impl Embedder {
                 // the area next changed.
                 XEvent::PropertyNotify(p) if p.atom == u32::from(AtomEnum::WM_NORMAL_HINTS) => {
                     if let Some(k) = self.key_for_window(p.window) {
-                        self.fit_resizable(k);
+                        let declared = self.resizable.contains(&k);
+                        let limits = self.size_limits(p.window, declared);
+                        if limits != self.embedded[&k].limits {
+                            self.fit_resizable(k);
+                        }
                     }
                 }
                 XEvent::DestroyNotify(d) if d.event == d.window => {

@@ -46,7 +46,20 @@ off-screen with XComposite and forwarded synthetic input) was dropped
    Carla 2.5 copies the plugin's hints onto its editor window only once the
    editor is showing, and follows the plugin's own resizes while it opens,
    so the host fits an editor again when its `WM_NORMAL_HINTS` change, and
-   when it changes its own size within 2 s of being embedded. Carla 2.5
+   when it changes its own size within 2 s of being embedded, but only
+   if it went back towards its old size. A plugin that keeps its own shape
+   (Modometer keeps 16:9) answers a new size with the nearest one it takes,
+   and that answer is kept: the host remembers it for that size and does
+   not ask again, and Carla rewriting the same `WM_NORMAL_HINTS` (it does
+   whenever the plugin's window changes size) does not count as a change.
+   Fitting it again each time made such an editor flip between the two
+   sizes. Once an editor has kept a size it was given for 300 ms, the host
+   looks at what the plugin draws in (the window's only child, and its only
+   child, while they sit in the corner): if that kept its old size (Superior
+   Drummer through yabridge does: Carla resizes yabridge's wrapper, but
+   Wine's window in it stays as it was), the editor is given that size back,
+   so it is centred rather than drawn in the top-left corner, and it is not
+   fitted to the area again. Carla 2.5
    also tells a VST3 editor nothing when its window is resized (LV2 editors
    get `ui:resize`): the editor has to follow its X window by itself, as
    DPF's (Xythos) and Kaia's do.
@@ -59,7 +72,12 @@ off-screen with XComposite and forwarded synthetic input) was dropped
    centres it again whenever it changes its own size. The holder's
    background is opaque Carlita grey: pixel 0, which it was, is see-through
    in a 32-bit (ARGB) main window, and the desktop showed through Carlita
-   wherever the editor did not cover the holder.
+   wherever the editor did not cover the holder. Carla's own editor window
+   (and yabridge's wrapper in it) has no background either, so wherever the
+   plugin did not draw (while it caught up with a new size, or when it is
+   smaller) the plugin's old picture stayed, frozen behind it: the host
+   gives those windows Carlita's background too (not the window the plugin
+   draws in).
 6. An X11 child window is always above what Slint draws, so nothing can be
    drawn over an editor. The main area reaches the window's edges (below
    the docked track bar, above the keyboard), and the editor may lie under
