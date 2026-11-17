@@ -475,3 +475,303 @@ fn edges_f11_and_focus() {
 
     drop(host);
 }
+
+/// What the plugin in [`FakeCarla`] does when its window is resized.
+#[derive(Clone, Copy)]
+enum Plugin {
+    /// Keeps 16:9 (as Modometer does): `checkSizeConstraint` gives the
+    /// largest 16:9 size inside the one proposed.
+    SixteenNine,
+    /// Says it can be resized but keeps drawing at its own size in the
+    /// top-left corner (as Superior Drummer does through yabridge): Carla
+    /// resizes the wrapper it holds, but the window inside stays as it is.
+    DoesNotFollow,
+}
+
+/// Plays the part of Carla's own VST3 host (the pinned commit of its main
+/// branch): `X11PluginUI` holds the plugin's window and follows it, and
+/// `CarlaPluginVST3::handlePluginUIResized` asks the plugin about every new
+/// size of its window. Returns the editor window, the plugin's window and
+/// how many times the editor window changed size.
+struct FakeCarla {
+    host: Window,
+    child: Window,
+    resizes: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl FakeCarla {
+    fn start(title: &str, w: u16, h: u16, plugin: Plugin) -> FakeCarla {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::sync::Arc;
+        let (conn, screen) = x11rb::connect(None).unwrap();
+        let root = conn.setup().roots[screen].root;
+        // Like Carla's: no background, and it hears about its child.
+        let host = conn.generate_id().unwrap();
+        conn.create_window(
+            x11rb::COPY_DEPTH_FROM_PARENT,
+            host,
+            root,
+            0,
+            0,
+            w,
+            h,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &CreateWindowAux::new()
+                .event_mask(EventMask::STRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_NOTIFY),
+        )
+        .unwrap();
+        conn.change_property8(
+            PropMode::REPLACE,
+            host,
+            AtomEnum::WM_NAME,
+            AtomEnum::STRING,
+            title.as_bytes(),
+        )
+        .unwrap();
+        let child = window(&conn, host, w, h, b"plugin");
+        conn.configure_window(child, &ConfigureWindowAux::new().x(0).y(0))
+            .unwrap();
+        conn.map_window(child).unwrap();
+        if let Plugin::DoesNotFollow = plugin {
+            let inner = window(&conn, child, w, h, b"wine");
+            conn.configure_window(inner, &ConfigureWindowAux::new().x(0).y(0))
+                .unwrap();
+            conn.map_window(inner).unwrap();
+        }
+        let constrain = move |(w, h): (u32, u32)| match plugin {
+            Plugin::SixteenNine => {
+                let w = w.min((h as f32 * 16.0 / 9.0).round() as u32);
+                (w, (w as f32 * 9.0 / 16.0).round() as u32)
+            }
+            Plugin::DoesNotFollow => (w, h),
+        };
+        let mut min = WmSizeHints::new();
+        min.min_size = Some((100, 56));
+        min.set_normal_hints(&conn, host).unwrap();
+        conn.map_window(host).unwrap();
+        conn.flush().unwrap();
+
+        let resizes = Arc::new(AtomicU32::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (r, s) = (Arc::clone(&resizes), Arc::clone(&stop));
+        let thread = std::thread::spawn(move || {
+            let mut ui = (w as u32, h as u32);
+            let mut host_size = ui;
+            while !s.load(Ordering::Relaxed) {
+                // X11PluginUI::idle
+                let (mut next_host, mut next_child) = (None, None);
+                while let Ok(Some(ev)) = conn.poll_for_event() {
+                    if let x11rb::protocol::Event::ConfigureNotify(c) = ev {
+                        let size = (c.width as u32, c.height as u32);
+                        if c.window == host {
+                            next_host = Some(size);
+                            if size != host_size {
+                                host_size = size;
+                                r.fetch_add(1, Ordering::Relaxed);
+                            }
+                        } else if c.window == child {
+                            next_child = Some(size);
+                        }
+                    }
+                }
+                if let Some((cw, ch)) = next_child {
+                    // applyHintsFromChildWindow, then follow the child.
+                    min.set_normal_hints(&conn, host).unwrap();
+                    conn.configure_window(host, &ConfigureWindowAux::new().width(cw).height(ch))
+                        .unwrap();
+                } else if let Some(size) = next_host {
+                    conn.configure_window(
+                        child,
+                        &ConfigureWindowAux::new().width(size.0).height(size.1),
+                    )
+                    .unwrap();
+                    // handlePluginUIResized. Its isResizingFromHost is
+                    // always clear by now: uiIdle clears it in the same idle
+                    // that set it.
+                    if ui != size {
+                        let c = constrain(size);
+                        if c != size {
+                            ui = c;
+                            conn.configure_window(
+                                host,
+                                &ConfigureWindowAux::new().width(c.0).height(c.1),
+                            )
+                            .unwrap();
+                        } else {
+                            ui = size; // on_size
+                        }
+                    }
+                }
+                conn.flush().unwrap();
+                std::thread::sleep(Duration::from_millis(16));
+            }
+        });
+        FakeCarla {
+            host,
+            child,
+            resizes,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn resizes(&self) -> u32 {
+        self.resizes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Drop for FakeCarla {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// A resizable editor that keeps its own shape settles at the largest size
+/// it takes inside the area, centred, rather than flipping between that and
+/// the area's size; one that does not follow a new size is given its own
+/// size back, centred, rather than drawing in the top-left corner.
+#[test]
+fn editors_that_keep_their_shape_or_size() {
+    if std::env::var_os("DISPLAY").is_none() {
+        eprintln!("no DISPLAY; skipping");
+        return;
+    }
+    let _x = X_SERVER.lock().unwrap_or_else(|e| e.into_inner());
+    let (conn, screen) = x11rb::connect(None).unwrap();
+    let root = conn.setup().roots[screen].root;
+    let main = window(&conn, root, 800, 600, b"carlita-test-main-4");
+    conn.map_window(main).unwrap();
+    conn.flush().unwrap();
+    let geometry = |w| {
+        let g = conn.get_geometry(w).unwrap().reply().unwrap();
+        (g.x, g.y, g.width, g.height)
+    };
+
+    let host = EditorHost::spawn();
+    let area = Area {
+        x: 20,
+        y: 50,
+        width: 760,
+        height: 500,
+    };
+    host.send(HostCommand::SetArea {
+        area,
+        uncovered: area,
+    });
+
+    // 16:9 inside 760 x 500 is 760 x 428.
+    let carla = FakeCarla::start("carlita-editor-60", 400, 225, Plugin::SixteenNine);
+    host.send(HostCommand::Attach {
+        key: 60,
+        title: "carlita-editor-60".into(),
+        parent: main,
+        resizable: true,
+    });
+    wait(&host, |e| {
+        matches!(e, HostEvent::Attached { key: 60, .. }).then_some(())
+    });
+    std::thread::sleep(Duration::from_millis(2500));
+    let settled = carla.resizes();
+    assert_eq!((geometry(carla.host).2, geometry(carla.host).3), (760, 428));
+    assert_eq!(
+        (geometry(carla.child).2, geometry(carla.child).3),
+        (760, 428)
+    );
+    let holder = parent_of(&conn, carla.host);
+    assert_eq!(geometry(holder), (20, 50 + 36, 760, 428));
+    assert!(settled <= 6, "the editor changed size {settled} times");
+    std::thread::sleep(Duration::from_millis(1000));
+    assert_eq!(carla.resizes(), settled, "the editor keeps changing size");
+    host.send(HostCommand::Detach { key: 60 });
+    until(|| parent_of(&conn, carla.host) == root);
+    drop(carla);
+
+    let carla = FakeCarla::start("carlita-editor-61", 300, 200, Plugin::DoesNotFollow);
+    host.send(HostCommand::Attach {
+        key: 61,
+        title: "carlita-editor-61".into(),
+        parent: main,
+        resizable: true,
+    });
+    wait(&host, |e| {
+        matches!(e, HostEvent::Attached { key: 61, .. }).then_some(())
+    });
+    until(|| {
+        let holder = parent_of(&conn, carla.host);
+        geometry(carla.host) == (0, 0, 300, 200)
+            && geometry(holder) == (20 + 230, 50 + 150, 300, 200)
+    });
+    // And it stays so when the area changes.
+    let smaller = Area { width: 700, ..area };
+    host.send(HostCommand::SetArea {
+        area: smaller,
+        uncovered: smaller,
+    });
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(geometry(carla.host), (0, 0, 300, 200));
+    host.send(HostCommand::Detach { key: 61 });
+    until(|| parent_of(&conn, carla.host) == root);
+    drop(carla);
+
+    // Carla's window has no background of its own, so where the plugin's
+    // window does not cover it, the old picture stayed: Carlita paints it.
+    let bare = conn.generate_id().unwrap();
+    conn.create_window(
+        x11rb::COPY_DEPTH_FROM_PARENT,
+        bare,
+        root,
+        0,
+        0,
+        300,
+        200,
+        0,
+        WindowClass::INPUT_OUTPUT,
+        0,
+        &CreateWindowAux::new(),
+    )
+    .unwrap();
+    conn.change_property8(
+        PropMode::REPLACE,
+        bare,
+        AtomEnum::WM_NAME,
+        AtomEnum::STRING,
+        b"carlita-editor-62",
+    )
+    .unwrap();
+    let mut fixed = WmSizeHints::new();
+    fixed.min_size = Some((300, 200));
+    fixed.max_size = Some((300, 200));
+    fixed.set_normal_hints(&conn, bare).unwrap();
+    let plugin = window(&conn, bare, 100, 200, b"plugin");
+    conn.configure_window(plugin, &ConfigureWindowAux::new().x(0).y(0))
+        .unwrap();
+    conn.map_window(plugin).unwrap();
+    conn.map_window(bare).unwrap();
+    conn.flush().unwrap();
+    host.send(HostCommand::Attach {
+        key: 62,
+        title: "carlita-editor-62".into(),
+        parent: main,
+        resizable: false,
+    });
+    wait(&host, |e| {
+        matches!(e, HostEvent::Attached { key: 62, .. }).then_some(())
+    });
+    until(|| {
+        let img = conn
+            .get_image(ImageFormat::Z_PIXMAP, bare, 200, 100, 1, 1, !0)
+            .unwrap()
+            .reply()
+            .unwrap();
+        img.data[..3] == [0x1a, 0x15, 0x15]
+    });
+    host.send(HostCommand::Detach { key: 62 });
+    until(|| parent_of(&conn, bare) == root);
+}
