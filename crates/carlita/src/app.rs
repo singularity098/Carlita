@@ -457,6 +457,38 @@ impl App {
         });
         tu.on_port_label(|s| ss(port_label(&s)));
 
+        // ---- pointer, seen before any element gets it: a sidebar brought
+        // in by hovering its edge goes when the pointer leaves it, unless
+        // something in it was clicked (an element's TouchArea keeps clicks
+        // to itself, so the sidebar could not tell otherwise).
+        {
+            use slint::winit_030::winit::event::{ElementState, WindowEvent};
+            use slint::winit_030::{EventResult, WinitWindowAccessor};
+            let weak = ui.as_weak();
+            let mut cursor = (0.0f32, 0.0f32);
+            ui.window().on_winit_window_event(move |w, e| {
+                match e {
+                    WindowEvent::CursorMoved { position, .. } => {
+                        let s = w.scale_factor();
+                        cursor = (position.x as f32 / s, position.y as f32 / s);
+                        if let Some(ui) = weak.upgrade() {
+                            ui.invoke_pointer_moved(cursor.0, cursor.1);
+                        }
+                    }
+                    WindowEvent::MouseInput {
+                        state: ElementState::Pressed,
+                        ..
+                    } => {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.invoke_pointer_pressed(cursor.0, cursor.1);
+                        }
+                    }
+                    _ => {}
+                }
+                EventResult::Propagate
+            });
+        }
+
         // ---- chain
         on!(ui, on_select_slot, |a, id: i32| a
             .select(Some(SlotId(id as u64))));
