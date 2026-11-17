@@ -239,7 +239,19 @@ pub fn probe(
     timeout: Duration,
 ) -> ProbeResult {
     use std::os::unix::process::CommandExt;
-    let child = Command::new(discovery_tool)
+    let mut cmd = Command::new(discovery_tool);
+    // SAFETY: the hook only makes system calls (see `limits`).
+    unsafe {
+        cmd.pre_exec(|| {
+            // Wine plugins need more than the usual 1024 open files, and
+            // nothing open in Carlita (JACK clients, audio devices, the
+            // window) should count against that or reach Wine.
+            crate::limits::raise_open_file_limit();
+            crate::limits::close_inherited_fds_on_exec();
+            Ok(())
+        });
+    }
+    let child = cmd
         .arg(format.discovery_arg())
         .arg(target)
         // Only read the plugin's description, as Carla's own scanner does

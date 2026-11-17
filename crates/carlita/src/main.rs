@@ -14,6 +14,12 @@ slint::include_modules!();
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     restore_host_library_path();
+    // Before anything starts a plugin bridge or the scanner: Wine plugins
+    // need more open files than the usual soft limit of 1024.
+    match carlita_core::limits::raise_open_file_limit() {
+        Some(n) => log::info!("open file limit {n}"),
+        None => log::warn!("could not read the open file limit"),
+    }
 
     let mut opts = app::StartOptions::default();
     for arg in std::env::args().skip(1) {

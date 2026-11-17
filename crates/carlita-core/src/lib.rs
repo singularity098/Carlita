@@ -6,6 +6,7 @@
 pub mod catalog;
 pub mod chain;
 pub mod discovery;
+pub mod limits;
 pub mod midi;
 pub mod paths;
 pub mod plugin;
