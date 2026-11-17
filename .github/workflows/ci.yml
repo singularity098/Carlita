@@ -13,13 +13,26 @@ jobs:
         run: |
           echo "jackd2 jackd/tweak_rt_limits boolean false" | sudo debconf-set-selections
           sudo apt-get update
-          sudo apt-get install -y carla carla-dev libclang-dev clang jackd2 xvfb \
-            libasound2-dev libxkbcommon-dev libfontconfig-dev \
-            pkg-config libjack-jackd2-dev
+          sudo apt-get install -y libclang-dev clang jackd2 xvfb \
+            libasound2-dev libxkbcommon-dev libfontconfig-dev
+          # To build Carla (see packaging/build-carla.sh).
+          sudo apt-get install -y pkg-config libx11-dev libxcursor-dev libxext-dev \
+            libgl-dev libfreetype-dev liblo-dev libmagic-dev libsndfile1-dev \
+            libfluidsynth-dev libjack-jackd2-dev libmpg123-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: ~/carla-build
+          key: carla-${{ hashFiles('packaging/build-carla.sh', 'packaging/appimage/carla-patches/*') }}
+      - name: Carla
+        run: |
+          prefix="$(CARLA_BUILD_DIR=$HOME/carla-build packaging/build-carla.sh)"
+          echo "CARLA_INCLUDE_DIR=$prefix/include/carla" >> "$GITHUB_ENV"
+          echo "CARLA_LIB_DIR=$prefix/lib/carla" >> "$GITHUB_ENV"
+          echo "CARLA_BUILD_DIR=$HOME/carla-build" >> "$GITHUB_ENV"
       - name: Start a dummy JACK server
         run: |
           jackd --no-realtime -d dummy -r 48000 -p 256 &
@@ -43,16 +56,26 @@ jobs:
       - name: System dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y carla carla-dev libclang-dev clang libasound2-dev \
+          sudo apt-get install -y libclang-dev clang libasound2-dev \
             libxkbcommon-dev libfontconfig-dev libfuse2t64 file patchelf
-          # To rebuild Carla's plugin bridge (see packaging/appimage/carla-patches).
+          # To build Carla (see packaging/build-carla.sh).
           sudo apt-get install -y pkg-config libx11-dev libxcursor-dev libxext-dev \
             libgl-dev libfreetype-dev liblo-dev libmagic-dev libsndfile1-dev \
-            libfluidsynth-dev libjack-jackd2-dev
+            libfluidsynth-dev libjack-jackd2-dev libmpg123-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: appimage
+      - uses: actions/cache@v4
+        with:
+          path: ~/carla-build
+          key: carla-${{ hashFiles('packaging/build-carla.sh', 'packaging/appimage/carla-patches/*') }}
+      - name: Carla
+        run: |
+          prefix="$(CARLA_BUILD_DIR=$HOME/carla-build packaging/build-carla.sh)"
+          echo "CARLA_INCLUDE_DIR=$prefix/include/carla" >> "$GITHUB_ENV"
+          echo "CARLA_LIB_DIR=$prefix/lib/carla" >> "$GITHUB_ENV"
+          echo "CARLA_BUILD_DIR=$HOME/carla-build" >> "$GITHUB_ENV"
       - name: Build AppImage
         run: packaging/appimage/build-appimage.sh
       - name: Smoke test

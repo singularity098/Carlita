@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Builds Carlita-<version>-x86_64.AppImage.
 #
-# Carla is bundled from CARLA_PREFIX (default /usr). For CLAP support build
-# Carla >= 2.6 from source, `make install PREFIX=/opt/carla`, and run:
-#   CARLA_PREFIX=/opt/carla packaging/appimage/build-appimage.sh
+# Carla is built from source by packaging/build-carla.sh (a pinned commit of
+# its main branch, with CLAP and native VST3, and Carlita's patches). To
+# bundle a Carla installed elsewhere instead, set CARLA_PREFIX, e.g.
+#   CARLA_PREFIX=/usr packaging/appimage/build-appimage.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-PREFIX="${CARLA_PREFIX:-/usr}"
+PREFIX="${CARLA_PREFIX:-$("$ROOT/packaging/build-carla.sh")}"
 APPDIR="$ROOT/packaging/appimage/AppDir"
 TOOLS="$ROOT/target/appimage-tools"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | cut -d'"' -f2)"
@@ -24,11 +25,11 @@ install -m755 "$ROOT/target/release/carlita" "$APPDIR/usr/bin/carlita"
 cp -a "$PREFIX/lib/carla" "$APPDIR/usr/lib/carla"
 cp -a "$PREFIX/share/carla/resources" "$APPDIR/usr/share/carla/" 2>/dev/null || true
 
-# Carla's plugin bridge, rebuilt from the same Carla version with the patches
-# in carla-patches/: Carla does not hand its UI scale to bridges, so editors
-# of plugins running in their own process were always drawn at 1.0. Set
-# CARLITA_STOCK_BRIDGE=1 to keep Carla's own bridge.
-if [ -z "${CARLITA_STOCK_BRIDGE:-}" ]; then
+# A Carla from CARLA_PREFIX lacks Carlita's patches (see carla-patches/):
+# rebuild its plugin bridge from the same Carla version with them. Without
+# them, editors of plugins running in their own process are always drawn at
+# 1.0. Set CARLITA_STOCK_BRIDGE=1 to keep Carla's own bridge.
+if [ -n "${CARLA_PREFIX:-}" ] && [ -z "${CARLITA_STOCK_BRIDGE:-}" ]; then
     CARLA_VERSION="$(PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
         pkg-config --modversion carla-standalone)"
     SRC="$ROOT/target/carla-src-$CARLA_VERSION"
