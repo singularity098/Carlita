@@ -18,3 +18,9 @@ rebuilds `carla-bridge-native` from that Carla version with these patches.
   smaller than in REAPER (Superior Drummer, for one). The patched Carla
   only tells VST2 editors a scale other than 1.0. With `CARLA_PREFIX`, only
   the bridge is rebuilt, so this holds for plugins in their own process.
+- `vst3-ui-scale.patch`: Carla's VST3 host never told editors its UI scale
+  (a TODO in its code), so the *plugin editor size* in Display options did
+  nothing for VST3 plugins. The patched Carla calls
+  `IPlugViewContentScaleSupport::setContentScaleFactor` before attaching
+  the editor, again only for a scale other than 1.0. yabridge passes it on
+  to Windows plugins.

@@ -1,0 +1,57 @@
+diff --git a/source/backend/plugin/CarlaPluginVST3.cpp b/source/backend/plugin/CarlaPluginVST3.cpp
+index 0e7f16b..e034826 100644
+--- a/source/backend/plugin/CarlaPluginVST3.cpp
++++ b/source/backend/plugin/CarlaPluginVST3.cpp
+@@ -1672,10 +1672,8 @@ public:
+                 fUI.window->setTitle(uiTitle.buffer());
+ 
+                #ifndef CARLA_OS_MAC
+-                if (d_isNotZero(opts.uiScale))
+-                {
+-                    // TODO inform plugin of what UI scale we use
+-                }
++                // Carlita: inform plugin of what UI scale we use
++                setViewContentScale(opts.uiScale);
+                #endif
+ 
+                 v3_cpp_obj(fV3.view)->set_frame(fV3.view, (v3_plugin_frame**)&fPluginFramePtr);
+@@ -1766,6 +1764,26 @@ public:
+         runIdleCallbacksAsNeeded(true);
+     }
+ 
++   #ifndef CARLA_OS_MAC
++    // Carlita: tell the view the UI scale (IPlugViewContentScaleSupport),
++    // before it is attached. Only when it is not 1.0: at 1.0 plugins keep
++    // their own scaling, as in hosts that say nothing (Windows plugins under
++    // yabridge follow Wine's DPI, which 1.0 would override).
++    void setViewContentScale(const float scale)
++    {
++        if (carla_isZero(scale) || carla_isEqual(scale, 1.0f))
++            return;
++
++        v3_plugin_view_content_scale** contentScale = nullptr;
++        if (v3_cpp_obj_query_interface(fV3.view, v3_plugin_view_content_scale_iid, &contentScale) != V3_OK
++            || contentScale == nullptr)
++            return;
++
++        v3_cpp_obj(contentScale)->set_content_scale_factor(contentScale, scale);
++        v3_cpp_obj_unref(contentScale);
++    }
++   #endif
++
+     void* embedCustomUI(void* const ptr) override
+     {
+         CARLA_SAFE_ASSERT_RETURN(fUI.window == nullptr, nullptr);
+@@ -1776,10 +1794,8 @@ public:
+        #ifndef CARLA_OS_MAC
+         const EngineOptions& opts(pData->engine->getOptions());
+ 
+-        if (d_isNotZero(opts.uiScale))
+-        {
+-            // TODO
+-        }
++        // Carlita: inform plugin of what UI scale we use
++        setViewContentScale(opts.uiScale);
+        #endif
+ 
+         if (v3_cpp_obj(fV3.view)->attached(fV3.view, ptr, V3_VIEW_PLATFORM_TYPE_NATIVE) == V3_OK)

@@ -114,8 +114,9 @@ off-screen with XComposite and forwarded synthetic input) was dropped
   cut off. Plugins are told the desktop's scale times the *plugin editor
   size* picked in Display options (`ENGINE_OPTION_FRONTEND_UI_SCALE`, and
   `CARLA_BRIDGE_UI_SCALE` for the patched bridge); changing it restarts the
-  engine, since plugins read it when they start. At a scale of 1.0, VST2
-  editors are told nothing, as in REAPER, so Windows plugins under yabridge
+  engine, since plugins read it when they start. VST2 and VST3 editors are
+  told a scale only when it is not 1.0 (VST3 through
+  `IPlugViewContentScaleSupport`), as hosts that say nothing, so Windows plugins under yabridge
   keep the size Wine's DPI setting gives them (see
   `packaging/appimage/carla-patches`). Editors that size their
   controls to the window (Xythos, for one, shrinks below 900 × 560 logical
