@@ -58,11 +58,15 @@ pub struct DisplaySettings {
     pub maximized: bool,
     /// Brightness 0..=100, if the hardware supports it.
     pub brightness: Option<u32>,
-    /// Width of the invisible edge strips that open the sidebars, in pixels.
-    /// Kept narrow, so buttons near the screen's edges stay reachable by
-    /// touch. (Renamed from `edge_strip_width`, whose old default of 18 was
-    /// too wide, so saved settings pick up the new default.)
-    pub edge_swipe_width: u32,
+    /// Width of the invisible strips on the left and right edges that a
+    /// swipe opens the sidebars from, in logical pixels (one of
+    /// `SIDE_SWIPE_WIDTHS`). Wider catches more swipes on a touchscreen (a
+    /// finger swiping in from the bezel is often first seen some way in);
+    /// narrower leaves more of an editor near the edges to touch. The mouse
+    /// only brings a sidebar in at the very edge, whatever this is.
+    /// (Renamed from `edge_swipe_width`, whose 6 caught too few swipes, so
+    /// saved settings pick up the new default.)
+    pub side_swipe_width: u32,
     /// The UI theme, by name (`Theme.names` in `ui/theme.slint`; unknown
     /// names fall back to the first, Iris). Never rename a theme.
     pub theme: String,
@@ -74,6 +78,18 @@ pub struct DisplaySettings {
 impl DisplaySettings {
     /// The editor zooms offered in Display options, in percent.
     pub const EDITOR_ZOOMS: [u32; 5] = [100, 125, 150, 175, 200];
+
+    /// The side swipe widths offered in Display options, with their names.
+    pub const SIDE_SWIPE_WIDTHS: [(u32, &'static str); 4] =
+        [(8, "Narrow"), (16, "Medium"), (24, "Wide"), (32, "Widest")];
+
+    /// The name of a side swipe width, or of the nearest one offered.
+    pub fn side_swipe_label(width: u32) -> &'static str {
+        Self::SIDE_SWIPE_WIDTHS
+            .iter()
+            .min_by_key(|(w, _)| w.abs_diff(width))
+            .map_or("Medium", |(_, l)| l)
+    }
 
     /// `editor_zoom` as a factor, kept to what is offered (100%..200%).
     pub fn editor_zoom_factor(&self) -> f32 {
@@ -91,7 +107,7 @@ impl Default for DisplaySettings {
             window_y: None,
             maximized: false,
             brightness: None,
-            edge_swipe_width: 6,
+            side_swipe_width: 16,
             theme: "Iris".into(),
             editor_zoom: 100,
         }
@@ -180,6 +196,14 @@ mod tests {
         assert_eq!(s.audio.driver, "JACK");
         assert_eq!(s.display.editor_zoom, 100);
         assert_eq!(s.display.editor_zoom_factor(), 1.0);
+        assert_eq!(s.display.side_swipe_width, 16);
+    }
+
+    #[test]
+    fn side_swipe_labels() {
+        assert_eq!(DisplaySettings::side_swipe_label(16), "Medium");
+        assert_eq!(DisplaySettings::side_swipe_label(30), "Widest");
+        assert_eq!(DisplaySettings::side_swipe_label(0), "Narrow");
     }
 
     #[test]

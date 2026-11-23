@@ -40,11 +40,21 @@ component EdgeStrip inherits Rectangle {
     callback tap;
     // The mouse came to rest on the strip (no button held).
     callback hover;
+    // How far in from the edge the mouse brings the tab and the sidebar:
+    // the strip is wider for touch (a finger swiping in from the bezel
+    // first lands some way in), but a mouse stops at the screen's edge, and
+    // the strip over an editor should not open the sidebar each time the
+    // pointer goes near it.
+    in property <length> hover-width: self.width;
     // The mouse is over the strip (its tab shows).
-    out property <bool> hovered: self.visible && (strip.has-hover || tab-touch.has-hover);
+    out property <bool> hovered: self.visible && ((strip.has-hover && root.in-hover-zone) || tab-touch.has-hover);
     out property <length> tab-width: tab.width;
 
+    property <bool> in-hover-zone: root.right-side ? strip.mouse-x >= root.width - root.hover-width : strip.mouse-x < root.hover-width;
     property <float> amount: 0;
+    // How far the finger went in, and when it came down.
+    property <length> dragged: 0;
+    property <duration> pressed-at: 0;
 
     // A moment's rest, so the pointer passing the edge on its way somewhere
     // does not bring the sidebar in.
@@ -57,7 +67,7 @@ component EdgeStrip inherits Rectangle {
     // Visible tab, only while the mouse hovers the edge (so editors can use
     // the full screen otherwise).
     tab := Rectangle {
-        visible: strip.has-hover || tab-touch.has-hover;
+        visible: (strip.has-hover && root.in-hover-zone) || tab-touch.has-hover;
         width: 44px;
         height: 120px;
         x: root.right-side ? root.width - self.width : 0;
@@ -83,18 +93,28 @@ component EdgeStrip inherits Rectangle {
         width: root.width;
         x: 0;
         moved => {
-            root.amount = max(0, min(1, (root.right-side ? self.pressed-x - self.mouse-x : self.mouse-x - self.pressed-x) / root.panel-width));
+            root.dragged = root.right-side ? self.pressed-x - self.mouse-x : self.mouse-x - self.pressed-x;
+            root.amount = max(0, min(1, root.dragged / root.panel-width));
             root.drag(root.amount);
         }
         pointer-event(e) => {
+            if e.kind == PointerEventKind.down {
+                root.pressed-at = animation-tick();
+                root.dragged = 0;
+            }
             if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
                 // A tap on the strip with the mouse also opens it.
                 if abs(self.mouse-x - self.pressed-x) < 4px && e.kind == PointerEventKind.up && e.button == PointerEventButton.left {
                     root.tap();
                 } else {
-                    root.release(root.amount, root.amount > 0.33);
+                    // Opens past a short way in (a third of a wide panel was
+                    // a long way to drag on a touchscreen), or on a quick
+                    // flick inwards.
+                    root.release(root.amount, root.dragged > min(80px, root.panel-width * 0.33)
+                        || (root.dragged > 24px && animation-tick() - root.pressed-at < 300ms));
                 }
                 root.amount = 0;
+                root.dragged = 0;
             }
         }
     }
@@ -220,6 +240,11 @@ export component MainWindow inherits Window {
 
     // ---------------------------------------------------------- properties
     in property <length> strip-width: 6px;
+    // How wide the left and right strips are for touch (Display options):
+    // wider than `strip-width`, which a fingertip swiping in from the bezel
+    // seldom lands in. The mouse still only brings a tab or sidebar in
+    // within `edge-width` of the edge.
+    in property <length> side-touch-width: 16px;
     // In a window with a frame, the resize handles take the outermost
     // pixels of each edge, which left a strip under them hardly anything to
     // grab: the strips then start inside the handles, and are a little wider
@@ -228,6 +253,7 @@ export component MainWindow inherits Window {
     property <length> resize-border: 5px;
     out property <length> edge-inset: root.framed ? root.resize-border : 0;
     out property <length> edge-width: root.framed ? root.strip-width + 8px : root.strip-width;
+    out property <length> edge-side-width: max(root.edge-width, root.framed ? root.side-touch-width + 8px : root.side-touch-width);
 
     // Sidebars: 0 = closed, 1 = open.
     in-out property <float> left-pos: 0;
@@ -843,7 +869,8 @@ export component MainWindow inherits Window {
         visible: root.left-pos == 0 || root.left-dragging;
         x: root.edge-inset;
         y: max(root.top-inset, !root.docked ? root.top-shown : 0);
-        width: root.edge-width;
+        width: root.edge-side-width;
+        hover-width: root.edge-width;
         height: root.height - self.y;
         icon: Icons.menu-line;
         panel-width: root.left-width;
@@ -869,9 +896,10 @@ export component MainWindow inherits Window {
     }
     right-strip := EdgeStrip {
         visible: root.right-pos == 0 || root.right-dragging;
-        x: root.width - root.edge-inset - root.edge-width;
+        x: root.width - root.edge-inset - root.edge-side-width;
         y: max(root.top-inset, !root.docked ? root.top-shown : 0);
-        width: root.edge-width;
+        width: root.edge-side-width;
+        hover-width: root.edge-width;
         height: root.height - self.y;
         right-side: true;
         icon: Icons.system-line;

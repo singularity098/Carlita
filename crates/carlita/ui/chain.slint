@@ -21,6 +21,8 @@ export global TrackIo {
     in property <bool> merged-midi;
     // Whether each hardware input hears something now (while probing).
     in property <[bool]> signal;
+    // Whether each MIDI device in `midi` sends something now (while probing).
+    in property <[bool]> midi-signal;
     // The input page opened or closed: meter the inputs one by one while
     // it is open.
     callback probe(bool);
@@ -142,10 +144,32 @@ component TrackIoPage inherits Rectangle {
                     font-weight: Theme.regular;
                     color: Theme.text-dim;
                 }
+                if !TrackIo.merged-midi && TrackIo.midi.length > 0: Text {
+                    text: "A device lights up while it sends something: play a note or move a control to see which is which.";
+                    font-size: Theme.font-small;
+                    font-weight: Theme.regular;
+                    color: Theme.text-dim;
+                    wrap: word-wrap;
+                }
                 if !TrackIo.merged-midi: VerticalLayout {
                     for d[i] in TrackIo.midi: SettingRow {
+                        property <bool> live: i < TrackIo.midi-signal.length && TrackIo.midi-signal[i];
                         label: d.name;
                         detail: d.detail;
+                        // Lights up while the device sends something.
+                        Rectangle {
+                            width: 12px;
+                            Rectangle {
+                                x: 0;
+                                y: (parent.height - self.height) / 2;
+                                width: 10px;
+                                height: 10px;
+                                border-radius: 5px;
+                                background: Theme.ok;
+                                opacity: live ? 1 : 0;
+                                animate opacity { duration: live ? 40ms : 250ms; }
+                            }
+                        }
                         Toggle {
                             tip: d.on ? "Stop taking this device" : "Take this device";
                             checked: d.on;

@@ -39,6 +39,10 @@ const ROW_PARALLEL: f32 = 52.0;
 const ROW_LANE: f32 = 40.0;
 const ROW_DRY: f32 = 48.0;
 const TOAST_TIMEOUT: Duration = Duration::from_secs(4);
+/// How long after the window first shows to put it back where it was saved
+/// (see `App::restore_window`): long enough for the window manager to have
+/// taken it on.
+const WINDOW_RESTORE_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Default)]
 pub struct StartOptions {
@@ -170,6 +174,16 @@ pub struct App {
     signal_until: Vec<Instant>,
     /// Whether each hardware input shows a signal.
     signal_model: Rc<VecModel<bool>>,
+    /// Listens on every MIDI port while the input page is open, to light
+    /// the devices that send something.
+    midi_probe: MidiListener,
+    /// The MIDI devices there were when `midi_probe` started listening.
+    midi_probe_devices: Vec<MidiDevice>,
+    /// Until when each MIDI device (as listed by `midi_choices`) shows a
+    /// signal.
+    midi_signal_until: Vec<Instant>,
+    /// Whether each MIDI device shows a signal.
+    midi_signal_model: Rc<VecModel<bool>>,
     /// The timer that runs `poll`, paced to the display's refresh rate.
     poll_timer: Rc<slint::Timer>,
     /// The driver the engine runs on ("" while it is stopped).
@@ -184,6 +198,10 @@ pub struct App {
     rec_dropped: u64,
     /// When the window's size and place were last noted.
     last_window_check: Instant,
+    /// When to put the window back where it was saved (and maximize it),
+    /// once it is on screen: see `restore_window`. Until then its place is
+    /// not noted.
+    window_restore_at: Option<Instant>,
     /// Set by System → Restart Carlita: `main` starts Carlita again once
     /// this one has shut down.
     restart_requested: bool,
@@ -273,7 +291,7 @@ impl App {
             None
         };
 
-        let mut midi = MidiListener::new();
+        let mut midi = MidiListener::new("Carlita MIDI learn");
         midi.listen(&settings.midi.learn_input);
 
         let slots_model = Rc::new(VecModel::default());
@@ -335,6 +353,10 @@ impl App {
             probe_sent: None,
             signal_until: Vec::new(),
             signal_model: Rc::new(VecModel::default()),
+            midi_probe: MidiListener::new("Carlita MIDI activity"),
+            midi_probe_devices: Vec::new(),
+            midi_signal_until: Vec::new(),
+            midi_signal_model: Rc::new(VecModel::default()),
             poll_timer: Rc::new(slint::Timer::default()),
             engine_driver: String::new(),
             project: None,
@@ -342,6 +364,7 @@ impl App {
             rec_time: String::new(),
             rec_dropped: 0,
             last_window_check: Instant::now(),
+            window_restore_at: None,
             restart_requested: false,
         }));
 
@@ -398,7 +421,7 @@ impl App {
             }
         }
         ui.window().set_fullscreen(d.fullscreen);
-        ui.set_strip_width(d.edge_swipe_width as f32);
+        ui.set_side_touch_width(d.side_swipe_width as f32);
         apply_theme(ui, &d.theme);
         ui.set_browser_formats(strings(PluginFormat::ALL.iter().map(|f| f.label())));
         ui.set_browser_categories(strings(PluginCategory::ALL.iter().map(|c| c.label())));
@@ -414,6 +437,12 @@ impl App {
                 .map(|z| format!("{z}%")),
         ));
         o.set_editor_zoom(ss(format!("{}%", d.editor_zoom)));
+        o.set_swipe_widths(strings(
+            DisplaySettings::SIDE_SWIPE_WIDTHS
+                .iter()
+                .map(|(_, label)| label.to_string()),
+        ));
+        o.set_swipe_width(ss(DisplaySettings::side_swipe_label(d.side_swipe_width)));
         o.set_keyboard_visible(self.settings.show_keyboard);
         self.refresh_audio_options();
         self.refresh_presets();
@@ -941,6 +970,18 @@ impl App {
             a.settings.display.theme = apply_theme(&a.ui(), &name);
             a.save_settings();
         });
+        on!(o, on_set_swipe_width, |a, v: SharedString| {
+            let Some(&(px, label)) = DisplaySettings::SIDE_SWIPE_WIDTHS
+                .iter()
+                .find(|(_, l)| *l == v.as_str())
+            else {
+                return;
+            };
+            a.settings.display.side_swipe_width = px;
+            a.ui().set_side_touch_width(px as f32);
+            a.ui().global::<Options>().set_swipe_width(ss(label));
+            a.save_settings();
+        });
         on!(o, on_set_editor_zoom, |a, v: SharedString| {
             let Ok(zoom) = v.trim_end_matches('%').trim().parse::<u32>() else {
                 return;
@@ -1000,7 +1041,7 @@ impl App {
                 self.start_pending = None;
                 self.ui_scale = scale.unwrap_or(1.0) as f32;
                 log::info!("drawing at scale {}", self.ui_scale);
-                self.keep_window_on_screen();
+                self.window_restore_at = Some(Instant::now() + WINDOW_RESTORE_DELAY);
                 self.pace_to_display();
                 self.start_engine();
             }
@@ -1027,11 +1068,12 @@ impl App {
         while let Ok(e) = self.system.events.try_recv() {
             self.on_system_event(e);
         }
-        while let Ok(bytes) = self.midi.messages.try_recv() {
+        while let Ok((_, bytes)) = self.midi.messages.try_recv() {
             if let Some(msg) = MidiMessage::parse(&bytes) {
                 self.on_midi(msg);
             }
         }
+        self.show_midi_signals();
         if let Some(rx) = &self.scan {
             let msgs: Vec<ScanMsg> = rx.try_iter().collect();
             for m in msgs {
@@ -1052,7 +1094,16 @@ impl App {
         if ui.get_window_maximized() != maximized {
             ui.set_window_maximized(maximized);
         }
-        if self.last_window_check.elapsed() > Duration::from_millis(500) {
+        if self.window_restore_at.is_some_and(|t| Instant::now() >= t) {
+            self.window_restore_at = None;
+            self.restore_window();
+            // Give the window manager a moment before noting the place.
+            self.last_window_check = Instant::now();
+        }
+        if self.window_restore_at.is_none()
+            && self.start_pending.is_none()
+            && self.last_window_check.elapsed() > Duration::from_millis(500)
+        {
             self.last_window_check = Instant::now();
             self.note_window_state();
         }
@@ -1684,6 +1735,61 @@ impl App {
         if count == 0 {
             self.show_signals(&[]);
         }
+        // MIDI devices: listened to here (not through the engine), on every
+        // port, and again when the devices change (one was plugged in).
+        let midi = self.probing && !self.merged_midi && !self.midi_devices.is_empty();
+        if !midi {
+            if self.midi_probe.is_listening() {
+                self.midi_probe.stop();
+            }
+            self.midi_probe_devices.clear();
+        } else if !self.midi_probe.is_listening() || self.midi_probe_devices != self.midi_devices {
+            self.midi_probe.listen("");
+            self.midi_probe_devices = self.midi_devices.clone();
+        }
+    }
+
+    /// Lights the MIDI devices that send something while the input page is
+    /// open, and keeps each lit a moment after, as `show_signals` does.
+    fn show_midi_signals(&mut self) {
+        const HOLD: Duration = Duration::from_millis(300);
+        let now = Instant::now();
+        let mut ports: Vec<String> = Vec::new();
+        while let Ok((port, _)) = self.midi_probe.messages.try_recv() {
+            if !ports.contains(&port) {
+                ports.push(port);
+            }
+        }
+        let choices = if self.midi_probe.is_listening() {
+            self.midi_choices()
+        } else {
+            Vec::new()
+        };
+        if choices.is_empty() && self.midi_signal_model.row_count() == 0 {
+            return;
+        }
+        let devices: Vec<(&str, &str)> = choices
+            .iter()
+            .map(|(id, name, _)| (id.as_str(), name.as_str()))
+            .collect();
+        self.midi_signal_until.resize(choices.len(), now);
+        for port in &ports {
+            for k in midi_port_matches(port, &devices) {
+                self.midi_signal_until[k] = now + HOLD;
+            }
+        }
+        let model = &self.midi_signal_model;
+        while model.row_count() > choices.len() {
+            model.remove(model.row_count() - 1);
+        }
+        for (k, until) in self.midi_signal_until.iter().enumerate() {
+            let on = *until > now;
+            match model.row_data(k) {
+                Some(v) if v == on => {}
+                Some(_) => model.set_row_data(k, on),
+                None => model.push(on),
+            }
+        }
     }
 
     /// Lights the hardware inputs that hear something, and keeps each lit
@@ -1788,6 +1894,7 @@ impl App {
         io.set_midi_all(t.midi == TrackMidi::All);
         io.set_merged_midi(self.merged_midi);
         io.set_signal(ModelRc::from(self.signal_model.clone()));
+        io.set_midi_signal(ModelRc::from(self.midi_signal_model.clone()));
     }
 
     fn track_level(&self, id: TrackId) -> f32 {
@@ -2178,6 +2285,8 @@ impl App {
         // Inside the resize handles in a window with a frame (see
         // `edge-inset` in main.slint).
         let (inset, sw) = (ui.get_edge_inset(), ui.get_edge_width());
+        // The side strips are wider, for touch (`side-touch-width`).
+        let side_w = ui.get_edge_side_width();
         let (top, bottom) = (ui.get_edge_top(), ui.get_edge_bottom());
         let rect = |x: f32, y: f32, rw: f32, rh: f32| {
             let (x0, y0) = ((x * scale).round(), (y * scale).round());
@@ -2193,8 +2302,8 @@ impl App {
         let none = Area::default();
         let side = inset + sw;
         let edges = vec![
-            rect(inset, top, sw, bottom - top),
-            rect(w - side, top, sw, bottom - top),
+            rect(inset, top, side_w, bottom - top),
+            rect(w - inset - side_w, top, side_w, bottom - top),
             if ui.get_edge_top_strip() {
                 rect(side, inset, w - 2.0 * side, sw)
             } else {
@@ -2820,14 +2929,67 @@ impl App {
 
     /// Notes whether the window is maximized and, when it is a plain window,
     /// its size and place, so the next start opens it the same way.
+    ///
+    /// Saved as soon as it changes, not only when Carlita closes: by then
+    /// the window is gone from the screen, and a window manager takes the
+    /// maximized state off a window it no longer shows, so it read as not
+    /// maximized (and the maximized size was saved as the window's size).
+    /// A pedalboard is also often just switched off.
     fn note_window_state(&mut self) {
+        if !self.window_shown() {
+            return;
+        }
         let ui = self.ui();
         let w = ui.window();
         if self.settings.display.fullscreen || w.is_fullscreen() || w.is_minimized() {
             return;
         }
-        self.settings.display.maximized = w.is_maximized();
+        let before = self.settings.display.clone();
+        self.settings.display.maximized = self.window_maximized();
         self.remember_window_size();
+        if self.settings.display != before {
+            self.save_settings();
+        }
+    }
+
+    /// Whether the window is on screen now (not hidden, as it is once it
+    /// is being closed, nor minimized).
+    fn window_shown(&self) -> bool {
+        let mut shown = false;
+        self.with_winit(|w| {
+            shown = w.is_visible().unwrap_or(true) && w.is_minimized() != Some(true)
+        });
+        shown && self.ui().window().is_visible()
+    }
+
+    /// Whether the window is maximized, asked of the window manager.
+    fn window_maximized(&self) -> bool {
+        let mut maximized = None;
+        self.with_winit(|w| maximized = Some(w.is_maximized()));
+        maximized.unwrap_or_else(|| self.ui().window().is_maximized())
+    }
+
+    /// Puts the window back where it was saved, maximized if it was. Asked
+    /// for before the window was first shown, a window manager ignores the
+    /// maximizing (a window not yet on screen is not its to maximize) and
+    /// may place the window where it likes: so it is asked again once the
+    /// window is on screen.
+    fn restore_window(&mut self) {
+        let d = self.settings.display.clone();
+        if !d.fullscreen {
+            self.with_winit(|w| {
+                if let (Some(x), Some(y)) = (d.window_x, d.window_y) {
+                    w.set_outer_position(slint::winit_030::winit::dpi::PhysicalPosition::new(x, y));
+                }
+                if d.maximized && !w.is_maximized() {
+                    w.set_maximized(true);
+                }
+            });
+            if d.maximized {
+                self.ui().set_window_maximized(true);
+            }
+        }
+        self.keep_window_on_screen();
     }
 
     fn remember_window_size(&mut self) {
@@ -2838,6 +3000,9 @@ impl App {
             || w.is_maximized()
             || w.is_minimized()
         {
+            return;
+        }
+        if self.window_maximized() {
             return;
         }
         let size = w.size().to_logical(w.scale_factor());
@@ -2927,6 +3092,7 @@ impl App {
     }
 
     pub fn shutdown(&mut self) {
+        // Only while the window is still shown (see `note_window_state`).
         self.note_window_state();
         self.save_settings();
         // Finishes a take that is still being recorded.
@@ -2981,6 +3147,53 @@ fn midi_name(id: &str) -> String {
         .to_string()
 }
 
+/// Which of the MIDI devices tracks can take (JACK port names as `(id,
+/// name)`, see `MidiDevice`) an ALSA sequencer port is, by its name as
+/// midir gives it ("MPK mini 3:MPK mini 3 MIDI 1 28:0"). PipeWire and a2j
+/// name a device's JACK port after its ALSA port ("Midi-Bridge:MPK mini 3
+/// 0:(capture_0) MPK mini 3 MIDI 1", "a2j:MPK mini 3 [28] (capture): MPK mini
+/// 3 MIDI 1"), so the port's name is matched, and the client's name too when
+/// that tells two alike devices apart.
+fn midi_port_matches(alsa: &str, devices: &[(&str, &str)]) -> Vec<usize> {
+    let mut s = alsa.trim();
+    if let Some((head, tail)) = s.rsplit_once(' ') {
+        let is_id = tail.split_once(':').is_some_and(|(a, b)| {
+            !a.is_empty()
+                && !b.is_empty()
+                && (a.to_string() + b).chars().all(|c| c.is_ascii_digit())
+        });
+        if is_id {
+            s = head.trim_end();
+        }
+    }
+    let (client, port) = match s.split_once(':') {
+        Some((c, p)) => (c.trim(), p.trim()),
+        None => ("", s),
+    };
+    if port.is_empty() {
+        return Vec::new();
+    }
+    let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b);
+    let named: Vec<usize> = devices
+        .iter()
+        .enumerate()
+        .filter(|(_, (id, name))| {
+            same(name, port) || id.rsplit_once(':').is_some_and(|(_, p)| same(p, port))
+        })
+        .map(|(k, _)| k)
+        .collect();
+    let with_client: Vec<usize> = named
+        .iter()
+        .copied()
+        .filter(|&k| !client.is_empty() && devices[k].0.contains(client))
+        .collect();
+    if with_client.is_empty() {
+        named
+    } else {
+        with_client
+    }
+}
+
 /// A MIDI port's name as shown in the options: without the ALSA
 /// "client:port" numbers at the end, and without the device's name when the
 /// port's name repeats it ("Scarlett 18i20 USB:Scarlett 18i20 USB MIDI 1
@@ -3025,6 +3238,36 @@ mod text_tests {
         );
         assert_eq!(port_label("Foo:Bar 20:1"), "Foo: Bar");
         assert_eq!(port_label("All inputs"), "All inputs");
+    }
+
+    #[test]
+    fn midi_ports_match_their_jack_devices() {
+        let devices = [
+            (
+                "Midi-Bridge:MPK mini 3 0:(capture_0) MPK mini 3 MIDI 1",
+                "MPK mini 3 MIDI 1",
+            ),
+            (
+                "a2j:ControlPad [32] (capture): ControlPad MIDI 1",
+                "ControlPad MIDI 1",
+            ),
+            ("Midi-Bridge:Other 1:(capture_0) Pedal", "Pedal"),
+            ("Midi-Bridge:Other 2:(capture_0) Pedal", "Pedal"),
+            ("system:midi_capture_1", "midi_capture_1"),
+        ];
+        assert_eq!(
+            midi_port_matches("MPK mini 3:MPK mini 3 MIDI 1 28:0", &devices),
+            vec![0]
+        );
+        assert_eq!(
+            midi_port_matches("ControlPad:ControlPad MIDI 1 32:0", &devices),
+            vec![1]
+        );
+        // Two alike devices: the client's name tells them apart.
+        assert_eq!(midi_port_matches("Other 2:Pedal 40:0", &devices), vec![3]);
+        // Otherwise both light.
+        assert_eq!(midi_port_matches("Foot:Pedal 41:0", &devices), vec![2, 3]);
+        assert!(midi_port_matches("Keys:Keys MIDI 1 20:0", &devices).is_empty());
     }
 
     #[test]

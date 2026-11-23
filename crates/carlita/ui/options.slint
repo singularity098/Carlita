@@ -129,6 +129,9 @@ export global Options {
     in property <[string]> editor-zooms: ["100%", "125%", "150%", "175%", "200%"];
     in property <string> editor-zoom: "100%";
     callback set-editor-zoom(string);
+    in property <[string]> swipe-widths: ["Narrow", "Medium", "Wide", "Widest"];
+    in property <string> swipe-width: "Medium";
+    callback set-swipe-width(string);
 
     // ---- keyboard
     in property <bool> keyboard-visible;
@@ -576,7 +579,28 @@ component DisplayPage inherits VerticalLayout {
             toggled(v) => { Options.set-fullscreen(v); }
         }
     }
+    SectionTitle { text: "EDGE SWIPE AREA"; }
+    Text {
+        text: "How far in from the left and right edges a swipe can start. Wider catches more swipes on a touchscreen; narrower leaves more of a plugin's editor near the edges to touch.";
+        color: Theme.text-dim;
+        font-size: Theme.font-small;
+        font-weight: Theme.regular;
+        wrap: word-wrap;
+    }
+    Dropdown {
+        options: Options.swipe-widths;
+        selected: Options.swipe-width;
+        tip: "Width of the strips along the left and right edges that bring in the sidebars";
+        picked(v) => { Options.set-swipe-width(v); }
+    }
     if Options.brightness-available: SectionTitle { text: "BRIGHTNESS"; }
+    if Options.brightness-available: BigSlider {
+        tip: "Screen brightness";
+        minimum: 5;
+        maximum: 100;
+        value: Options.brightness;
+        changed(v) => { Options.set-brightness(v); }
+    }
     SectionTitle { text: "PLUGIN EDITOR SIZE"; }
     Text {
         text: "Draws plugin editors larger, on top of the desktop's scale, for touchscreens. Editors that can be resized also shrink to fit the space they are given. Changing it restarts the audio engine.";
@@ -590,13 +614,6 @@ component DisplayPage inherits VerticalLayout {
         selected: Options.editor-zoom;
         tip: "Scale for plugin editors that support it (LV2, VST3, CLAP)";
         picked(v) => { Options.set-editor-zoom(v); }
-    }
-    if Options.brightness-available: BigSlider {
-        tip: "Screen brightness";
-        minimum: 5;
-        maximum: 100;
-        value: Options.brightness;
-        changed(v) => { Options.set-brightness(v); }
     }
 }
 

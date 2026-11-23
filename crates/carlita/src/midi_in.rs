@@ -2,26 +2,40 @@
 //! JACK bridge their MIDI devices to it).
 //!
 //! The audio path does not depend on this: hardware MIDI reaches the plugins
-//! through Carla's own MIDI input. This listener only watches for the
-//! footswitches/controllers mapped to bypass.
+//! through Carla's own MIDI input. These listeners only watch for the
+//! footswitches/controllers mapped to bypass, and for which devices send
+//! something while a track's inputs are being picked.
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use midir::{MidiInput, MidiInputConnection};
 
 pub struct MidiListener {
+    /// The client name the connections show under.
+    client: &'static str,
     connections: Vec<MidiInputConnection<()>>,
-    tx: Sender<Vec<u8>>,
-    pub messages: Receiver<Vec<u8>>,
+    tx: Sender<(String, Vec<u8>)>,
+    /// Each message, with the name of the port it came in on.
+    pub messages: Receiver<(String, Vec<u8>)>,
 }
 
 impl MidiListener {
-    pub fn new() -> Self {
+    pub fn new(client: &'static str) -> Self {
         let (tx, rx) = unbounded();
         Self {
+            client,
             connections: Vec::new(),
             tx,
             messages: rx,
         }
+    }
+
+    /// Stops listening.
+    pub fn stop(&mut self) {
+        self.connections.clear();
+    }
+
+    pub fn is_listening(&self) -> bool {
+        !self.connections.is_empty()
     }
 
     /// Names of the available MIDI input ports.
@@ -45,7 +59,7 @@ impl MidiListener {
             .iter()
             .filter(|n| port.is_empty() || n.as_str() == port)
         {
-            let Ok(mut input) = MidiInput::new("Carlita MIDI learn") else {
+            let Ok(mut input) = MidiInput::new(self.client) else {
                 continue;
             };
             input.ignore(midir::Ignore::All);
@@ -57,11 +71,12 @@ impl MidiListener {
                 continue;
             };
             let tx = self.tx.clone();
+            let port_name = name.clone();
             match input.connect(
                 &p,
-                "carlita-learn",
+                self.client,
                 move |_, bytes, _| {
-                    let _ = tx.send(bytes.to_vec());
+                    let _ = tx.send((port_name.clone(), bytes.to_vec()));
                 },
                 (),
             ) {
@@ -69,6 +84,10 @@ impl MidiListener {
                 Err(e) => log::warn!("cannot open MIDI input {name}: {e}"),
             }
         }
-        log::info!("MIDI learn listening on {} port(s)", self.connections.len());
+        log::info!(
+            "{} listening on {} port(s)",
+            self.client,
+            self.connections.len()
+        );
     }
 }
