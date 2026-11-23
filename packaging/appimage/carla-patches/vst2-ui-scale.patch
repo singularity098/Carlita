@@ -1,0 +1,44 @@
+diff --git a/source/backend/plugin/CarlaPluginVST2.cpp b/source/backend/plugin/CarlaPluginVST2.cpp
+index 0eb0fa7..27c57f8 100644
+--- a/source/backend/plugin/CarlaPluginVST2.cpp
++++ b/source/backend/plugin/CarlaPluginVST2.cpp
+@@ -546,11 +546,15 @@ public:
+ 
+ #ifndef CARLA_OS_MAC
+                 // inform plugin of what UI scale we use
+-                dispatcher(effVendorSpecific,
+-                           CCONST('P', 'r', 'e', 'S'),
+-                           CCONST('A', 'e', 'C', 's'),
+-                           nullptr,
+-                           opts.uiScale);
++                // Carlita: only when it is not 1.0. Like REAPER, say nothing
++                // at 1.0, so plugins keep their own scaling (Windows plugins
++                // under yabridge follow Wine's DPI, which 1.0 would override).
++                if (carla_isNotEqual(opts.uiScale, 1.0f))
++                    dispatcher(effVendorSpecific,
++                               CCONST('P', 'r', 'e', 'S'),
++                               CCONST('A', 'e', 'C', 's'),
++                               nullptr,
++                               opts.uiScale);
+ #endif
+ 
+                 // NOTE: there are far too many broken VST2 plugins, don't bother checking return value
+@@ -616,11 +620,13 @@ public:
+ 
+        #ifndef CARLA_OS_MAC
+         // inform plugin of what UI scale we use
+-        dispatcher(effVendorSpecific,
+-                   CCONST('P', 'r', 'e', 'S'),
+-                   CCONST('A', 'e', 'C', 's'),
+-                   nullptr,
+-                   pData->engine->getOptions().uiScale);
++        // Carlita: only when it is not 1.0 (see showCustomUI).
++        if (carla_isNotEqual(pData->engine->getOptions().uiScale, 1.0f))
++            dispatcher(effVendorSpecific,
++                       CCONST('P', 'r', 'e', 'S'),
++                       CCONST('A', 'e', 'C', 's'),
++                       nullptr,
++                       pData->engine->getOptions().uiScale);
+        #endif
+ 
+         dispatcher(effEditOpen, 0, 0, ptr);
