@@ -5,9 +5,10 @@ use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::properties::WmSizeHints;
 use x11rb::protocol::xproto::{
-    AtomEnum, ChangeWindowAttributesAux, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux,
-    EventMask, GrabMode, ImageFormat, ImageOrder, InputFocus, MapState, ModMask, NotifyDetail,
-    NotifyMode, StackMode, UnmapNotifyEvent, Window, WindowClass, UNMAP_NOTIFY_EVENT,
+    AtomEnum, ChangeWindowAttributesAux, ConfigureNotifyEvent, ConfigureWindowAux,
+    ConnectionExt as _, CreateWindowAux, EventMask, GrabMode, ImageFormat, ImageOrder, InputFocus,
+    MapState, ModMask, NotifyDetail, NotifyMode, StackMode, UnmapNotifyEvent, Window, WindowClass,
+    CONFIGURE_NOTIFY_EVENT, UNMAP_NOTIFY_EVENT,
 };
 use x11rb::protocol::Event as XEvent;
 use x11rb::rust_connection::RustConnection;
@@ -42,6 +43,13 @@ const HOLDER_RGB: u32 = 0x0015_151a;
 const KEYSYM_F11: u32 = 0xffc8;
 /// Presses of F11 closer together than this (key repeat) count once.
 const KEY_REPEAT: Duration = Duration::from_millis(350);
+/// How long after the main window (or an editor in it) moved to tell Wine
+/// editors where they are on screen (see `tell_wine_positions`): after the
+/// moves have settled, and after yabridge's own word on it.
+const POSITION_SETTLE: Duration = Duration::from_millis(120);
+/// How often to check that Wine editors still know where they are, in case
+/// a move was missed.
+const POSITION_CHECK: Duration = Duration::from_secs(1);
 
 /// The part of the main window an editor may use, in physical pixels
 /// relative to the main window.
@@ -262,6 +270,9 @@ struct Embedded {
     /// The plugin did not follow a size it was given (see `check_content`):
     /// it is not fitted to the area again.
     no_fit: bool,
+    /// Where on screen a Wine window in the editor was last told it is
+    /// (see `tell_wine_positions`).
+    wine_told: Option<(Window, i32, i32)>,
 }
 
 impl Embedded {
@@ -301,6 +312,12 @@ struct Embedder {
     /// Editors whose plugin says they can be resized, whatever their
     /// window's size hints say.
     resizable: HashSet<u64>,
+    /// When to tell Wine editors where they are on screen (set when the
+    /// main window or an editor moved), and when that was last checked.
+    position_due: Option<Instant>,
+    last_position_check: Instant,
+    /// The main windows whose moves are listened to.
+    watched_parents: HashSet<Window>,
 }
 
 impl Embedder {
@@ -340,6 +357,9 @@ impl Embedder {
             last_f11: None,
             fit_due: None,
             resizable: HashSet::new(),
+            position_due: None,
+            last_position_check: Instant::now(),
+            watched_parents: HashSet::new(),
         })
     }
 
@@ -376,6 +396,13 @@ impl Embedder {
                 .collect();
             for key in due {
                 self.check_content(key);
+                let _ = self.conn.flush();
+            }
+            let due = self.position_due.is_some_and(|t| Instant::now() >= t);
+            if due || self.last_position_check.elapsed() >= POSITION_CHECK {
+                self.position_due = None;
+                self.last_position_check = Instant::now();
+                self.tell_wine_positions(due);
                 let _ = self.conn.flush();
             }
             if self.fit_due.is_some_and(|t| Instant::now() >= t) {
@@ -794,8 +821,26 @@ impl Embedder {
                 answered: None,
                 content_due: Some(Instant::now() + RESIZE_SETTLE),
                 no_fit: false,
+                wine_told: None,
             },
         );
+        // Moves of the main window (see `tell_wine_positions`). The window
+        // manager tells a window it moved with a ConfigureNotify, which
+        // every client listening on the window gets.
+        if self.watched_parents.insert(parent) {
+            let mask = self
+                .conn
+                .get_window_attributes(parent)
+                .ok()
+                .and_then(|c| c.reply().ok())
+                .map_or(EventMask::NO_EVENT, |a| {
+                    EventMask::from(a.your_event_mask.bits())
+                });
+            let _ = self.conn.change_window_attributes(
+                parent,
+                &ChangeWindowAttributesAux::new().event_mask(mask | EventMask::STRUCTURE_NOTIFY),
+            );
+        }
         self.paint_wrappers(window);
         self.fit_resizable(key);
         self.place(key);
@@ -1024,6 +1069,7 @@ impl Embedder {
         }
         let e = self.embedded.get_mut(&key).unwrap();
         if e.shown.map(|s| s.1) != Some(part) || e.shown.map(|s| s.0) != Some(full) {
+            self.position_due = Some(Instant::now() + POSITION_SETTLE);
             let _ = self.conn.configure_window(
                 e.window,
                 &ConfigureWindowAux::new()
@@ -1207,6 +1253,105 @@ impl Embedder {
         }
     }
 
+    // -------------------------------------------------------- wine editors
+
+    /// Tells the Wine windows of shown editors (Windows plugins through
+    /// yabridge) where on screen they are, with the synthetic
+    /// `ConfigureNotify` a window manager sends a window it moved (ICCCM
+    /// 4.1.5). Wine works out where a click lands from where it believes
+    /// its window is, and only hears that from such events: inside
+    /// Carlita's window, which it does not know it is in, it kept the place
+    /// it had when it opened, so once Carlita's window moved every click
+    /// landed off by as much (until the window was moved back). yabridge
+    /// sends these itself, but only for the window it found the editor in
+    /// when it opened, before Carlita took the editor in. With `always`
+    /// (something moved), every Wine window is told; otherwise only those
+    /// that are somewhere else than they were last told.
+    fn tell_wine_positions(&mut self, always: bool) {
+        let keys: Vec<u64> = self
+            .embedded
+            .iter()
+            .filter(|(_, e)| e.shown.is_some())
+            .map(|(k, _)| *k)
+            .collect();
+        for key in keys {
+            let window = self.embedded[&key].window;
+            let Some(&wine) = self
+                .content_chain(window)
+                .iter()
+                .rev()
+                .find(|&&w| self.is_wine_window(w))
+            else {
+                continue;
+            };
+            let Some(geo) = self
+                .conn
+                .get_geometry(wine)
+                .ok()
+                .and_then(|c| c.reply().ok())
+            else {
+                continue;
+            };
+            let Some(at) = self
+                .conn
+                .translate_coordinates(wine, self.root, 0, 0)
+                .ok()
+                .and_then(|c| c.reply().ok())
+            else {
+                continue;
+            };
+            let place = (wine, i32::from(at.dst_x), i32::from(at.dst_y));
+            let e = self.embedded.get_mut(&key).unwrap();
+            if !always && e.wine_told == Some(place) {
+                continue;
+            }
+            e.wine_told = Some(place);
+            let event = ConfigureNotifyEvent {
+                response_type: CONFIGURE_NOTIFY_EVENT,
+                sequence: 0,
+                event: wine,
+                window: wine,
+                above_sibling: x11rb::NONE,
+                x: at.dst_x,
+                y: at.dst_y,
+                width: geo.width,
+                height: geo.height,
+                border_width: 0,
+                override_redirect: false,
+            };
+            log::debug!(
+                "telling the Wine window {wine:#x} it is at {},{}",
+                at.dst_x,
+                at.dst_y
+            );
+            let _ = self
+                .conn
+                .send_event(false, wine, EventMask::STRUCTURE_NOTIFY, event);
+        }
+    }
+
+    /// Whether a window is Wine's: its `WM_CLASS` or its process names a
+    /// Windows program (`yabridge-host.exe`) or Wine.
+    fn is_wine_window(&self, w: Window) -> bool {
+        let is_wine = |s: &str| {
+            let s = s.to_lowercase();
+            s.contains(".exe") || s.contains("wine")
+        };
+        let class = self
+            .conn
+            .get_property(false, w, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 256)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .map(|p| String::from_utf8_lossy(&p.value).replace('\0', " "))
+            .unwrap_or_default();
+        if is_wine(&class) {
+            return true;
+        }
+        self.window_pid(w)
+            .and_then(|pid| std::fs::read(format!("/proc/{pid}/cmdline")).ok())
+            .is_some_and(|c| is_wine(&String::from_utf8_lossy(&c)))
+    }
+
     // ---------------------------------------------------------- edge strips
 
     fn set_edges(&mut self, parent: Window, areas: &[Area]) -> Result<()> {
@@ -1347,6 +1492,13 @@ impl Embedder {
                         self.take_focus_from(l.event);
                         let _ = self.conn.flush();
                     }
+                }
+                // The main window moved (or changed size): Wine editors are
+                // told where they are now.
+                XEvent::ConfigureNotify(c)
+                    if c.event == c.window && self.watched_parents.contains(&c.window) =>
+                {
+                    self.position_due = Some(Instant::now() + POSITION_SETTLE);
                 }
                 // Events about the editor itself (not the root's children).
                 XEvent::ConfigureNotify(c) if c.event == c.window => {

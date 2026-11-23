@@ -775,3 +775,108 @@ fn editors_that_keep_their_shape_or_size() {
     host.send(HostCommand::Detach { key: 62 });
     until(|| parent_of(&conn, bare) == root);
 }
+
+#[test]
+fn wine_editors_hear_where_they_are() {
+    if std::env::var_os("DISPLAY").is_none() {
+        eprintln!("no DISPLAY; skipping");
+        return;
+    }
+    let _x = X_SERVER.lock().unwrap_or_else(|e| e.into_inner());
+    let (conn, screen) = x11rb::connect(None).unwrap();
+    let root = conn.setup().roots[screen].root;
+    let main = window(&conn, root, 800, 600, b"carlita-test-main-7");
+    conn.map_window(main).unwrap();
+
+    // A yabridge editor: Carla's window, yabridge's wrapper in it, and
+    // Wine's window in that.
+    let editor = window(&conn, root, 300, 200, b"carlita-editor-70");
+    let mut fixed = WmSizeHints::new();
+    fixed.min_size = Some((300, 200));
+    fixed.max_size = Some((300, 200));
+    fixed.set_normal_hints(&conn, editor).unwrap();
+    let wrapper = window(&conn, editor, 300, 200, b"");
+    let wine = window(&conn, wrapper, 300, 200, b"Superior Drummer 3");
+    conn.change_property8(
+        PropMode::REPLACE,
+        wine,
+        AtomEnum::WM_CLASS,
+        AtomEnum::STRING,
+        b"sdrummer3.exe\0sdrummer3.exe\0",
+    )
+    .unwrap();
+    for w in [wrapper, wine] {
+        conn.configure_window(w, &ConfigureWindowAux::new().x(0).y(0))
+            .unwrap();
+        conn.map_window(w).unwrap();
+    }
+    conn.change_window_attributes(
+        wine,
+        &ChangeWindowAttributesAux::new().event_mask(EventMask::STRUCTURE_NOTIFY),
+    )
+    .unwrap();
+    conn.map_window(editor).unwrap();
+    conn.flush().unwrap();
+
+    let host = EditorHost::spawn();
+    let area = Area {
+        x: 0,
+        y: 0,
+        width: 800,
+        height: 600,
+    };
+    host.send(HostCommand::SetArea {
+        area,
+        uncovered: area,
+    });
+    host.send(HostCommand::Attach {
+        key: 70,
+        title: "carlita-editor-70".into(),
+        parent: main,
+        resizable: false,
+    });
+    wait(&host, |e| {
+        matches!(e, HostEvent::Attached { key: 70, .. }).then_some(())
+    });
+
+    // Where Wine was last told it is, from the synthetic ConfigureNotify
+    // events it got (real ones say where it is in its parent).
+    let mut told = None;
+    let read_told = |told: &mut Option<(i16, i16)>| {
+        while let Some(ev) = conn.poll_for_event().unwrap() {
+            if let x11rb::protocol::Event::ConfigureNotify(c) = ev {
+                if c.window == wine && c.response_type & 0x80 != 0 {
+                    *told = Some((c.x, c.y));
+                }
+            }
+        }
+    };
+    let on_screen = || {
+        let t = conn
+            .translate_coordinates(wine, root, 0, 0)
+            .unwrap()
+            .reply()
+            .unwrap();
+        (t.dst_x, t.dst_y)
+    };
+
+    // Once shown, in the middle of the area.
+    until(|| {
+        read_told(&mut told);
+        told.is_some() && told == Some(on_screen())
+    });
+    assert_eq!(on_screen(), (10 + 250, 10 + 200));
+
+    // Moving the main window (as dragging Carlita's window does) tells it
+    // again.
+    conn.configure_window(main, &ConfigureWindowAux::new().x(300).y(150))
+        .unwrap();
+    conn.flush().unwrap();
+    until(|| {
+        read_told(&mut told);
+        told == Some((300 + 250, 150 + 200))
+    });
+
+    host.send(HostCommand::Detach { key: 70 });
+    until(|| parent_of(&conn, editor) == root);
+}

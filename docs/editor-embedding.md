@@ -62,9 +62,24 @@ off-screen with XComposite and forwarded synthetic input) was dropped
    fitted to the area again. Carla 2.5
    also tells a VST3 editor nothing when its window is resized (LV2 editors
    get `ui:resize`): the editor has to follow its X window by itself, as
-   DPF's (Xythos) and Kaia's do.
+   DPF's (Xythos) and Kaia's do. Carla's main branch (the AppImage's) asks a
+   VST3 editor's `checkSizeConstraint`, but when the plugin answered with
+   another size it resized the window to that and never called `onSize`,
+   so the editor kept drawing at its old size, and the window went back and
+   forth between the two sizes a few times before settling; the AppImage's
+   Carla is patched to call it (`vst3-ui-size.patch`).
 5. The editor draws itself and gets real pointer and touch input from the X
    server, so it works with every toolkit (Wine and yabridge included).
+   Wine works out where a click lands from where it believes its window is
+   on screen, which it only learns from the synthetic `ConfigureNotify` a
+   window manager sends a window it moved. yabridge sends those for the
+   window it found the editor in when the editor opened, which is not the
+   one that moves once Carlita has taken the editor in, so after Carlita's
+   window was moved every click in a Windows plugin landed off by as much.
+   The host listens for moves of the main window (and moves of the editor
+   inside it) and sends the Wine window (found down the editor's window
+   chain by its `WM_CLASS` or process naming a `.exe`) one with its place on
+   the screen, 120 ms after the moves stop; it also checks every second.
    Many toolkits move their window when they resize it (a plugin's own
    small/default/large menu, or after Carlita resized it), to where they
    were as a window of their own. Inside the holder that put the editor

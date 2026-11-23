@@ -1,0 +1,22 @@
+diff --git a/source/backend/plugin/CarlaPluginVST3.cpp b/source/backend/plugin/CarlaPluginVST3.cpp
+index 0e7f16b..c60270d 100644
+--- a/source/backend/plugin/CarlaPluginVST3.cpp
++++ b/source/backend/plugin/CarlaPluginVST3.cpp
+@@ -3835,10 +3835,13 @@ protected:
+                     fUI.height = height2;
+                     fUI.window->setSize(width2, height2, true, false);
+                 }
+-                else
+-                {
+-                    v3_cpp_obj(fV3.view)->on_size(fV3.view, &rect);
+-                }
++
++                // Carlita: tell the view its new size also when it asked for
++                // another one than the host's (it keeps its shape), as the
++                // VST3 SDK says a host does after checkSizeConstraint.
++                // Otherwise the window it is in changes size, but the editor
++                // never hears of it and keeps drawing at its old size.
++                v3_cpp_obj(fV3.view)->on_size(fV3.view, &rect);
+             }
+         }
+     }

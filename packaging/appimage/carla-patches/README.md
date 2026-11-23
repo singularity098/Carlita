@@ -24,3 +24,9 @@ rebuilds `carla-bridge-native` from that Carla version with these patches.
   `IPlugViewContentScaleSupport::setContentScaleFactor` before attaching
   the editor, again only for a scale other than 1.0. yabridge passes it on
   to Windows plugins.
+- `vst3-ui-size.patch`: when a VST3 editor answers a new window size with
+  another one (`checkSizeConstraint`: Modometer keeps its 16:9 shape),
+  Carla resized its window to that size but never called the editor's
+  `onSize`, so the editor went on drawing at its old size while its window
+  went back and forth between the two sizes. The patched Carla calls
+  `onSize` with the size the editor took, as the VST3 SDK says a host does.
