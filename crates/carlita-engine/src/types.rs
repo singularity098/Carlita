@@ -54,6 +54,9 @@ pub struct PluginLoad {
     pub bypassed: bool,
     /// Carla state XML to restore after loading.
     pub state: Option<String>,
+    /// Run the plugin (in a bridge) on a hidden X display of its own, for
+    /// old editors that cannot be scaled (see `hidden`).
+    pub headless: bool,
 }
 
 /// Requests sent to the engine thread.
@@ -62,6 +65,8 @@ pub enum Command {
     Start(EngineConfig),
     Stop,
     QueryDrivers,
+    /// Set the xrun count back to zero.
+    ClearXruns,
     /// Load a plugin. It is wired up once the layout mentions it.
     AddPlugin {
         load: PluginLoad,
@@ -86,6 +91,12 @@ pub enum Command {
     /// Reload a crashed/failed plugin from its last known state.
     ReloadPlugin {
         load: PluginLoad,
+    },
+    /// Start a running plugin again with its current state, on or off a
+    /// hidden display.
+    RestartPlugin {
+        slot: SlotId,
+        headless: bool,
     },
     /// Snapshot every plugin's state (for saving a preset).
     CaptureStates {
@@ -167,6 +178,9 @@ pub struct PluginRuntimeInfo {
     pub audio_ins: u32,
     pub audio_outs: u32,
     pub midi_ins: u32,
+    /// The hidden X display the plugin's editor is on (`:N`), if it runs on
+    /// one.
+    pub hidden_display: Option<u32>,
 }
 
 /// A parameter for the generic editor page.

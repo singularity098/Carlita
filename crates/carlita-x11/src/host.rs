@@ -14,7 +14,11 @@ use x11rb::protocol::Event as XEvent;
 use x11rb::rust_connection::RustConnection;
 
 /// How long to keep looking for an editor window after it was requested.
-const FIND_TIMEOUT: Duration = Duration::from_secs(15);
+const FIND_TIMEOUT: Duration = Duration::from_secs(30);
+/// The same for slow editors (Windows plugins: Wine and yabridge can take
+/// well over 15 s to open a large editor, and Carla only shows its window
+/// once the plugin has finished).
+const SLOW_FIND_TIMEOUT: Duration = Duration::from_secs(120);
 /// How often to look for requested windows (new windows also trigger a look).
 const SEARCH_INTERVAL: Duration = Duration::from_millis(100);
 /// How long to wait for a window with the editor's title before taking a
@@ -98,6 +102,9 @@ pub enum HostCommand {
         /// editor's window a minimum and maximum of its current size, and
         /// Carla copies them onto the editor window.
         resizable: bool,
+        /// The editor may take a long time to open (a Windows plugin):
+        /// keep looking for it for longer.
+        slow: bool,
     },
     /// Stop showing the editor and hand its window back.
     Detach {
@@ -148,6 +155,11 @@ pub enum HostEvent {
         width: u32,
         height: u32,
         rgba: Vec<u8>,
+    },
+    /// The editor changed size, so its last snapshot no longer matches it:
+    /// stop drawing it (show the flat background) until there is a new one.
+    SnapshotStale {
+        key: u64,
     },
     /// F11 was pressed in Carlita's window, wherever the keyboard focus was
     /// (an editor that has the focus would otherwise keep the key).
@@ -207,6 +219,8 @@ struct Pending {
     title: String,
     parent: Window,
     since: Instant,
+    /// How long to look for the window.
+    timeout: Duration,
     /// The windows that were already shown when the editor was asked for:
     /// any other window that appears and belongs to Carlita (or one of its
     /// plugin bridges) is taken as the editor if none has its title.
@@ -426,6 +440,7 @@ impl Embedder {
                 title,
                 parent,
                 resizable,
+                slow,
             } => {
                 self.withdrawing.remove(&key);
                 self.release(key);
@@ -441,6 +456,11 @@ impl Embedder {
                         title,
                         parent,
                         since: Instant::now(),
+                        timeout: if slow {
+                            SLOW_FIND_TIMEOUT
+                        } else {
+                            FIND_TIMEOUT
+                        },
                         known,
                     },
                 );
@@ -688,7 +708,7 @@ impl Embedder {
                 let parent = p.parent;
                 self.pending.remove(&key);
                 self.withdraw(key, w, parent);
-            } else if p.since.elapsed() > FIND_TIMEOUT {
+            } else if p.since.elapsed() > p.timeout {
                 self.pending.remove(&key);
                 self.emit(HostEvent::NotFound { key });
             }
@@ -960,6 +980,88 @@ impl Embedder {
         chain
     }
 
+    /// The windows inside `window` (not `window` itself), a few levels deep.
+    fn descendants(&self, window: Window) -> Vec<Window> {
+        let mut out = Vec::new();
+        let mut level = vec![window];
+        for _ in 0..4 {
+            let mut next = Vec::new();
+            for w in level {
+                if let Some(tree) = self.conn.query_tree(w).ok().and_then(|c| c.reply().ok()) {
+                    next.extend(tree.children);
+                }
+            }
+            if next.is_empty() || out.len() + next.len() > 64 {
+                break;
+            }
+            out.extend(next.iter().copied());
+            level = next;
+        }
+        out
+    }
+
+    fn background_for(&self, w: Window) -> u32 {
+        let depth = self
+            .conn
+            .get_geometry(w)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .map_or(24, |g| g.depth);
+        if depth == 32 {
+            0xff00_0000 | HOLDER_RGB
+        } else {
+            HOLDER_RGB
+        }
+    }
+
+    /// While an editor changes size: gives its window and every window in
+    /// it Carlita's background, so whatever part the plugin has not drawn
+    /// yet at the new size shows flat grey instead of an old, frozen
+    /// picture (the X server fills a window's new area with its background,
+    /// and leaves whatever was there when it has none). The windows the
+    /// plugin draws in get theirs taken away again once the size has
+    /// settled (`end_blank`), so they do not flash grey each time they are
+    /// shown again.
+    fn blank_while_resizing(&self, window: Window) {
+        for w in std::iter::once(window).chain(self.descendants(window)) {
+            let attrs = self
+                .conn
+                .get_window_attributes(w)
+                .ok()
+                .and_then(|c| c.reply().ok());
+            if attrs.is_none_or(|a| a.class != WindowClass::INPUT_OUTPUT) {
+                continue;
+            }
+            let _ = self.conn.change_window_attributes(
+                w,
+                &ChangeWindowAttributesAux::new().background_pixel(self.background_for(w)),
+            );
+        }
+        // What shows of the editor's own window (around a smaller plugin) is
+        // painted now; inner windows are painted as they grow.
+        let _ = self.conn.clear_area(false, window, 0, 0, 0, 0);
+        let _ = self.conn.flush();
+    }
+
+    /// The size has settled: the windows the plugin draws in go back to
+    /// having no background (`paint_wrappers` then paints the wrappers).
+    fn end_blank(&self, window: Window) {
+        for w in self.descendants(window) {
+            let attrs = self
+                .conn
+                .get_window_attributes(w)
+                .ok()
+                .and_then(|c| c.reply().ok());
+            if attrs.is_none_or(|a| a.class != WindowClass::INPUT_OUTPUT) {
+                continue;
+            }
+            let _ = self.conn.change_window_attributes(
+                w,
+                &ChangeWindowAttributesAux::new().background_pixmap(x11rb::NONE),
+            );
+        }
+    }
+
     /// Gives an editor's window, and the wrappers inside it, Carlita's
     /// background. Carla's editor window (and yabridge's wrapper) has none,
     /// so wherever the plugin does not draw (while it catches up with a new
@@ -1003,6 +1105,7 @@ impl Embedder {
         e.content_due = None;
         // Settled: whatever happens next is not an answer to this fit.
         let (window, size, fit) = (e.window, (e.width, e.height), e.fit.take());
+        self.end_blank(window);
         self.paint_wrappers(window);
         let Some(fit) = fit else {
             return;
@@ -1534,6 +1637,9 @@ impl Embedder {
                                 }
                             }
                             e.content_due = Some(Instant::now() + RESIZE_SETTLE);
+                            let window = e.window;
+                            self.blank_while_resizing(window);
+                            self.emit(HostEvent::SnapshotStale { key: k });
                             self.place(k);
                         } else if let Some((x, y)) = e.offset() {
                             // Many toolkits move their window when they

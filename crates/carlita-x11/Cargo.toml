@@ -9,7 +9,7 @@ license.workspace = true
 anyhow.workspace = true
 log.workspace = true
 crossbeam-channel.workspace = true
-x11rb = "0.13"
+x11rb = { version = "0.13", features = ["xtest"] }
 
 [dev-dependencies]
 # Fakes clicks and key presses in the embedding test.

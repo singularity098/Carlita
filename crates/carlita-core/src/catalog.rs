@@ -11,6 +11,11 @@ pub struct PluginCatalog {
     pub plugins: Vec<PluginDescriptor>,
     #[serde(default)]
     pub favorites: BTreeSet<String>,
+    /// Plugins (by key) that run on a hidden display, with the zoom their
+    /// editor is shown at, in percent. Kept for the plugin whatever preset
+    /// it is in.
+    #[serde(default)]
+    pub headless: std::collections::BTreeMap<String, u32>,
     /// Unix time of the last completed scan.
     #[serde(default)]
     pub scanned_at: u64,
@@ -23,6 +28,12 @@ pub struct CatalogFilter {
     pub format: Option<PluginFormat>,
     pub category: Option<PluginCategory>,
     pub favorites_only: bool,
+    /// Only Windows plugins (bridged with yabridge).
+    pub windows_only: bool,
+    /// When a plugin comes in several formats, list only the one that comes
+    /// first here (formats not listed come last, in their usual order).
+    /// Empty: list every format.
+    pub format_priority: Vec<PluginFormat>,
 }
 
 impl PluginCatalog {
@@ -64,6 +75,24 @@ impl PluginCatalog {
         }
     }
 
+    /// The zoom (percent) the plugin's editor is shown at if it runs on a
+    /// hidden display.
+    pub fn headless_zoom(&self, p: &PluginDescriptor) -> Option<u32> {
+        self.headless.get(&p.key()).copied()
+    }
+
+    /// Runs the plugin on a hidden display (at `zoom` percent), or not.
+    pub fn set_headless(&mut self, p: &PluginDescriptor, zoom: Option<u32>) {
+        match zoom {
+            Some(z) => {
+                self.headless.insert(p.key(), z.clamp(100, 400));
+            }
+            None => {
+                self.headless.remove(&p.key());
+            }
+        }
+    }
+
     pub fn find(&self, key: &str) -> Option<&PluginDescriptor> {
         self.plugins.iter().find(|p| p.key() == key)
     }
@@ -80,8 +109,9 @@ impl PluginCatalog {
             .plugins
             .iter()
             .filter(|p| filter.format.is_none_or(|f| p.format == f))
-            .filter(|p| filter.category.is_none_or(|c| p.category == c))
+            .filter(|p| filter.category.is_none_or(|c| p.in_category(c)))
             .filter(|p| !filter.favorites_only || self.is_favorite(p))
+            .filter(|p| !filter.windows_only || p.yabridge)
             .filter(|p| {
                 if words.is_empty() {
                     return true;
@@ -90,9 +120,58 @@ impl PluginCatalog {
                 words.iter().all(|w| text.contains(w.as_str()))
             })
             .collect();
+        if !filter.format_priority.is_empty() {
+            out = best_formats(out, &filter.format_priority);
+        }
         out.sort_by_key(|p| !self.is_favorite(p));
         out
     }
+}
+
+/// How a plugin's name is compared across formats: letters and digits
+/// only, lowercase ("Archetype: Gojira" and "archetype gojira" match).
+fn same_plugin_key(p: &PluginDescriptor) -> String {
+    p.name
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Of the plugins that are the same plugin in several formats (the same
+/// name), keeps only the version whose format comes first in `priority`.
+/// A native build comes before a Windows one (yabridge) of the same format.
+/// The order of the list is kept.
+pub fn best_formats<'a>(
+    plugins: Vec<&'a PluginDescriptor>,
+    priority: &[PluginFormat],
+) -> Vec<&'a PluginDescriptor> {
+    use std::collections::HashMap;
+    let rank = |p: &PluginDescriptor| {
+        let f = priority.iter().position(|f| *f == p.format).unwrap_or(
+            priority.len()
+                + PluginFormat::ALL
+                    .iter()
+                    .position(|f| *f == p.format)
+                    .unwrap_or(0),
+        );
+        (f, p.yabridge)
+    };
+    let mut best: HashMap<String, (usize, bool)> = HashMap::new();
+    for p in &plugins {
+        let r = rank(p);
+        best.entry(same_plugin_key(p))
+            .and_modify(|b| *b = (*b).min(r))
+            .or_insert(r);
+    }
+    let mut seen = std::collections::HashSet::new();
+    plugins
+        .into_iter()
+        .filter(|p| {
+            let k = same_plugin_key(p);
+            best.get(&k) == Some(&rank(p)) && seen.insert((k, rank(p)))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -159,6 +238,66 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(cat.len(), 2);
+    }
+
+    #[test]
+    fn keeps_only_the_preferred_format() {
+        let mut c = PluginCatalog::default();
+        let mut win = plugin("Amp: Sim", PluginFormat::Vst3, PluginCategory::Distortion);
+        win.yabridge = true;
+        win.filename = "win".into();
+        c.replace_plugins(vec![
+            plugin("Amp Sim", PluginFormat::Vst3, PluginCategory::Distortion),
+            plugin("amp sim", PluginFormat::Lv2, PluginCategory::Distortion),
+            win.clone(),
+            plugin("Delay", PluginFormat::Clap, PluginCategory::Delay),
+        ]);
+        let mut f = CatalogFilter {
+            format_priority: vec![PluginFormat::Lv2, PluginFormat::Vst3],
+            ..Default::default()
+        };
+        let names: Vec<_> = c
+            .filtered(&f)
+            .iter()
+            .map(|p| (p.format, p.yabridge))
+            .collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&(PluginFormat::Lv2, false)));
+        assert!(names.contains(&(PluginFormat::Clap, false)));
+
+        // VST3 first: the native VST3 wins over the Windows one.
+        f.format_priority = vec![PluginFormat::Vst3, PluginFormat::Lv2];
+        let amp: Vec<_> = c
+            .filtered(&f)
+            .into_iter()
+            .filter(|p| p.category == PluginCategory::Distortion)
+            .collect();
+        assert_eq!(amp.len(), 1);
+        assert_eq!(amp[0].format, PluginFormat::Vst3);
+        assert!(!amp[0].yabridge);
+
+        // Windows only, then the only version left is the Windows one.
+        f.windows_only = true;
+        let w = c.filtered(&f);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].yabridge);
+    }
+
+    #[test]
+    fn instruments_include_plugins_that_say_they_are_synths() {
+        let mut c = PluginCatalog::default();
+        let mut drums = plugin("Drums", PluginFormat::Vst3, PluginCategory::Other);
+        drums.is_synth = true;
+        c.replace_plugins(vec![
+            drums,
+            plugin("Delay", PluginFormat::Lv2, PluginCategory::Delay),
+        ]);
+        let i = c.filtered(&CatalogFilter {
+            category: PluginCategory::from_label("Instrument"),
+            ..Default::default()
+        });
+        assert_eq!(i.len(), 1);
+        assert_eq!(i[0].name, "Drums");
     }
 
     #[test]

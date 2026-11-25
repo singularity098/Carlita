@@ -356,6 +356,11 @@ impl Host {
         }
     }
 
+    pub fn clear_xruns(&self) {
+        // SAFETY: valid handle.
+        unsafe { sys::carla_clear_engine_xruns(self.h) }
+    }
+
     pub fn sample_rate(&self) -> f64 {
         // SAFETY: valid handle.
         unsafe { sys::carla_get_sample_rate(self.h) }

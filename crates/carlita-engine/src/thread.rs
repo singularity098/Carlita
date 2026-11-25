@@ -1,11 +1,12 @@
 //! The engine thread: owns the Carla host and runs its idle loop.
 
 use crate::carla::{self, Host, RawCallback};
+use crate::hidden::HiddenDisplay;
 use crate::types::*;
 use carla_sys as sys;
 use carlita_core::discovery::default_search_paths;
 use carlita_core::rig::{self, LinkKind, Node, NodeIo, PortSel, RigLayout};
-use carlita_core::{PluginFormat, SlotId, TrackId};
+use carlita_core::{BinaryArch, PluginFormat, SlotId, TrackId};
 use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -277,6 +278,8 @@ struct Engine {
     /// The stem recorder's JACK client name (see `Command::SetRecorder`).
     recorder: Option<String>,
     state_dir: tempfile::TempDir,
+    /// The hidden X servers of plugins that run on one.
+    hidden: HashMap<SlotId, HiddenDisplay>,
 }
 
 impl Engine {
@@ -311,6 +314,7 @@ impl Engine {
                 .prefix("carlita-state")
                 .tempdir()
                 .expect("temp dir"),
+            hidden: HashMap::new(),
         }
     }
 
@@ -372,6 +376,11 @@ impl Engine {
         match cmd {
             Command::Start(config) => self.start(config),
             Command::Stop => self.stop(),
+            Command::ClearXruns => {
+                if self.running {
+                    self.host.clear_xruns();
+                }
+            }
             Command::QueryDrivers => {
                 self.emit(Event::Drivers(carla::drivers()));
                 if self.running && self.multi {
@@ -400,6 +409,18 @@ impl Engine {
             }
             Command::ClearRig => self.clear_rig(),
             Command::ReloadPlugin { load } => self.reload_plugin(load),
+            Command::RestartPlugin { slot, headless } => {
+                if let Some(i) = self.index_of(slot) {
+                    if !self.slots[i].placeholder {
+                        self.save_state_of(i);
+                    }
+                    if let Some(mut load) = self.slots[i].load.clone() {
+                        load.headless = headless;
+                        self.host.show_ui(i as u32, false);
+                        self.reload_plugin(load);
+                    }
+                }
+            }
             Command::CaptureStates { reply } => {
                 let states = self.capture_states();
                 let _ = reply.send(states);
@@ -696,6 +717,7 @@ impl Engine {
         }
         self.host.remove_all();
         self.host.close();
+        self.hidden.clear();
         self.running = false;
         self.multi = false;
         self.hardware = None;
@@ -751,16 +773,67 @@ impl Engine {
         }
     }
 
-    fn add_raw(&self, load: &PluginLoad) -> Result<(), String> {
+    fn add_raw(&mut self, load: &PluginLoad) -> Result<(), String> {
         let p = &load.plugin;
-        self.host.add_plugin(
+        let headless = load.headless && p.arch == BinaryArch::Native;
+        if !headless {
+            self.hidden.remove(&load.slot);
+        } else if let std::collections::hash_map::Entry::Vacant(v) = self.hidden.entry(load.slot) {
+            if let Err(e) = HiddenDisplay::start(&carla::library_folder()).map(|d| v.insert(d)) {
+                self.emit(Event::Error(format!(
+                    "Could not start a hidden display for {}: {e:#}. It is shown normally.",
+                    load.name
+                )));
+            }
+        }
+        // Carla takes the bridge's path from its options when the plugin is
+        // added: for a moment, the hidden display's folder, and bridges on
+        // even if plugins are not isolated (see `hidden`).
+        let folder = self
+            .hidden
+            .get(&load.slot)
+            .map(|d| d.folder().to_path_buf());
+        if let Some(folder) = &folder {
+            self.host.set_option(
+                sys::ENGINE_OPTION_PATH_BINARIES,
+                0,
+                Some(&folder.to_string_lossy()),
+            );
+            self.host
+                .set_option(sys::ENGINE_OPTION_PREFER_PLUGIN_BRIDGES, 1, None);
+        }
+        let result = self.host.add_plugin(
             carla::binary_type(p.arch),
             carla::plugin_type(p.format),
             &p.filename,
             &self.carla_name(Owner::Plugin(load.slot), &load.name),
             &p.label,
             p.unique_id,
-        )
+        );
+        if folder.is_some() {
+            self.host.set_option(
+                sys::ENGINE_OPTION_PATH_BINARIES,
+                0,
+                Some(&carla::library_folder().to_string_lossy()),
+            );
+            self.host.set_option(
+                sys::ENGINE_OPTION_PREFER_PLUGIN_BRIDGES,
+                self.config.isolate_plugins as i32,
+                None,
+            );
+        }
+        if result.is_err() {
+            self.hidden.remove(&load.slot);
+        }
+        result
+    }
+
+    /// `runtime_info` with the hidden display of the plugin in `slot`.
+    fn runtime_info_of(&self, id: u32, slot: SlotId) -> PluginRuntimeInfo {
+        PluginRuntimeInfo {
+            hidden_display: self.hidden.get(&slot).map(|d| d.number),
+            ..self.runtime_info(id)
+        }
     }
 
     fn add_placeholder(&self, name: &str) -> Result<(), String> {
@@ -788,6 +861,7 @@ impl Engine {
             audio_ins: ai,
             audio_outs: ao,
             midi_ins: mi,
+            hidden_display: None,
         }
     }
 
@@ -931,7 +1005,7 @@ impl Engine {
         let info = if placeholder {
             PluginRuntimeInfo::default()
         } else {
-            self.runtime_info(id)
+            self.runtime_info_of(id, load.slot)
         };
         let slot = load.slot;
         self.slots.push(Slot {
@@ -980,6 +1054,7 @@ impl Engine {
             self.host.show_ui(i as u32, false);
             if self.host.remove_plugin(i as u32) {
                 self.slots.remove(i);
+                self.hidden.remove(&slot);
                 self.drain();
                 self.dirty = true;
             } else {
@@ -1021,6 +1096,7 @@ impl Engine {
                 self.host.remove_plugin(i as u32);
             }
             self.slots.remove(i);
+            self.hidden.remove(&id);
             removed.push(id);
         }
         self.drain();
@@ -1041,7 +1117,7 @@ impl Engine {
         self.host.replace_plugin(id);
         match self.add_raw(&load) {
             Ok(()) => {
-                let info = self.runtime_info(id);
+                let info = self.runtime_info_of(id, load.slot);
                 let slot = load.slot;
                 self.slots[i] = Slot {
                     owner: Owner::Plugin(slot),

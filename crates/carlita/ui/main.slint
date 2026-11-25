@@ -304,7 +304,19 @@ export component MainWindow inherits Window {
     in property <float> track-right;
 
     // Main area.
-    in property <string> editor-mode: "empty"; // empty | embedded | params | waiting | message
+    in property <string> editor-mode: "empty"; // empty | embedded | mirror | params | waiting | message
+    // A copy of an editor that runs on a hidden display ("mirror"), the
+    // size to draw it at (shrunk to fit the area if larger), and its size in
+    // the editor's own pixels.
+    in property <image> mirror-frame;
+    in property <length> mirror-width;
+    in property <length> mirror-height;
+    in property <int> mirror-pixels-x;
+    in property <int> mirror-pixels-y;
+    // The pointer on the copy, in the editor's pixels: kind 0 move, 1 press,
+    // 2 release (button 1 left, 2 middle, 3 right), 3 horizontal and 4
+    // vertical scroll (button = steps, positive is right or up).
+    callback mirror-pointer(int, int, int, int);
     in property <string> editor-title;
     in property <string> editor-message;
     // Set at launch when no default preset loads: the empty main area then
@@ -364,6 +376,9 @@ export component MainWindow inherits Window {
     in property <string> browser-format;
     in property <string> browser-category;
     in property <bool> browser-favorites;
+    in property <bool> browser-windows;
+    in property <bool> browser-best-format;
+    in property <string> browser-format-order;
     in property <string> scan-status;
     in property <bool> scanning;
 
@@ -411,6 +426,8 @@ export component MainWindow inherits Window {
     callback browser-filter(string, string, string, bool);
     callback browser-pick(string);
     callback browser-favorite(string);
+    callback browser-toggle-windows;
+    callback browser-toggle-best-format;
     callback rescan;
     callback browser-keyboard;
     callback area-changed;
@@ -429,7 +446,7 @@ export component MainWindow inherits Window {
     function open-left() { root.left-pos = 1; root.right-pos = 0; root.top-pos = 0; root.left-by-hover = false; root.right-by-hover = false; }
     function open-top() { root.top-pos = 1; root.left-pos = 0; root.right-pos = 0; root.top-by-hover = false; root.left-by-hover = false; root.right-by-hover = false; }
     function close-top() { root.top-pos = 0; root.top-by-hover = false; }
-    function close-left() { root.left-pos = 0; root.left-by-hover = false; }
+    public function close-left() { root.left-pos = 0; root.left-by-hover = false; }
     function open-right() { root.right-pos = 1; root.left-pos = 0; root.top-pos = 0; root.left-by-hover = false; root.right-by-hover = false; }
     function close-right() { root.right-pos = 0; root.right-by-hover = false; }
 
@@ -556,6 +573,47 @@ export component MainWindow inherits Window {
             color: Theme.text-faint;
             horizontal-alignment: center;
             vertical-alignment: center;
+        }
+
+        if root.editor-mode == "mirror": Rectangle {
+            property <float> fit: min(1, min(parent.width / max(1px, root.mirror-width), parent.height / max(1px, root.mirror-height)));
+            width: root.mirror-width * self.fit;
+            height: root.mirror-height * self.fit;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            Image {
+                width: 100%;
+                height: 100%;
+                source: root.mirror-frame;
+                image-fit: fill;
+                image-rendering: smooth;
+                accessible-role: none;
+            }
+            mirror-touch := TouchArea {
+                property <int> px: clamp(floor(self.mouse-x / max(1px, self.width) * root.mirror-pixels-x), 0, max(0, root.mirror-pixels-x - 1));
+                property <int> py: clamp(floor(self.mouse-y / max(1px, self.height) * root.mirror-pixels-y), 0, max(0, root.mirror-pixels-y - 1));
+                function button(b: PointerEventButton) -> int {
+                    return b == PointerEventButton.right ? 3 : b == PointerEventButton.middle ? 2 : 1;
+                }
+                pointer-event(e) => {
+                    if e.kind == PointerEventKind.down {
+                        root.mirror-pointer(1, self.button(e.button), self.px, self.py);
+                    } else if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
+                        root.mirror-pointer(2, self.button(e.button), self.px, self.py);
+                    } else if e.kind == PointerEventKind.move {
+                        root.mirror-pointer(0, 0, self.px, self.py);
+                    }
+                }
+                scroll-event(e) => {
+                    if e.delta-y != 0 {
+                        root.mirror-pointer(4, e.delta-y > 0 ? 1 : -1, self.px, self.py);
+                    }
+                    if e.delta-x != 0 {
+                        root.mirror-pointer(3, e.delta-x > 0 ? -1 : 1, self.px, self.py);
+                    }
+                    accept
+                }
+            }
         }
 
         if root.editor-mode == "params": Flickable {
@@ -960,6 +1018,11 @@ export component MainWindow inherits Window {
         format-filter: root.browser-format;
         category-filter: root.browser-category;
         favorites-only: root.browser-favorites;
+        windows-only: root.browser-windows;
+        best-format-only: root.browser-best-format;
+        format-order: root.browser-format-order;
+        toggle-windows-only => { root.browser-toggle-windows(); }
+        toggle-best-format => { root.browser-toggle-best-format(); }
         scan-status: root.scan-status;
         scanning: root.scanning;
         filter-changed(t, f, c, fav) => { root.browser-filter(t, f, c, fav); }

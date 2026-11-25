@@ -1,6 +1,8 @@
 //! Application settings, applied immediately and saved on every change.
 
+use crate::plugin::PluginFormat;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -150,6 +152,40 @@ pub enum RecordFormat {
     Flac,
 }
 
+/// How the plugin browser lists plugins.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserSettings {
+    /// List each plugin once, in the first of `format_priority` it comes
+    /// in, when it comes in several formats.
+    pub best_format_only: bool,
+    /// Formats from most to least wanted.
+    pub format_priority: Vec<PluginFormat>,
+}
+
+impl Default for BrowserSettings {
+    fn default() -> Self {
+        Self {
+            best_format_only: false,
+            format_priority: PluginFormat::ALL.to_vec(),
+        }
+    }
+}
+
+impl BrowserSettings {
+    /// `format_priority` with every format in it once (formats it lacks,
+    /// say from an older version, go at the end).
+    pub fn priority(&self) -> Vec<PluginFormat> {
+        let mut out: Vec<PluginFormat> = Vec::new();
+        for f in self.format_priority.iter().chain(PluginFormat::ALL.iter()) {
+            if !out.contains(f) {
+                out.push(*f);
+            }
+        }
+        out
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -157,6 +193,9 @@ pub struct Settings {
     pub display: DisplaySettings,
     pub midi: MidiSettings,
     pub recording: RecordingSettings,
+    pub browser: BrowserSettings,
+    /// Presets hidden from the lists (unless hidden ones are shown).
+    pub hidden_presets: BTreeSet<String>,
     /// Preset loaded at startup.
     pub default_preset: Option<String>,
     /// Preset that was last loaded or saved (shown in the UI).

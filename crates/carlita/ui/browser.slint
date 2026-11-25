@@ -12,11 +12,19 @@ export component PluginBrowser inherits Rectangle {
     in property <string> format-filter;
     in property <string> category-filter;
     in property <bool> favorites-only;
+    // Only Windows plugins (yabridge).
+    in property <bool> windows-only;
+    // Each plugin once, in the format that comes first in Options.
+    in property <bool> best-format-only;
+    // That order, for the tip ("LV2 › VST3 › …").
+    in property <string> format-order;
     in property <string> scan-status;
     in property <bool> scanning;
     callback filter-changed(string, string, string, bool);
     callback pick(string);
     callback toggle-favorite(string);
+    callback toggle-windows-only;
+    callback toggle-best-format;
     callback rescan;
     callback close;
     callback request-keyboard;
@@ -105,8 +113,11 @@ export component PluginBrowser inherits Rectangle {
                     }
                 }
 
-                // Format chips.
-                HorizontalLayout {
+                // Format chips (scrollable when narrow).
+                Flickable {
+                    height: 48px;
+                    content-width: fmts.preferred-width;
+                    fmts := HorizontalLayout {
                     spacing: 6px;
                     alignment: start;
                     Chip {
@@ -120,6 +131,21 @@ export component PluginBrowser inherits Rectangle {
                         tip: "Show only " + f + " plugins";
                         selected: root.format-filter == f;
                         clicked => { root.filter-changed(root.search, f, root.category-filter, root.favorites-only); }
+                    }
+                    Rectangle { width: 12px; }
+                    Chip {
+                        text: "Windows";
+                        tip: root.windows-only ? "Showing only Windows plugins (yabridge): tap to show every plugin" : "Show only Windows plugins (bridged with yabridge)";
+                        selected: root.windows-only;
+                        clicked => { root.toggle-windows-only(); }
+                    }
+                    Chip {
+                        text: "Best format";
+                        tip: root.best-format-only ? "A plugin that comes in several formats is listed once, in the first of " + root.format-order + " (order set in Options › Plugins). Tap to list every format."
+                            : "List a plugin that comes in several formats only once, in the first of " + root.format-order;
+                        selected: root.best-format-only;
+                        clicked => { root.toggle-best-format(); }
+                    }
                     }
                 }
 

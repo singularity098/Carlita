@@ -70,6 +70,7 @@ export global Options {
     callback set-buffer-size(string);
     callback set-isolate(bool);
     callback restart-engine;
+    callback reset-xruns;
 
     // ---- presets
     in property <[string]> presets;
@@ -81,6 +82,12 @@ export global Options {
     callback rename-preset(string);
     callback delete-preset(string);
     callback set-default-preset(string);
+    // Whether each of `presets` is hidden (only hidden ones that are shown).
+    in property <[bool]> preset-hidden;
+    in property <int> hidden-preset-count;
+    in property <bool> show-hidden-presets;
+    callback toggle-hide-preset(string);
+    callback set-show-hidden-presets(bool);
 
     // ---- midi
     in property <[string]> midi-ports;
@@ -132,6 +139,14 @@ export global Options {
     in property <[string]> swipe-widths: ["Narrow", "Medium", "Wide", "Widest"];
     in property <string> swipe-width: "Medium";
     callback set-swipe-width(string);
+    // Running the selected plugin on a hidden display (old editors that
+    // cannot scale), and the zoom its copy is shown at.
+    in property <bool> hidden-display-possible;
+    in property <bool> hidden-display;
+    in property <[string]> hidden-zooms: ["100%", "150%", "200%", "250%", "300%"];
+    in property <string> hidden-zoom: "200%";
+    callback set-hidden-display(bool);
+    callback set-hidden-zoom(string);
 
     // ---- keyboard
     in property <bool> keyboard-visible;
@@ -142,6 +157,12 @@ export global Options {
     in property <string> plugin-count;
     in property <bool> scanning;
     callback rescan-plugins;
+    // Formats, most wanted first, and whether the browser lists a plugin
+    // that comes in several formats only once, in the first of them.
+    in property <[string]> format-priority;
+    in property <bool> best-format-only;
+    callback move-format(int, int);
+    callback set-best-format-only(bool);
     callback restart-app;
     callback quit;
     callback reboot;
@@ -211,11 +232,40 @@ component AudioPage inherits VerticalLayout {
                 font-size: Theme.font;
                 wrap: word-wrap;
             }
-            Text {
-                text: "DSP " + Options.dsp-load + "   ·   latency " + Options.latency + "   ·   xruns " + Options.xruns;
-                color: Theme.text-dim;
-                font-size: Theme.font-small;
-                font-weight: Theme.regular;
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: "DSP " + Options.dsp-load + "   ·   latency " + Options.latency + "   ·   xruns " + Options.xruns;
+                    color: Theme.text-dim;
+                    font-size: Theme.font-small;
+                    font-weight: Theme.regular;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                if Options.xruns > 0: Rectangle {
+                    width: reset-text.preferred-width + 20px;
+                    border-radius: Theme.radius;
+                    background: reset-touch.pressed ? Theme.pressed : transparent;
+                    border-width: 1px;
+                    border-color: reset-touch.has-hover ? Theme.border-hover : Theme.border-strong;
+                    reset-text := Text {
+                        text: "Reset";
+                        color: Theme.text-dim;
+                        font-size: Theme.font-small;
+                        font-weight: Theme.regular;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    reset-touch := TouchArea {
+                        clicked => { Options.reset-xruns(); }
+                    }
+                    Tip {
+                        text: "Set the xrun count back to zero";
+                        hover: reset-touch.has-hover;
+                        pressed: reset-touch.pressed;
+                    }
+                }
             }
         }
     }
@@ -309,13 +359,22 @@ component PresetsPage inherits VerticalLayout {
         }
     }
     SectionTitle { text: "PRESETS"; }
+    SettingRow {
+        label: "Show hidden presets";
+        detail: Options.hidden-preset-count == 0 ? "No presets are hidden" : Options.hidden-preset-count + " hidden";
+        Toggle {
+            tip: "List the presets you hid as well";
+            checked: Options.show-hidden-presets;
+            toggled(v) => { Options.set-show-hidden-presets(v); }
+        }
+    }
     if Options.presets.length == 0: Text {
-        text: "No presets saved yet.";
+        text: Options.hidden-preset-count > 0 ? "Every preset is hidden." : "No presets saved yet.";
         color: Theme.text-faint;
     }
-    for p in Options.presets: ListRow {
+    for p[i] in Options.presets: ListRow {
         title: p;
-        subtitle: p == Options.default-preset ? "Loads at startup" : "";
+        subtitle: (Options.preset-hidden[i] ? "Hidden" : "") + (Options.preset-hidden[i] && p == Options.default-preset ? "  ·  " : "") + (p == Options.default-preset ? "Loads at startup" : "");
         highlight: p == Options.current-preset;
         tip: "Load \"" + p + "\"";
         clicked => { Options.load-preset(p); }
@@ -339,6 +398,11 @@ component PresetsPage inherits VerticalLayout {
                 hover: star-touch.has-hover;
                 pressed: star-touch.pressed;
             }
+        }
+        BigButton {
+            icon-line: Options.preset-hidden[i] ? Icons.eye-line : Icons.eye-off-line;
+            tip: Options.preset-hidden[i] ? "Show this preset in the lists again" : "Hide this preset from the lists (Show hidden presets lists it again)";
+            clicked => { Options.toggle-hide-preset(p); }
         }
         BigButton {
             icon-line: Icons.pencil-line;
@@ -615,6 +679,33 @@ component DisplayPage inherits VerticalLayout {
         tip: "Scale for plugin editors that support it (LV2, VST3, CLAP)";
         picked(v) => { Options.set-editor-zoom(v); }
     }
+    SectionTitle { text: "OLD PLUGIN EDITORS"; }
+    Text {
+        text: Options.selected-plugin == "" ? "Select a plugin in the chain first."
+            : "For old plugins whose editors are too small and cannot scale: \"" + Options.selected-plugin + "\" runs on a hidden screen of its own, and its editor is shown here magnified. Remembered for this plugin in every preset. Changing it restarts the plugin (its settings are kept).";
+        color: Theme.text-dim;
+        font-size: Theme.font-small;
+        font-weight: Theme.regular;
+        wrap: word-wrap;
+    }
+    SettingRow {
+        label: "Hidden display";
+        detail: Options.selected-plugin == "" ? "No plugin selected"
+            : Options.hidden-display-possible || Options.hidden-display ? "Run the selected plugin's editor off screen, magnified"
+            : "Needs Xvfb (package xvfb) and a native or yabridge plugin";
+        Toggle {
+            tip: "Run the selected plugin on a hidden display (Xvfb) and show its editor magnified";
+            enabled: Options.hidden-display-possible || Options.hidden-display;
+            checked: Options.hidden-display;
+            toggled(v) => { Options.set-hidden-display(v); }
+        }
+    }
+    if Options.hidden-display: Dropdown {
+        options: Options.hidden-zooms;
+        selected: Options.hidden-zoom;
+        tip: "How much larger the hidden editor is shown";
+        picked(v) => { Options.set-hidden-zoom(v); }
+    }
 }
 
 // Rescanning plugins, quitting or restarting Carlita, and the computer's
@@ -628,6 +719,39 @@ component SystemPage inherits VerticalLayout {
         tip: "Look for newly installed plugins (" + Options.plugin-count + ")";
         clicked => { Options.rescan-plugins(); }
     }
+    SectionTitle { text: "PLUGIN FORMATS"; }
+    SettingRow {
+        label: "Best format only";
+        detail: "List a plugin that comes in several formats once, in the first format below";
+        Toggle {
+            tip: "The plugin browser's Best format chip does the same";
+            checked: Options.best-format-only;
+            toggled(v) => { Options.set-best-format-only(v); }
+        }
+    }
+    Text {
+        text: "Most wanted first. A native plugin comes before a Windows one (yabridge) of the same format.";
+        color: Theme.text-dim;
+        font-size: Theme.font-small;
+        font-weight: Theme.regular;
+        wrap: word-wrap;
+    }
+    for f[i] in Options.format-priority: ListRow {
+        title: (i + 1) + ".  " + f;
+        BigButton {
+            icon-line: Icons.chevron-up;
+            tip: "Prefer " + f + " to the format above";
+            enabled: i > 0;
+            clicked => { Options.move-format(i, -1); }
+        }
+        BigButton {
+            icon-line: Icons.chevron-down;
+            tip: "Prefer the format below to " + f;
+            enabled: i < Options.format-priority.length - 1;
+            clicked => { Options.move-format(i, 1); }
+        }
+    }
+    SectionTitle { text: "COMPUTER"; }
     BigButton {
         text: "Quit Carlita";
         icon-line: Icons.close;

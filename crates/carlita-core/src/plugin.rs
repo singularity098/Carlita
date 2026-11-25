@@ -79,6 +79,8 @@ pub enum BinaryArch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PluginCategory {
+    /// Instruments of every kind (Carla calls them synths): synths,
+    /// samplers, drum machines, bass instruments.
     Synth,
     Delay,
     Eq,
@@ -106,7 +108,7 @@ impl PluginCategory {
 
     pub fn label(self) -> &'static str {
         match self {
-            PluginCategory::Synth => "Synth",
+            PluginCategory::Synth => "Instrument",
             PluginCategory::Delay => "Delay",
             PluginCategory::Eq => "EQ",
             PluginCategory::Filter => "Filter",
@@ -121,7 +123,7 @@ impl PluginCategory {
     /// Parses the category names printed by `carla-discovery`.
     pub fn from_discovery(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
-            "synth" => PluginCategory::Synth,
+            "synth" | "instrument" => PluginCategory::Synth,
             "delay" => PluginCategory::Delay,
             "eq" => PluginCategory::Eq,
             "filter" => PluginCategory::Filter,
@@ -188,6 +190,21 @@ impl PluginDescriptor {
             self.label,
             self.unique_id
         )
+    }
+
+    /// Whether the plugin is listed under `category`. Every plugin that
+    /// says it is an instrument counts as one, whatever category it gives.
+    pub fn in_category(&self, category: PluginCategory) -> bool {
+        self.category == category || (category == PluginCategory::Synth && self.is_synth)
+    }
+
+    /// The category shown for the plugin.
+    pub fn shown_category(&self) -> PluginCategory {
+        if self.is_synth {
+            PluginCategory::Synth
+        } else {
+            self.category
+        }
     }
 
     /// Lowercase text the search box matches against.

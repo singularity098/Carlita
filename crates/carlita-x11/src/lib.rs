@@ -16,5 +16,6 @@
 //! drawn where it is covered.
 
 mod host;
+pub mod mirror;
 
 pub use host::{Area, EditorHost, HostCommand, HostEvent};

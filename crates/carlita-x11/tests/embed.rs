@@ -111,6 +111,7 @@ fn embeds_hides_and_hands_back() {
         title: "carlita-editor-42".into(),
         parent: main,
         resizable: false,
+        slow: false,
     });
     let size = wait(&host, |e| match e {
         HostEvent::Attached { key, width, height } => Some((key, width, height)),
@@ -224,6 +225,7 @@ fn embeds_hides_and_hands_back() {
         title: "carlita-editor-43".into(),
         parent: main,
         resizable: false,
+        slow: false,
     });
     wait(&host, |e| {
         matches!(e, HostEvent::Attached { key: 43, .. }).then_some(())
@@ -252,6 +254,7 @@ fn embeds_hides_and_hands_back() {
         title: "carlita-editor-44".into(),
         parent: main,
         resizable: true,
+        slow: false,
     });
     wait(&host, |e| {
         matches!(e, HostEvent::Attached { key: 44, .. }).then_some(())
@@ -298,6 +301,7 @@ fn finds_an_editor_with_its_own_title() {
         title: "carlita-editor-7".into(),
         parent: main,
         resizable: false,
+        slow: false,
     });
     std::thread::sleep(Duration::from_millis(200));
     let editor = window(&conn, root, 240, 160, b"Xythos");
@@ -374,6 +378,7 @@ fn edges_f11_and_focus() {
         title: "carlita-editor-7".into(),
         parent: main,
         resizable: false,
+        slow: false,
     });
     wait(&host, |e| match e {
         HostEvent::Attached { .. } => Some(()),
@@ -673,6 +678,7 @@ fn editors_that_keep_their_shape_or_size() {
         title: "carlita-editor-60".into(),
         parent: main,
         resizable: true,
+        slow: false,
     });
     wait(&host, |e| {
         matches!(e, HostEvent::Attached { key: 60, .. }).then_some(())
@@ -699,6 +705,7 @@ fn editors_that_keep_their_shape_or_size() {
         title: "carlita-editor-61".into(),
         parent: main,
         resizable: true,
+        slow: false,
     });
     wait(&host, |e| {
         matches!(e, HostEvent::Attached { key: 61, .. }).then_some(())
@@ -760,6 +767,7 @@ fn editors_that_keep_their_shape_or_size() {
         title: "carlita-editor-62".into(),
         parent: main,
         resizable: false,
+        slow: false,
     });
     wait(&host, |e| {
         matches!(e, HostEvent::Attached { key: 62, .. }).then_some(())
@@ -834,6 +842,7 @@ fn wine_editors_hear_where_they_are() {
         title: "carlita-editor-70".into(),
         parent: main,
         resizable: false,
+        slow: false,
     });
     wait(&host, |e| {
         matches!(e, HostEvent::Attached { key: 70, .. }).then_some(())

@@ -37,6 +37,7 @@ fn load(slot: u64, label: &str) -> PluginLoad {
         name: format!("{label}-{slot}"),
         bypassed: false,
         state: None,
+        headless: false,
     }
 }
 

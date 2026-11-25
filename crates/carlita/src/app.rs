@@ -20,6 +20,7 @@ use carlita_engine::{
     editor_window_title, Command, EngineConfig, EngineHandle, Event, Meters, MidiDevice,
     PluginLoad, PluginRuntimeInfo,
 };
+use carlita_x11::mirror::{Mirror, MirrorCommand, MirrorEvent, PointerAction};
 use carlita_x11::{Area, EditorHost, HostCommand, HostEvent};
 use crossbeam_channel::Receiver;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
@@ -102,6 +103,8 @@ pub struct App {
     settings: Settings,
     catalog: PluginCatalog,
     filter: CatalogFilter,
+    /// The preset lists show hidden presets too.
+    show_hidden_presets: bool,
     presets: PresetStore,
     rig: Rig,
     /// The track shown in the chain panel.
@@ -132,6 +135,10 @@ pub struct App {
     reload_chain_on_start: bool,
     tried_fallback: bool,
     editor_host: Option<EditorHost>,
+    /// Shows editors that run on a hidden display (X11 only).
+    mirror: Option<Mirror>,
+    /// The plugin shown through the mirror, and its zoom (percent).
+    mirrored: Option<(SlotId, u32)>,
     /// Whether editors can be shown inside the main window (X11 only).
     embed_available: bool,
     /// What the editor host was last told: the main area, and the part of
@@ -240,13 +247,14 @@ fn strings(v: impl IntoIterator<Item = impl AsRef<str>>) -> ModelRc<SharedString
     ModelRc::new(VecModel::from(v.into_iter().map(ss).collect::<Vec<_>>()))
 }
 
-fn load_of(s: &ChainSlot) -> PluginLoad {
+fn load_of(s: &ChainSlot, catalog: &PluginCatalog) -> PluginLoad {
     PluginLoad {
         slot: s.id,
         plugin: s.plugin.clone(),
         name: s.name.clone(),
         bypassed: s.bypassed,
         state: s.state.clone(),
+        headless: catalog.headless_zoom(&s.plugin).is_some(),
     }
 }
 
@@ -307,6 +315,7 @@ impl App {
             settings,
             catalog,
             filter: CatalogFilter::default(),
+            show_hidden_presets: false,
             presets,
             rig,
             view_track,
@@ -330,6 +339,8 @@ impl App {
             embed_available: editor_host.is_some(),
             editor_area: None,
             edge_state: None,
+            mirror: editor_host.is_some().then(Mirror::spawn),
+            mirrored: None,
             editor_host,
             system: SystemWorker::spawn(),
             midi,
@@ -710,6 +721,8 @@ impl App {
                     format: PluginFormat::from_label(&format),
                     category: PluginCategory::from_label(&category),
                     favorites_only: fav,
+                    windows_only: a.filter.windows_only,
+                    format_priority: Vec::new(),
                 };
                 a.refresh_browser();
             }
@@ -719,6 +732,15 @@ impl App {
         on!(ui, on_browser_favorite, |a, key: SharedString| {
             a.catalog.toggle_favorite(&key);
             a.save_catalog();
+            a.refresh_browser();
+        });
+        on!(ui, on_browser_toggle_windows, |a| {
+            a.filter.windows_only = !a.filter.windows_only;
+            a.refresh_browser();
+        });
+        on!(ui, on_browser_toggle_best_format, |a| {
+            a.settings.browser.best_format_only = !a.settings.browser.best_format_only;
+            a.save_settings();
             a.refresh_browser();
         });
         on!(ui, on_rescan, |a| a.start_scan());
@@ -868,6 +890,57 @@ impl App {
             a.restart_engine();
         });
         on!(o, on_restart_engine, |a| a.restart_engine());
+        on!(o, on_reset_xruns, |a| a.engine.send(Command::ClearXruns));
+        on!(o, on_set_hidden_display, |a, on: bool| {
+            let zoom = a
+                .selected
+                .and_then(|s| a.rig.get(s))
+                .and_then(|s| a.catalog.headless_zoom(&s.plugin))
+                .unwrap_or(200);
+            a.set_hidden_display(on.then_some(zoom));
+        });
+        on!(o, on_set_hidden_zoom, |a, v: SharedString| {
+            if let Ok(z) = v.trim_end_matches('%').trim().parse::<u32>() {
+                a.set_hidden_display(Some(z));
+            }
+        });
+        on!(
+            ui,
+            on_mirror_pointer,
+            |a, kind: i32, button: i32, x: i32, y: i32| {
+                let (Some((slot, _)), Some(m)) = (a.mirrored, &a.mirror) else {
+                    return;
+                };
+                let action = match kind {
+                    1 => PointerAction::Press(button.clamp(1, 9) as u8),
+                    2 => PointerAction::Release(button.clamp(1, 9) as u8),
+                    3 => PointerAction::Scroll { dx: button, dy: 0 },
+                    4 => PointerAction::Scroll { dx: 0, dy: button },
+                    _ => PointerAction::Move,
+                };
+                m.send(MirrorCommand::Pointer {
+                    key: slot.0,
+                    action,
+                    x,
+                    y,
+                });
+            }
+        );
+        on!(o, on_move_format, |a, index: i32, delta: i32| {
+            let mut order = a.settings.browser.priority();
+            let (i, j) = (index as usize, (index + delta) as usize);
+            if index >= 0 && index + delta >= 0 && i < order.len() && j < order.len() {
+                order.swap(i, j);
+                a.settings.browser.format_priority = order;
+                a.save_settings();
+                a.refresh_browser();
+            }
+        });
+        on!(o, on_set_best_format_only, |a, v: bool| {
+            a.settings.browser.best_format_only = v;
+            a.save_settings();
+            a.refresh_browser();
+        });
 
         // ---- options: presets
         on!(o, on_save_preset, |a| {
@@ -893,6 +966,18 @@ impl App {
             Confirm::DeletePreset(name.to_string()),
             format!("Delete the preset \"{name}\"?")
         ));
+        on!(o, on_toggle_hide_preset, |a, name: SharedString| {
+            let name = name.to_string();
+            if !a.settings.hidden_presets.remove(&name) {
+                a.settings.hidden_presets.insert(name);
+            }
+            a.save_settings();
+            a.refresh_presets();
+        });
+        on!(o, on_set_show_hidden_presets, |a, show: bool| {
+            a.show_hidden_presets = show;
+            a.refresh_presets();
+        });
         on!(o, on_set_default_preset, |a, name: SharedString| {
             a.settings.default_preset = (!name.is_empty()).then(|| name.to_string());
             a.save_settings();
@@ -1058,6 +1143,21 @@ impl App {
             .unwrap_or_default();
         for e in host_events {
             self.on_host_event(e);
+        }
+        // Only the newest picture of a mirrored editor is worth drawing.
+        let mirror_events: Vec<MirrorEvent> = self
+            .mirror
+            .as_ref()
+            .map(|m| m.events().try_iter().collect())
+            .unwrap_or_default();
+        let last_frame = mirror_events
+            .iter()
+            .rposition(|e| matches!(e, MirrorEvent::Frame { .. }));
+        for (i, e) in mirror_events.into_iter().enumerate() {
+            if matches!(e, MirrorEvent::Frame { .. }) && Some(i) != last_frame {
+                continue;
+            }
+            self.on_mirror_event(e);
         }
         // Also from here, not only from `area-changed`: a sidebar or the
         // track bar sliding in by itself may not report every step.
@@ -1231,7 +1331,10 @@ impl App {
     }
 
     fn loads(&self) -> Vec<PluginLoad> {
-        self.rig.slots().map(load_of).collect()
+        self.rig
+            .slots()
+            .map(|s| load_of(s, &self.catalog))
+            .collect()
     }
 
     fn load_rig(&mut self) {
@@ -1921,7 +2024,8 @@ impl App {
             return;
         }
         let slot = self.rig.new_slot(desc);
-        let load = load_of(&slot);
+        let id = slot.id;
+        let load = load_of(&slot, &self.catalog);
         self.runtime.insert(slot.id, SlotRuntime::default());
         match self.add_target.take() {
             Some(loc) => {
@@ -1933,6 +2037,10 @@ impl App {
         }
         self.engine.send(Command::AddPlugin { load });
         self.rig_changed();
+        // Go straight to the new plugin: fold the chain away and show its
+        // editor (once it has loaded).
+        self.select(Some(id));
+        self.ui().invoke_close_left();
     }
 
     fn remove_slot(&mut self, id: SlotId) {
@@ -1959,7 +2067,7 @@ impl App {
     fn undo_remove(&mut self) {
         let Some(u) = self.undo.take() else { return };
         self.ui().set_undo_text(ss(""));
-        let load = load_of(&u.slot);
+        let load = load_of(&u.slot, &self.catalog);
         self.runtime.insert(u.slot.id, SlotRuntime::default());
         let loc = self.rig.insert(u.location, u.slot);
         self.view_track = loc.track;
@@ -2097,7 +2205,7 @@ impl App {
                 Some(SlotStatus::Crashed(_) | SlotStatus::Failed(_))
             ) {
                 if let Some(s) = self.rig.get(id) {
-                    let load = load_of(s);
+                    let load = load_of(s, &self.catalog);
                     self.runtime.entry(id).or_default().status = SlotStatus::Loading;
                     self.engine.send(Command::ReloadPlugin { load });
                 }
@@ -2127,9 +2235,30 @@ impl App {
             return;
         };
         let name = s.name.clone();
+        let slow = s.plugin.yabridge;
         let rt = self.runtime.get(&slot);
         let info = rt.and_then(|r| r.info.clone());
+        let zoom = self.catalog.headless_zoom(&s.plugin).unwrap_or(200);
         match (rt.map(|r| &r.status), info) {
+            (Some(SlotStatus::Ready), Some(info))
+                if info.has_custom_ui && info.hidden_display.is_some() && self.mirror.is_some() =>
+            {
+                let display = info.hidden_display.unwrap_or_default();
+                if let Some(m) = &self.mirror {
+                    m.send(MirrorCommand::Show {
+                        key: slot.0,
+                        display,
+                    });
+                }
+                self.engine.send(Command::ShowEditor { slot, show: true });
+                self.mirrored = Some((slot, zoom));
+                let ui = self.ui();
+                ui.set_mirror_frame(slint::Image::default());
+                ui.set_mirror_width(0.0);
+                ui.set_mirror_height(0.0);
+                ui.set_editor_title(ss(&name));
+                ui.set_editor_mode(ss("waiting"));
+            }
             (Some(SlotStatus::Ready), Some(info)) if info.has_custom_ui => {
                 let parent = if self.embed_available {
                     self.main_x11_window()
@@ -2145,6 +2274,7 @@ impl App {
                         title: editor_window_title(slot),
                         parent,
                         resizable: info.resizable_ui,
+                        slow,
                     });
                     self.engine.send(Command::ShowEditor { slot, show: true });
                     self.editor = Some(EditorView { slot });
@@ -2183,7 +2313,12 @@ impl App {
             if let Some(h) = &self.editor_host {
                 h.send(HostCommand::Detach { key: slot.0 });
             }
+            if let Some(m) = &self.mirror {
+                m.send(MirrorCommand::Hide { key: slot.0 });
+            }
         }
+        self.mirrored = None;
+        self.ui().set_mirror_frame(slint::Image::default());
         self.editor = None;
         self.clear_editor_snapshot();
         self.ui().set_editor_mode(ss("empty"));
@@ -2207,8 +2342,22 @@ impl App {
         let ui = self.ui();
         let o = ui.global::<Options>();
         match self.selected.and_then(|s| self.rig.get(s)) {
-            Some(s) => o.set_selected_plugin(ss(&s.name)),
-            None => o.set_selected_plugin(ss("")),
+            Some(s) => {
+                o.set_selected_plugin(ss(&s.name));
+                let zoom = self.catalog.headless_zoom(&s.plugin);
+                o.set_hidden_display_possible(
+                    self.mirror.is_some()
+                        && s.plugin.arch == carlita_core::BinaryArch::Native
+                        && carlita_engine::hidden::available(),
+                );
+                o.set_hidden_display(zoom.is_some());
+                o.set_hidden_zoom(ss(format!("{}%", zoom.unwrap_or(200))));
+            }
+            None => {
+                o.set_selected_plugin(ss(""));
+                o.set_hidden_display_possible(false);
+                o.set_hidden_display(false);
+            }
         }
     }
 
@@ -2394,6 +2543,13 @@ impl App {
                     ui.set_snapshot_height(height as f32 / scale);
                 }
             }
+            HostEvent::SnapshotStale { key } => {
+                if self.editor.as_ref().is_some_and(|ed| ed.slot.0 == key) {
+                    // Keep its size, so the plugin's name is not shown
+                    // either: just the flat background.
+                    self.ui().set_editor_snapshot(slint::Image::default());
+                }
+            }
             HostEvent::Unavailable(reason) => {
                 log::warn!("editor embedding unavailable: {reason}");
                 self.embed_available = false;
@@ -2401,12 +2557,127 @@ impl App {
         }
     }
 
+    fn on_mirror_event(&mut self, e: MirrorEvent) {
+        let Some((slot, zoom)) = self.mirrored else {
+            return;
+        };
+        match e {
+            MirrorEvent::Frame {
+                key,
+                width,
+                height,
+                rgba,
+            } if key == slot.0 => {
+                let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                    &rgba, width, height,
+                );
+                let ui = self.ui();
+                // The zoom is in real pixels: one editor pixel becomes
+                // zoom/100 of the screen's, whatever Carlita's own scale.
+                let per_pixel = zoom as f32 / 100.0 / ui.window().scale_factor();
+                ui.set_mirror_frame(slint::Image::from_rgba8(buf));
+                ui.set_mirror_width(width as f32 * per_pixel);
+                ui.set_mirror_height(height as f32 * per_pixel);
+                ui.set_mirror_pixels_x(width as i32);
+                ui.set_mirror_pixels_y(height as i32);
+                if ui.get_editor_mode() != "mirror" {
+                    ui.set_editor_mode(ss("mirror"));
+                }
+            }
+            MirrorEvent::NotFound { key } if key == slot.0 => {
+                let name = self
+                    .rig
+                    .get(slot)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+                log::warn!(
+                    "editor of {name} not found on its hidden display; showing generic controls"
+                );
+                self.engine.send(Command::ShowEditor { slot, show: false });
+                self.mirrored = None;
+                self.engine.send(Command::QueryParameters { slot });
+                let ui = self.ui();
+                ui.set_editor_title(ss(&name));
+                ui.set_editor_mode(ss("params"));
+            }
+            MirrorEvent::Lost { key } if key == slot.0 => {
+                let name = self
+                    .rig
+                    .get(slot)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+                self.mirrored = None;
+                self.set_editor_message(
+                    &format!("{name}: editor closed"),
+                    "Tap the plugin in the chain to open it again.",
+                );
+                self.selected = None;
+                self.refresh_slots();
+            }
+            _ => {}
+        }
+    }
+
+    /// Turns the hidden display on or off for the selected plugin (every
+    /// copy of it, in any preset), or changes its zoom.
+    fn set_hidden_display(&mut self, zoom: Option<u32>) {
+        let Some(id) = self.selected else { return };
+        let Some(desc) = self.rig.get(id).map(|s| s.plugin.clone()) else {
+            return;
+        };
+        let was = self.catalog.headless_zoom(&desc);
+        self.catalog.set_headless(&desc, zoom);
+        self.save_catalog();
+        if was.is_some() != zoom.is_some() {
+            // Every copy of the plugin starts again, on or off the hidden
+            // display, keeping its settings.
+            let copies: Vec<SlotId> = self
+                .rig
+                .slots()
+                .filter(|s| s.plugin.key() == desc.key())
+                .map(|s| s.id)
+                .collect();
+            let shown = self.selected;
+            self.hide_editor();
+            for slot in copies {
+                self.runtime.entry(slot).or_default().status = SlotStatus::Loading;
+                self.engine.send(Command::RestartPlugin {
+                    slot,
+                    headless: zoom.is_some(),
+                });
+            }
+            self.selected = None;
+            self.select(shown);
+        } else if let (Some((slot, _)), Some(z)) = (self.mirrored, zoom) {
+            self.mirrored = Some((slot, z));
+            let ui = self.ui();
+            let per_pixel = z as f32 / 100.0 / ui.window().scale_factor();
+            ui.set_mirror_width(ui.get_mirror_pixels_x() as f32 * per_pixel);
+            ui.set_mirror_height(ui.get_mirror_pixels_y() as f32 * per_pixel);
+        }
+        self.update_editor_ui();
+    }
+
     // ============================================================== presets
 
     fn refresh_presets(&self) {
         let ui = self.ui();
         let o = ui.global::<Options>();
-        o.set_presets(strings(self.presets.list()));
+        let all = self.presets.list();
+        let hidden = &self.settings.hidden_presets;
+        let shown: Vec<_> = all
+            .iter()
+            .filter(|p| self.show_hidden_presets || !hidden.contains(p.as_str()))
+            .collect();
+        o.set_preset_hidden(ModelRc::new(VecModel::from(
+            shown
+                .iter()
+                .map(|p| hidden.contains(p.as_str()))
+                .collect::<Vec<bool>>(),
+        )));
+        o.set_hidden_preset_count(all.iter().filter(|p| hidden.contains(p.as_str())).count() as i32);
+        o.set_show_hidden_presets(self.show_hidden_presets);
+        o.set_presets(strings(shown));
         o.set_current_preset(ss(self.settings.current_preset.clone().unwrap_or_default()));
         o.set_default_preset(ss(self.settings.default_preset.clone().unwrap_or_default()));
     }
@@ -2505,6 +2776,9 @@ impl App {
                     if self.settings.current_preset.as_deref() == Some(old.as_str()) {
                         self.settings.current_preset = Some(new.clone());
                     }
+                    if self.settings.hidden_presets.remove(&old) {
+                        self.settings.hidden_presets.insert(new.clone());
+                    }
                     if self.settings.default_preset.as_deref() == Some(old.as_str()) {
                         self.settings.default_preset = Some(new);
                     }
@@ -2575,6 +2849,7 @@ impl App {
                 if self.settings.default_preset.as_deref() == Some(name.as_str()) {
                     self.settings.default_preset = None;
                 }
+                self.settings.hidden_presets.remove(&name);
                 self.save_settings();
                 self.refresh_presets();
                 self.refresh_slots();
@@ -2609,16 +2884,25 @@ impl App {
     // ============================================================== browser
 
     fn refresh_browser(&self) {
+        let priority = self.settings.browser.priority();
+        let filter = CatalogFilter {
+            format_priority: if self.settings.browser.best_format_only {
+                priority.clone()
+            } else {
+                Vec::new()
+            },
+            ..self.filter.clone()
+        };
         let items: Vec<PluginItem> = self
             .catalog
-            .filtered(&self.filter)
+            .filtered(&filter)
             .into_iter()
             .map(|p| PluginItem {
                 key: ss(p.key()),
                 name: ss(&p.name),
                 maker: ss(&p.maker),
                 format: ss(p.format.label()),
-                category: ss(p.category.label()),
+                category: ss(p.shown_category().label()),
                 favorite: self.catalog.is_favorite(p),
                 bridged: p.yabridge,
                 synth: p.is_synth,
@@ -2629,6 +2913,14 @@ impl App {
         ui.set_browser_format(ss(self.filter.format.map(|f| f.label()).unwrap_or("")));
         ui.set_browser_category(ss(self.filter.category.map(|c| c.label()).unwrap_or("")));
         ui.set_browser_favorites(self.filter.favorites_only);
+        ui.set_browser_windows(self.filter.windows_only);
+        ui.set_browser_best_format(self.settings.browser.best_format_only);
+        let order: Vec<&str> = priority.iter().map(|f| f.label()).collect();
+        ui.set_browser_format_order(ss(order.join(" › ")));
+        ui.global::<Options>()
+            .set_format_priority(strings(order.iter().map(|s| s.to_string())));
+        ui.global::<Options>()
+            .set_best_format_only(self.settings.browser.best_format_only);
         ui.global::<Options>().set_plugin_count(ss(format!(
             "{} plugins in the library",
             self.catalog.plugins.len()
@@ -3083,6 +3375,7 @@ impl App {
         self.hide_editor();
         // Dropping the host waits until every window has been handed back.
         self.editor_host = None;
+        self.mirror = None;
         self.embed_available = false;
     }
 

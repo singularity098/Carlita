@@ -11,6 +11,7 @@
 //! differ, so plugins are added, moved and bypassed while audio keeps running.
 
 mod carla;
+pub mod hidden;
 mod thread;
 mod types;
 
