@@ -401,6 +401,7 @@ export component MainWindow inherits Window {
     // ----------------------------------------------------------- callbacks
     callback select-slot(int);
     callback toggle-bypass(int, bool);
+    callback flip-bypass;
     callback remove-slot(int);
     callback drag-hover(int, length);
     callback drag-drop(int);
@@ -838,6 +839,7 @@ export component MainWindow inherits Window {
             root.close-left();
         }
         toggle-bypass(id, b) => { root.toggle-bypass(id, b); }
+        flip-bypass => { root.flip-bypass(); }
         remove(id) => { root.remove-slot(id); }
         drag-hover(row, y) => { root.drag-hover(row, y); }
         drag-drop(row) => { root.drag-drop(row); }

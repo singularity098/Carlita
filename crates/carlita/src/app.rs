@@ -700,6 +700,7 @@ impl App {
                 a.rig_changed();
             }
         });
+        on!(ui, on_flip_bypass, |a| a.flip_bypass());
         on!(ui, on_toggle_mute, |a| {
             if let Some(t) = a.rig.track_mut(a.view_track) {
                 t.muted = !t.muted;
@@ -2193,6 +2194,26 @@ impl App {
             self.engine.send(Command::SetBypass { slot: id, bypassed });
             self.refresh_slots();
         }
+    }
+
+    /// Flips every plugin on the shown track: the ones that are on are
+    /// bypassed and the bypassed ones turn on, so two plugins (one on, one
+    /// off) can be swapped with one tap.
+    fn flip_bypass(&mut self) {
+        let Some(t) = self.rig.track(self.view_track) else {
+            return;
+        };
+        let flips: Vec<(SlotId, bool)> = t.slots().map(|s| (s.id, !s.bypassed)).collect();
+        if flips.is_empty() {
+            return;
+        }
+        for (id, bypassed) in flips {
+            if let Some(s) = self.rig.get_mut(id) {
+                s.bypassed = bypassed;
+                self.engine.send(Command::SetBypass { slot: id, bypassed });
+            }
+        }
+        self.refresh_slots();
     }
 
     // =============================================================== editor

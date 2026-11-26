@@ -22,6 +22,8 @@ touchscreen.
   MIDI device when it sends something, and the options set how many inputs
   the interface has.
 * Add, remove, reorder, split and bypass plugins while audio keeps running.
+  **Flip** (next to Mute) turns every plugin on the track that's on off, and
+  every bypassed one on, so one tap swaps between two plugins.
 * Tracks are tabs in the top bar, which Carlita draws itself in place of the
   window manager's title bar. In fullscreen, it comes down when the mouse
   rests at the **top** edge (and goes when the mouse leaves it), or swipe

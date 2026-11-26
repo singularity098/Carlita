@@ -731,6 +731,8 @@ export component ChainPanel inherits Rectangle {
     in property <length> drop-y: -1px;
     callback select(int);
     callback toggle-bypass(int, bool);
+    // Every plugin on the track: on ones off, off ones on.
+    callback flip-bypass;
     callback remove(int);
     // Row dragged, and the y of its centre in the list.
     callback drag-hover(int, length);
@@ -866,6 +868,12 @@ export component ChainPanel inherits Rectangle {
                 tip: root.track-muted ? "Muted: tap to hear this track again" : "Silence this track";
                 selected: root.track-muted;
                 clicked => { root.toggle-mute(); }
+            }
+            if root.slots.length > 0: Chip {
+                y: (parent.height - self.height) / 2;
+                text: "Flip";
+                tip: "Turn every plugin that's on off, and every bypassed one on";
+                clicked => { root.flip-bypass(); }
             }
             BigSlider {
                 horizontal-stretch: 1;
